@@ -112,9 +112,14 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	anthState := apicompat.NewResponsesEventToAnthropicState()
 	chatState := apicompat.NewResponsesEventToChatState()
 	var firstToken *int
+	clientDisconnected := false
 	seq := 0
 	emit := func(e apicompat.ResponsesStreamEvent) error {
-		if !req.Stream {
+		if !req.Stream || clientDisconnected {
+			return nil
+		}
+		if ctx.Err() != nil {
+			clientDisconnected = true
 			return nil
 		}
 		if !c.Writer.Written() {
@@ -123,11 +128,19 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			c.Header("X-Accel-Buffering", "no")
 		}
 		write := func(text string) error {
-			_, err := c.Writer.Write([]byte(text))
-			if err == nil {
-				c.Writer.Flush()
+			if ctx.Err() != nil {
+				clientDisconnected = true
 			}
-			return err
+			if clientDisconnected {
+				return nil
+			}
+			_, err := c.Writer.Write([]byte(text))
+			if err != nil {
+				clientDisconnected = true
+				return nil
+			}
+			c.Writer.Flush()
+			return nil
 		}
 		e.SequenceNumber = seq
 		seq++
@@ -162,18 +175,22 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		return nil
 	}
 	decoder := devin.NewEventDecoder(original, emit)
+	drainInterval := 3 * time.Minute
+	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+		drainInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		wire.ChatModelUid = req.Model
 		wire.ModelAssignmentJwt = nil
 		base, prepErr := client.Prepare(ctx, token, wire, selected.GetModelInfo().GetIsModelRouter())
 		err = prepErr
 		if err == nil {
-			err = consumeDevinChat(ctx, c, client, base, token, wire, decoder, req.Stream, &firstToken, started)
+			err = consumeDevinChat(ctx, c, client, base, token, wire, decoder, req.Stream, &firstToken, &clientDisconnected, drainInterval, started)
 		}
 		if err == nil {
 			err = decoder.Finish()
 		}
-		if !devin.IsUnauthenticated(err) || decoder.Started || attempt > 0 || a.GetCredential("api_key") == "" {
+		if clientDisconnected || ctx.Err() != nil || !devin.IsUnauthenticated(err) || decoder.Started || attempt > 0 || a.GetCredential("api_key") == "" {
 			break
 		}
 		token, err = s.devin.RecoverToken(ctx, a, token)
@@ -185,12 +202,15 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	if billingModel == "" {
 		billingModel = req.Model
 	}
-	result := &OpenAIForwardResult{Model: original, BillingModel: billingModel, UpstreamModel: wire.ChatModelUid, UpstreamResponseModel: decoder.ActualModel, ResponseID: decoder.Response.ID, Stream: req.Stream, Duration: time.Since(started), FirstTokenMs: firstToken, UpstreamEndpoint: devin.ChatPath}
+	result := &OpenAIForwardResult{Model: original, BillingModel: billingModel, UpstreamModel: wire.ChatModelUid, UpstreamResponseModel: decoder.ActualModel, ResponseID: decoder.Response.ID, Stream: req.Stream, Duration: time.Since(started), FirstTokenMs: firstToken, ClientDisconnect: clientDisconnected || ctx.Err() != nil, UpstreamEndpoint: devin.ChatPath}
 	if u := decoder.Response.Usage; u != nil {
 		result.Usage = OpenAIUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheCreationInputTokens: u.CacheCreationInputTokens}
 		if u.InputTokensDetails != nil {
 			result.Usage.CacheReadInputTokens = u.InputTokensDetails.CachedTokens
 		}
+	}
+	if result.ClientDisconnect {
+		return result, err
 	}
 	if err != nil {
 		if !c.Writer.Written() {
@@ -211,7 +231,6 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			_ = emit(apicompat.ResponsesStreamEvent{Type: "response.failed", Response: &apicompat.ResponsesResponse{ID: decoder.Response.ID, Object: "response", CreatedAt: decoder.Response.CreatedAt, Model: original, Status: "failed", Output: decoder.Response.Output, Error: &apicompat.ResponsesError{Code: "upstream_error", Message: "Devin stream failed"}}})
 		}
 		c.Writer.Flush()
-		result.ClientDisconnect = ctx.Err() != nil
 		return result, err
 	}
 	if !req.Stream {
@@ -224,16 +243,44 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			c.JSON(200, decoder.Response)
 		}
 	} else if protocol == "chat" {
-		_, _ = c.Writer.WriteString("data: [DONE]\n\n")
-		c.Writer.Flush()
+		if _, writeErr := c.Writer.WriteString("data: [DONE]\n\n"); writeErr != nil {
+			result.ClientDisconnect = true
+		} else {
+			c.Writer.Flush()
+		}
 	}
 	return result, nil
 }
 
 // consumeDevinChat serializes content and keepalive writes on the request goroutine.
-func consumeDevinChat(ctx context.Context, c *gin.Context, client *devin.Client, base, token string, wire *pb.GetChatMessageRequest, decoder *devin.EventDecoder, stream bool, firstToken **int, started time.Time) error {
-	ctx, cancel := context.WithCancel(ctx)
+func consumeDevinChat(ctx context.Context, c *gin.Context, client *devin.Client, base, token string, wire *pb.GetChatMessageRequest, decoder *devin.EventDecoder, stream bool, firstToken **int, clientDisconnected *bool, drainInterval time.Duration, started time.Time) error {
+	if err := ctx.Err(); err != nil {
+		*clientDisconnected = true
+		return err
+	}
+	upstreamCtx, release := detachStreamUpstreamContext(ctx, stream)
+	defer release()
+	upstreamCtx, cancel := context.WithCancel(upstreamCtx)
 	defer cancel()
+	requestDone := ctx.Done()
+	var drainTimer *time.Timer
+	var drainExpired <-chan time.Time
+	resetDrainTimer := func() {
+		if drainInterval <= 0 {
+			drainInterval = 3 * time.Minute
+		}
+		if drainTimer == nil {
+			drainTimer = time.NewTimer(drainInterval)
+			drainExpired = drainTimer.C
+		} else {
+			drainTimer.Reset(drainInterval)
+		}
+	}
+	defer func() {
+		if drainTimer != nil {
+			drainTimer.Stop()
+		}
+	}()
 	type event struct {
 		message *pb.GetChatMessageResponse
 		err     error
@@ -241,31 +288,40 @@ func consumeDevinChat(ctx context.Context, c *gin.Context, client *devin.Client,
 	}
 	events := make(chan event, 1)
 	go func() {
-		err := client.Chat(ctx, base, token, wire, func(m *pb.GetChatMessageResponse) error {
+		err := client.Chat(upstreamCtx, base, token, wire, func(m *pb.GetChatMessageResponse) error {
 			select {
 			case events <- event{message: m}:
 				return nil
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-upstreamCtx.Done():
+				return upstreamCtx.Err()
 			}
 		})
 		select {
 		case events <- event{err: err, done: true}:
-		case <-ctx.Done():
+		case <-upstreamCtx.Done():
 		}
 	}()
 	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-requestDone:
+			*clientDisconnected = true
+			if !stream {
+				return ctx.Err()
+			}
+			requestDone = nil
+			resetDrainTimer()
+		case <-drainExpired:
+			return errors.New("devin stream data interval timeout after client disconnect")
 		case <-tick.C:
-			if stream && decoder.Started {
+			if stream && decoder.Started && !*clientDisconnected {
 				if _, err := c.Writer.WriteString(": keepalive\n\n"); err != nil {
-					return err
+					*clientDisconnected = true
+					resetDrainTimer()
+				} else {
+					c.Writer.Flush()
 				}
-				c.Writer.Flush()
 			}
 		case e := <-events:
 			if e.done {
@@ -278,6 +334,9 @@ func consumeDevinChat(ctx context.Context, c *gin.Context, client *devin.Client,
 			}
 			if err := decoder.Apply(m); err != nil {
 				return err
+			}
+			if *clientDisconnected {
+				resetDrainTimer()
 			}
 		}
 	}
