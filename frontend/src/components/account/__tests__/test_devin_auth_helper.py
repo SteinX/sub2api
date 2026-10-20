@@ -21,6 +21,7 @@ class DevinHelperTest(unittest.TestCase):
         payload = b'{"code":"one-shot","state":"nonce","pairing_ticket":"ephemeral"}'
         failures = [urllib.error.URLError("temporary connection failure")]
         failures.extend(urllib.error.HTTPError(config["callback_url"], status, "temporary", {}, io.BytesIO()) for status in (408, 429, 503))
+        failures.append(urllib.error.HTTPError(config["callback_url"], 409, "busy", {}, io.BytesIO(b'{"reason":"DEVIN_AUTH_BUSY"}')))
         for failure in failures:
             with self.subTest(failure=failure):
                 response = io.BytesIO(b'{"data":{"status":"ready"}}')
@@ -32,6 +33,14 @@ class DevinHelperTest(unittest.TestCase):
     def test_does_not_retry_permanent_callback_failure(self):
         config = {"callback_url": "https://sub2api.example/callback"}
         failure = urllib.error.HTTPError(config["callback_url"], 400, "invalid ticket", {}, io.BytesIO())
+        with patch.object(helper.urllib.request, "urlopen", side_effect=failure) as send, patch.object(helper.time, "sleep") as sleep:
+            self.assertFalse(helper.deliver_callback(config, b'{}', time.time() + 10))
+        self.assertEqual(send.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_does_not_retry_unrelated_conflicts(self):
+        config = {"callback_url": "https://sub2api.example/callback"}
+        failure = urllib.error.HTTPError(config["callback_url"], 409, "conflict", {}, io.BytesIO(b'{"reason":"OTHER_CONFLICT"}'))
         with patch.object(helper.urllib.request, "urlopen", side_effect=failure) as send, patch.object(helper.time, "sleep") as sleep:
             self.assertFalse(helper.deliver_callback(config, b'{}', time.time() + 10))
         self.assertEqual(send.call_count, 1)

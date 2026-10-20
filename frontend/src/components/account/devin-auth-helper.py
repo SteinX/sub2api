@@ -26,6 +26,12 @@ def deliver_callback(config, payload, deadline):
             return isinstance(data, dict) and data.get("status") in ("ready", "connected")
         except urllib.error.HTTPError as error:
             retryable = error.code in (408, 429) or 500 <= error.code < 600
+            if error.code == 409:
+                try:
+                    detail = json.loads(error.read(16 * 1024))
+                    retryable = isinstance(detail, dict) and detail.get("reason") == "DEVIN_AUTH_BUSY"
+                except (OSError, ValueError):
+                    retryable = False
             error.close()
             if not retryable:
                 return False
