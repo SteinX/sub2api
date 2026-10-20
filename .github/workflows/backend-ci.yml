@@ -62,6 +62,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Frontend typecheck and critical vitest
         run: make test-frontend
+      - name: Devin browser callback helper tests
+        run: python3 -m unittest discover -s frontend/src/components/account/__tests__ -p 'test_devin_auth_helper.py'
 
   golangci-lint:
     runs-on: ubuntu-latest

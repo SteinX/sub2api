@@ -145,7 +145,7 @@ func (c *Client) unary(ctx context.Context, base, path, token string, in, out pr
 		return err
 	}
 	if len(b) > 8<<20 {
-		return errors.New("Devin unary response too large")
+		return errors.New("devin unary response too large")
 	}
 	if r.StatusCode != 200 {
 		return responseError(r.StatusCode, b)
@@ -215,7 +215,7 @@ func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessa
 		return "", err
 	}
 	if out.UserJwt == "" {
-		return "", errors.New("Devin returned no user JWT")
+		return "", errors.New("devin returned no user JWT")
 	}
 	req.Metadata = Metadata(token)
 	req.Metadata.UserJwt = out.UserJwt
@@ -223,7 +223,7 @@ func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessa
 	if out.CustomApiServerUrl != "" {
 		u, parseErr := url.Parse(out.CustomApiServerUrl)
 		if parseErr != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			return "", errors.New("Devin returned an invalid account API host")
+			return "", errors.New("devin returned an invalid account API host")
 		}
 		base = out.CustomApiServerUrl
 	}

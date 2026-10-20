@@ -59,11 +59,12 @@ func (h *DevinHandler) Start(c *gin.Context) {
 	}
 	var out service.DevinAuthView
 	var err error
-	if in.Mode == "browser" {
+	switch in.Mode {
+	case "browser":
 		out, err = h.devin.StartAuth(c.Request.Context(), devinOwner(c), in.ProxyID, in.AccountID)
-	} else if in.Mode == "key" || in.Mode == "import" {
+	case "key", "import":
 		out, err = h.devin.ImportAuth(c.Request.Context(), devinOwner(c), in.Content, in.ProxyID, in.AccountID)
-	} else {
+	default:
 		response.BadRequest(c, "Unknown Devin connection mode")
 		return
 	}

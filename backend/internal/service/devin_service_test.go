@@ -27,10 +27,14 @@ import (
 )
 
 type devinHTTP struct {
-	handle func(*http.Request) (*http.Response, error)
+	handle  func(*http.Request) (*http.Response, error)
+	observe func(*http.Request, int64)
 }
 
-func (h *devinHTTP) Do(r *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+func (h *devinHTTP) Do(r *http.Request, _ string, id int64, _ int) (*http.Response, error) {
+	if h.observe != nil {
+		h.observe(r, id)
+	}
 	return h.handle(r)
 }
 func (h *devinHTTP) DoWithTLS(r *http.Request, p string, id int64, n int, _ *tlsfingerprint.Profile) (*http.Response, error) {
@@ -71,7 +75,7 @@ func devinFakeUpstream(t *testing.T, mints, exchanges *atomic.Int32) *devinHTTP 
 			if q.Metadata.UserJwt != "user-jwt" {
 				t.Error("missing user JWT")
 			}
-			b, _ = proto.Marshal(&pb.GetChatMessageResponse{MessageId: "message", DeltaText: "hello", Usage: &pb.ModelUsageStats{InputTokens: 11, OutputTokens: 3, CacheReadTokens: 5, CacheWriteTokens: 2}, StopReason: pb.StopReason_STOP_REASON_STOP_PATTERN})
+			b, _ = proto.Marshal(&pb.GetChatMessageResponse{MessageId: "message", DeltaText: "hello", Usage: &pb.ModelUsageStats{InputTokens: 11, OutputTokens: 3, CacheReadTokens: 5, CacheWriteTokens: 2, BillingModelUid: "billed-swe-model"}, StopReason: pb.StopReason_STOP_REASON_STOP_PATTERN})
 			data := append(devinTestFrame(0, b), devinTestFrame(2, []byte(`{}`))...)
 			return devinReply(200, data), nil
 		}
@@ -128,6 +132,42 @@ func TestDevinBrowserAuthorizationOwnershipAndState(t *testing.T) {
 	}
 	if _, err = d.LoadAuth(ctx, view.ID, 7); err == nil {
 		t.Fatal("cancelled session retained")
+	}
+}
+
+func TestDevinAuthorizationTransportIsolation(t *testing.T) {
+	d, _, _ := devinTestService(t)
+	upstream, ok := d.upstream.(*devinHTTP)
+	if !ok {
+		t.Fatal("missing upstream test double")
+	}
+	var ids []int64
+	upstream.observe = func(_ *http.Request, id int64) { ids = append(ids, id) }
+	ctx := context.Background()
+	seen := map[int64]bool{}
+	for _, owner := range []int64{7, 8} {
+		ids = nil
+		view, err := d.StartAuth(ctx, owner, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, _ := url.Parse(view.AuthURL)
+		ready, err := d.CompleteAuth(ctx, view.ID, "code", u.Query().Get("state"), view.PairingTicket, -1)
+		if err != nil || ready.Status != "ready" {
+			t.Fatal(err, ready)
+		}
+		if len(ids) != 2 || ids[0] >= 0 || ids[0] != ids[1] || seen[ids[0]] {
+			t.Fatalf("exchange/discovery transport IDs were not stable and isolated: %v", ids)
+		}
+		seen[ids[0]] = true
+	}
+	ids = nil
+	view, err := d.ImportAuth(ctx, 9, "login-token", nil, 0)
+	if err != nil || view.Status != "ready" {
+		t.Fatal(err, view)
+	}
+	if len(ids) != 1 || ids[0] >= 0 || seen[ids[0]] {
+		t.Fatalf("import reused another authorization's transport: %v", ids)
 	}
 }
 
@@ -213,6 +253,9 @@ func TestDevinGatewayProtocolsAndAccounting(t *testing.T) {
 				if result.Usage.InputTokens != 18 || result.Usage.CacheCreationInputTokens != 2 || result.Usage.CacheReadInputTokens != 5 || result.Usage.OutputTokens != 3 {
 					t.Fatal(result.Usage)
 				}
+				if result.BillingModel != "billed-swe-model" || result.Model != "swe-2-max" {
+					t.Fatalf("upstream billing model was not propagated: %+v", result)
+				}
 				if w.Code != 200 {
 					t.Fatal(w.Code, w.Body.String())
 				}
@@ -227,5 +270,29 @@ func TestDevinGatewayProtocolsAndAccounting(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestDevinGatewayBillingModelFallback(t *testing.T) {
+	d, _, _ := devinTestService(t)
+	upstream, ok := d.upstream.(*devinHTTP)
+	if !ok {
+		t.Fatal("missing upstream test double")
+	}
+	original := upstream.handle
+	upstream.handle = func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != devin.ChatPath {
+			return original(r)
+		}
+		b, _ := proto.Marshal(&pb.GetChatMessageResponse{DeltaText: "hello", Usage: &pb.ModelUsageStats{InputTokens: 1, OutputTokens: 1}, StopReason: pb.StopReason_STOP_REASON_STOP_PATTERN})
+		return devinReply(200, append(devinTestFrame(0, b), devinTestFrame(2, []byte(`{}`))...)), nil
+	}
+	a := &Account{ID: 1, Platform: PlatformDevin, Type: AccountTypeOAuth, Credentials: map[string]any{"access_token": "test"}}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	result, err := (&OpenAIGatewayService{devin: d}).forwardDevin(context.Background(), c, a, []byte(`{"model":"swe-2-max","input":"hello"}`), "responses", "session", "")
+	if err != nil || result == nil || result.BillingModel != "swe-2-max" {
+		t.Fatalf("missing billing UID did not fall back to the requested model: %v, %v", result, err)
 	}
 }

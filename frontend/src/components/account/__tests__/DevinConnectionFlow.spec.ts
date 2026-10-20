@@ -50,6 +50,62 @@ describe('Devin connection lifecycle', () => {
     wrapper.unmount()
   })
 
+  it.each([undefined, 429, 503])('recovers polling after a transient status failure %s and commits once', async (status) => {
+    vi.useFakeTimers()
+    api.start.mockResolvedValue({ ...ready, status: 'waiting' })
+    api.status.mockRejectedValueOnce(Object.assign(new Error('Temporary connection failure'), { response: status ? { status } : undefined }))
+      .mockResolvedValueOnce(ready)
+    const wrapper = mount(DevinConnectionFlow, { props: { settings } })
+    await wrapper.get('input[value=browser]').setValue()
+    await wrapper.get('button').trigger('click'); await flushPromises()
+    expect(api.status).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[role=alert]').text()).toContain('Temporary connection failure')
+    await vi.advanceTimersByTimeAsync(3000); await flushPromises()
+    expect(api.status).toHaveBeenCalledTimes(2)
+    expect(api.commit).toHaveBeenCalledOnce()
+    expect(wrapper.emitted('connected')).toHaveLength(1)
+    expect(wrapper.find('[role=alert]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('stops retrying when the component is closed', async () => {
+    vi.useFakeTimers()
+    api.start.mockResolvedValue({ ...ready, status: 'waiting' })
+    api.status.mockRejectedValue(new Error('Temporary connection failure'))
+    const wrapper = mount(DevinConnectionFlow, { props: { settings } })
+    await wrapper.get('input[value=browser]').setValue()
+    await wrapper.get('button').trigger('click'); await flushPromises()
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(api.status).toHaveBeenCalledTimes(1)
+    expect(api.commit).not.toHaveBeenCalled()
+  })
+
+  it.each([400, 401, 403])('does not retry a permanent status failure %s', async (status) => {
+    vi.useFakeTimers()
+    api.start.mockResolvedValue({ ...ready, status: 'waiting' })
+    api.status.mockRejectedValue({ response: { status } })
+    const wrapper = mount(DevinConnectionFlow, { props: { settings } })
+    await wrapper.get('input[value=browser]').setValue()
+    await wrapper.get('button').trigger('click'); await flushPromises()
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(api.status).toHaveBeenCalledTimes(1)
+    expect(api.commit).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does not retry after the authorization expires', async () => {
+    vi.useFakeTimers()
+    api.start.mockResolvedValue({ ...ready, status: 'waiting', expires_at: Math.floor(Date.now() / 1000) - 1 })
+    api.status.mockRejectedValue(new Error('Temporary connection failure'))
+    const wrapper = mount(DevinConnectionFlow, { props: { settings } })
+    await wrapper.get('input[value=browser]').setValue()
+    await wrapper.get('button').trigger('click'); await flushPromises()
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(api.status).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
   it('does not create an account after the user leaves a pending validation', async () => {
     let resolve: (value: typeof ready) => void = () => {}
     api.start.mockReturnValue(new Promise(r => { resolve = r }))

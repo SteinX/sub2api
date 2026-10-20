@@ -200,6 +200,43 @@ func TestRequestHistoryAndTenantIsolation(t *testing.T) {
 		t.Fatal("unsupported partial history accepted")
 	}
 }
+func TestRequestRejectsMalformedToolHistory(t *testing.T) {
+	call := `{"type":"function_call","call_id":"a","name":"tool","arguments":"{}"}`
+	result := `{"type":"function_call_output","call_id":"a","output":"observation"}`
+	for _, tc := range []struct{ name, input string }{
+		{"orphan result", "[" + result + "]"},
+		{"missing result", "[" + call + "]"},
+		{"duplicate results", "[" + call + "," + result + "," + result + "]"},
+		{"duplicate calls", "[" + call + "," + call + "," + result + "]"},
+		{"result before call", "[" + result + "," + call + "]"},
+		{"empty result ID", "[" + call + `,{"type":"function_call_output","output":"observation"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := BuildRequest(&apicompat.ResponsesRequest{Model: "model", Input: json.RawMessage(tc.input)}, "tenant:session"); err == nil {
+				t.Fatal("malformed history was accepted")
+			}
+		})
+	}
+}
+
+func TestDecoderRetainsReportedBillingModel(t *testing.T) {
+	d := NewEventDecoder("router", func(apicompat.ResponsesStreamEvent) error { return nil })
+	for _, m := range []*pb.GetChatMessageResponse{
+		{DeltaText: "answer", Usage: &pb.ModelUsageStats{InputTokens: 3, OutputTokens: 1, BillingModelUid: "concrete-billing-model"}},
+		{Usage: &pb.ModelUsageStats{InputTokens: 3, OutputTokens: 2}, StopReason: pb.StopReason_STOP_REASON_STOP_PATTERN},
+	} {
+		if err := d.Apply(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if d.BillingModel != "concrete-billing-model" || d.Response.Model != "router" {
+		t.Fatal("billing identity was lost or replaced the client-facing model")
+	}
+}
+
 func TestDecoderToolFragmentsUsageAndFailure(t *testing.T) {
 	var events []apicompat.ResponsesStreamEvent
 	d := NewEventDecoder("alias", func(e apicompat.ResponsesStreamEvent) error { events = append(events, e); return nil })

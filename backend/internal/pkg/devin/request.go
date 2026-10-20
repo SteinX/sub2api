@@ -129,7 +129,11 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 		q.ChatMessagePrompts = append(q.ChatMessagePrompts, p)
 	}
 	// Cascade pairs calls/results in order. Keep each call immediately before its result.
-	q.ChatMessagePrompts = pairTools(q.ChatMessagePrompts)
+	paired, err := pairTools(q.ChatMessagePrompts)
+	if err != nil {
+		return nil, err
+	}
+	q.ChatMessagePrompts = paired
 	seen := map[string]bool{}
 	for _, t := range r.Tools {
 		if t.Type != "function" {
@@ -181,7 +185,7 @@ func inputContent(raw json.RawMessage) (string, []*pb.ImageData, error) {
 	for _, p := range parts {
 		switch p.Type {
 		case "text", "input_text", "output_text":
-			text.WriteString(p.Text)
+			_, _ = text.WriteString(p.Text)
 		case "input_image":
 			meta, data, ok := strings.Cut(p.ImageURL, ",")
 			if !ok || !strings.HasPrefix(meta, "data:image/") || !strings.HasSuffix(meta, ";base64") {
@@ -198,11 +202,30 @@ func inputContent(raw json.RawMessage) (string, []*pb.ImageData, error) {
 	return text.String(), images, nil
 }
 
-func pairTools(in []*pb.ChatMessagePrompt) []*pb.ChatMessagePrompt {
+func pairTools(in []*pb.ChatMessagePrompt) ([]*pb.ChatMessagePrompt, error) {
 	results := map[string]*pb.ChatMessagePrompt{}
+	calls := map[string]bool{}
 	for _, p := range in {
 		if p.Source == pb.ChatMessageSource_CHAT_MESSAGE_SOURCE_TOOL {
+			if p.ToolCallId == "" || !calls[p.ToolCallId] {
+				return nil, fmt.Errorf("tool result requires a preceding function_call with the same call_id")
+			}
+			if _, exists := results[p.ToolCallId]; exists {
+				return nil, fmt.Errorf("duplicate tool result call_id")
+			}
 			results[p.ToolCallId] = p
+			continue
+		}
+		for _, call := range p.ToolCalls {
+			if call == nil || call.Id == "" || calls[call.Id] {
+				return nil, fmt.Errorf("function_call IDs must be nonempty and unique")
+			}
+			calls[call.Id] = true
+		}
+	}
+	for id := range calls {
+		if _, exists := results[id]; !exists {
+			return nil, fmt.Errorf("function_call requires a matching tool result")
 		}
 	}
 	var out []*pb.ChatMessagePrompt
@@ -217,7 +240,7 @@ func pairTools(in []*pb.ChatMessagePrompt) []*pb.ChatMessagePrompt {
 		for _, call := range p.ToolCalls {
 			cp, ok := proto.Clone(p).(*pb.ChatMessagePrompt)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("could not copy Devin tool history")
 			}
 			cp.ToolCalls = []*pb.ChatToolCall{call}
 			out = append(out, cp)
@@ -226,7 +249,7 @@ func pairTools(in []*pb.ChatMessagePrompt) []*pb.ChatMessagePrompt {
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // CredentialFingerprint invalidates runtime caches when credentials or proxy change.

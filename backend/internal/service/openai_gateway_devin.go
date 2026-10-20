@@ -181,7 +181,11 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			break
 		}
 	}
-	result := &OpenAIForwardResult{Model: original, BillingModel: req.Model, UpstreamModel: wire.ChatModelUid, UpstreamResponseModel: decoder.ActualModel, ResponseID: decoder.Response.ID, Stream: req.Stream, Duration: time.Since(started), FirstTokenMs: firstToken, UpstreamEndpoint: devin.ChatPath}
+	billingModel := decoder.BillingModel
+	if billingModel == "" {
+		billingModel = req.Model
+	}
+	result := &OpenAIForwardResult{Model: original, BillingModel: billingModel, UpstreamModel: wire.ChatModelUid, UpstreamResponseModel: decoder.ActualModel, ResponseID: decoder.Response.ID, Stream: req.Stream, Duration: time.Since(started), FirstTokenMs: firstToken, UpstreamEndpoint: devin.ChatPath}
 	if u := decoder.Response.Usage; u != nil {
 		result.Usage = OpenAIUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheCreationInputTokens: u.CacheCreationInputTokens}
 		if u.InputTokensDetails != nil {
@@ -196,13 +200,14 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			}
 			return nil, s.devinForwardFailure(c, a, err)
 		}
-		if protocol == "anthropic" {
+		switch protocol {
+		case "anthropic":
 			b, _ := json.Marshal(gin.H{"type": "error", "error": gin.H{"type": "api_error", "message": "Devin stream failed"}})
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", b)
-		} else if protocol == "chat" {
+		case "chat":
 			b, _ := json.Marshal(gin.H{"error": gin.H{"type": "upstream_error", "message": "Devin stream failed"}})
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
-		} else {
+		default:
 			_ = emit(apicompat.ResponsesStreamEvent{Type: "response.failed", Response: &apicompat.ResponsesResponse{ID: decoder.Response.ID, Object: "response", CreatedAt: decoder.Response.CreatedAt, Model: original, Status: "failed", Output: decoder.Response.Output, Error: &apicompat.ResponsesError{Code: "upstream_error", Message: "Devin stream failed"}}})
 		}
 		c.Writer.Flush()

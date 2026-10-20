@@ -78,12 +78,19 @@ async function poll() {
   try {
     const current = await devinAPI.status(id)
     if (stopped || session.value?.id !== id) return
+    error.value = ''
     session.value = { ...session.value, ...current }
     if (current.status === 'connected') { sessionStorage.removeItem(storageKey.value); emit('connected'); return }
     if (current.status === 'ready') { await commit(); return }
     if (current.status === 'failed') return
     timer = setTimeout(poll, 1500)
-  } catch (e) { if (!stopped) showError(e) }
+  } catch (e) {
+    if (stopped || session.value?.id !== id) return
+    showError(e)
+    const status = (e as { response?: { status?: number } }).response?.status
+    const recoverable = !status || status === 408 || status === 429 || status >= 500
+    if (recoverable && Date.now() < session.value.expires_at * 1000) timer = setTimeout(poll, 3000)
+  }
 }
 async function start() {
   busy.value = true; error.value = ''

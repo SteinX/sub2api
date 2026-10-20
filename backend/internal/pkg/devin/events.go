@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
@@ -27,6 +28,7 @@ type EventDecoder struct {
 	stop            pb.StopReason
 	Started         bool
 	ActualModel     string
+	BillingModel    string
 }
 
 func NewEventDecoder(model string, emit func(apicompat.ResponsesStreamEvent) error) *EventDecoder {
@@ -106,6 +108,9 @@ func (d *EventDecoder) Apply(m *pb.GetChatMessageResponse) error {
 	}
 	if m.Usage != nil {
 		u := m.Usage
+		if model := strings.TrimSpace(u.BillingModelUid); model != "" {
+			d.BillingModel = model
+		}
 		d.Response.Usage = &apicompat.ResponsesUsage{InputTokens: int(u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens), OutputTokens: int(u.OutputTokens), TotalTokens: int(u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens), CacheCreationInputTokens: int(u.CacheWriteTokens), InputTokensDetails: &apicompat.ResponsesInputTokensDetails{CachedTokens: int(u.CacheReadTokens), CacheCreationTokens: int(u.CacheWriteTokens)}}
 	}
 	if m.DeltaText == "" && m.DeltaThinking == "" && m.DeltaSignature == "" && len(m.DeltaToolCalls) == 0 {

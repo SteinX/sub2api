@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +52,14 @@ func DevinAuthSummary(session *DevinAuthSession) DevinAuthView {
 	return DevinAuthView{ID: session.ID, Status: session.Status, Models: session.Models, AutoRecover: key != "" || session.AutoRecover, Error: session.Error, AccountID: session.AccountID, ExpiresAt: session.ExpiresAt}
 }
 func devinSessionKey(id string) string { return "devin:auth:" + id }
+
+// Reserve negative transport IDs for temporary authorization sessions so they
+// never share a pool with persisted accounts or other administrators' sessions.
+func (v *DevinAuthSession) transportID() int64 {
+	hash := sha256.Sum256([]byte("devin:auth:transport:" + v.ID))
+	return -int64(binary.BigEndian.Uint64(hash[:8])>>1) - 1
+}
+
 func (s *DevinService) SaveAuth(ctx context.Context, session *DevinAuthSession) error {
 	if s.store == nil {
 		return errors.New("Devin authorization requires Redis")
@@ -123,7 +133,7 @@ func (s *DevinService) StartAuth(ctx context.Context, owner int64, proxyID *int6
 }
 func (s *DevinService) ValidateAuth(ctx context.Context, v *DevinAuthSession) error {
 	v.AutoRecover = v.Credentials["api_key"] != nil
-	a := &Account{Platform: PlatformDevin, Type: AccountTypeOAuth, Credentials: v.Credentials, ProxyID: v.ProxyID, Concurrency: 1}
+	a := &Account{ID: v.transportID(), Platform: PlatformDevin, Type: AccountTypeOAuth, Credentials: v.Credentials, ProxyID: v.ProxyID, Concurrency: 1}
 	models, err := s.Models(ctx, a)
 	if err != nil {
 		return err
@@ -213,7 +223,7 @@ func (s *DevinService) CompleteAuth(ctx context.Context, id, code, state, ticket
 	if err = s.SaveAuth(ctx, v); err != nil {
 		return DevinAuthView{}, err
 	}
-	a := &Account{ProxyID: v.ProxyID, Concurrency: 1, Credentials: map[string]any{}}
+	a := &Account{ID: v.transportID(), ProxyID: v.ProxyID, Concurrency: 1, Credentials: map[string]any{}}
 	client, err := s.Client(ctx, a)
 	if err == nil {
 		var token string
