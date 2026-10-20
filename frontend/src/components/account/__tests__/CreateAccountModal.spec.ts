@@ -145,6 +145,7 @@ function mountModal(groups: any[] = []) {
       stubs: {
         BaseDialog: BaseDialogStub,
         OAuthAuthorizationFlow: OAuthAuthorizationFlowStub,
+        DevinConnectionFlow: true,
         ConfirmDialog: true,
         Select: true,
         Icon: true,
@@ -198,6 +199,22 @@ async function openCodexImportStep(toggleClicks = 0) {
   await wrapper.get('form#create-account-form').trigger('submit.prevent')
   return wrapper
 }
+
+describe('CreateAccountModal Devin authorization', () => {
+  it('keeps the Devin title and connection flow through both wizard steps', async () => {
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="platform-button-devin"]').trigger('click')
+    expect(wrapper.text()).toContain('admin.accounts.devin.title')
+    expect(wrapper.text()).not.toContain('admin.accounts.oauth.title')
+
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Devin account')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    expect(wrapper.text()).toContain('admin.accounts.devin.title')
+    expect(wrapper.findComponent({ name: 'DevinConnectionFlow' }).exists()).toBe(true)
+    expect(wrapper.findComponent(OAuthAuthorizationFlowStub).exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
   beforeEach(() => {
