@@ -1,22 +1,28 @@
 # Fork release synchronization
 
 `Sync upstream release` checks `Wei-Shaw/sub2api` every hour at minute 17 (UTC),
-and can also be run manually. GitHub may delay scheduled runs. It runs once when
-its synchronization files are updated on `SteinX/sub2api` main.
+and can also be run manually. GitHub may delay scheduled runs. It also runs after
+updates to `SteinX/sub2api` main, including integration commits made by the agent.
 
 When the latest published stable upstream release has no corresponding fork
 release, it merges upstream **main** into fork **main**, preserving fork commits.
 This intentionally includes upstream commits made after the stable release tag.
-Conflicts stop the workflow without overwriting fork changes. Draft and upstream
-prereleases are excluded.
+Conflicts stop the mechanical merge without overwriting fork changes. The hourly
+agent then reads both sides, resolves ordinary integration conflicts, preserves
+fork behavior, validates the result and updates main through a reviewable commit
+or pull request. A main update triggers this workflow again. Only unresolved
+product decisions, missing access or persistent failures need user intervention.
+Draft and upstream prereleases are excluded.
 
 Frontend lint, type checking and critical tests, plus backend unit and integration
 tests, must pass before an immutable annotated tag such as `v0.2.17-stx.1` is
 created. The existing full `Release` workflow is then explicitly dispatched to
 build binaries, checksums and GHCR images. It does not depend on tag-push events
-from `GITHUB_TOKEN`, which cannot trigger another workflow. The SemVer fork suffix
-makes the GitHub Release a prerelease under the existing GoReleaser configuration;
-the existing image publisher still updates `latest` after a successful build.
+from `GITHUB_TOKEN`, which cannot trigger another workflow. The `-stx.N` suffix
+identifies the fork build. The publisher marks these as stable GitHub Releases so
+the fork's `/releases/latest` API, installer and updater can discover them. Other
+prerelease suffixes retain the usual GoReleaser prerelease behavior. The image
+publisher updates `latest` after a successful build.
 The fork suffix is written into the built artifact, while main's tracked VERSION
 stays aligned with upstream to avoid a version-file conflict on the next sync.
 
@@ -28,11 +34,26 @@ next run validates that frozen tag and resumes publication. Failed release runs
 require inspection and rerunning the failed jobs in GitHub Actions; scheduled
 checks do not repeatedly retry a known failed publication.
 
+The recurring agent owns upstream integration and publication follow-up; Actions
+executes the checks, builds and publication. A conflict or code failure is a work
+item for the agent to investigate and repair, not merely a notification to the
+user. It must inspect existing integration work and active runs before starting
+another attempt. It must never force-push main, move release tags or bypass tests.
+
 No personal access token is required. The workflow uses its repository-scoped
 `GITHUB_TOKEN` with `contents: write` and `actions: write`; the existing Release
 workflow requests `packages: write` for GHCR. Actions must be enabled on the fork,
 and repository rules must allow the bot to update main. No deployed server is
 upgraded by this workflow.
+
+Fork release binaries have their update repository injected at build time as
+`SteinX/sub2api`. Release installation instructions pin the installer to the same
+tag and explicitly pass `GITHUB_REPO=SteinX/sub2api`; a fork installer can also be
+run manually with that environment variable. GHCR uses the lowercased full GitHub
+repository name, and registry authentication uses `github.actor` with the token.
+DockerHub publication and Telegram announcements are off by default on forks;
+enable them deliberately with `PUBLISH_DOCKERHUB=true` / `PUBLISH_TELEGRAM=true`
+repository variables and the corresponding credentials, if wanted.
 
 Monitor both [synchronization runs](https://github.com/SteinX/sub2api/actions/workflows/sync-upstream.yml)
 and [release runs](https://github.com/SteinX/sub2api/actions/workflows/release.yml).

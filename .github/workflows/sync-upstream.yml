@@ -7,10 +7,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
-      - .github/workflows/sync-upstream.yml
-      - .github/sync-upstream.cjs
-      - .github/test-sync-upstream.cjs
 
 concurrency:
   group: sync-upstream-release
