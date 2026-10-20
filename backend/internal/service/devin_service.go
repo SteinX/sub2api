@@ -120,6 +120,9 @@ func (s *DevinService) Token(ctx context.Context, a *Account, force bool) (strin
 }
 
 func (s *DevinService) token(ctx context.Context, a *Account, force bool, failed string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	key := s.runtimeKey(a)
 	if a.GetCredential("api_key") == "" {
 		token := a.GetCredential("access_token")
@@ -142,13 +145,24 @@ func (s *DevinService) token(ctx context.Context, a *Account, force bool, failed
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		result, err, _ := s.flights.Do("token:"+key, func() (any, error) {
-			return s.loadOrMintToken(ctx, a, key, force, failed)
+		pending := s.flights.DoChan("token:"+key, func() (any, error) {
+			sharedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			return s.loadOrMintToken(sharedCtx, a, key, force, failed)
 		})
-		if err != nil {
+		var result singleflight.Result
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case result = <-pending:
+		}
+		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		token, ok := result.(string)
+		if result.Err != nil {
+			return "", result.Err
+		}
+		token, ok := result.Val.(string)
 		if !ok {
 			return "", errors.New("invalid Devin token cache result")
 		}
@@ -261,6 +275,9 @@ func (s *DevinService) RecoverToken(ctx context.Context, a *Account, failed stri
 }
 
 func (s *DevinService) Models(ctx context.Context, a *Account) ([]*pb.ClientModelConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	key := s.runtimeKey(a)
 	s.mu.Lock()
 	e := s.runtime[key]
@@ -268,22 +285,22 @@ func (s *DevinService) Models(ctx context.Context, a *Account) ([]*pb.ClientMode
 	if e.models != nil && time.Now().Before(e.modelsUntil) {
 		return e.models, nil
 	}
-	value, err, _ := s.flights.Do("models:"+key, func() (any, error) {
-		token, err := s.Token(ctx, a, false)
-		if err != nil {
-			return nil, err
-		}
-		client, err := s.Client(ctx, a)
-		if err != nil {
-			return nil, err
-		}
-		probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	pending := s.flights.DoChan("models:"+key, func() (any, error) {
+		sharedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		models, err := client.Models(probeCtx, token)
+		token, err := s.Token(sharedCtx, a, false)
+		if err != nil {
+			return nil, err
+		}
+		client, err := s.Client(sharedCtx, a)
+		if err != nil {
+			return nil, err
+		}
+		models, err := client.Models(sharedCtx, token)
 		if devin.IsUnauthenticated(err) && a.GetCredential("api_key") != "" {
-			token, err = s.RecoverToken(probeCtx, a, token)
+			token, err = s.RecoverToken(sharedCtx, a, token)
 			if err == nil {
-				models, err = client.Models(probeCtx, token)
+				models, err = client.Models(sharedCtx, token)
 			}
 		}
 		if err != nil {
@@ -297,10 +314,19 @@ func (s *DevinService) Models(ctx context.Context, a *Account) ([]*pb.ClientMode
 		s.mu.Unlock()
 		return models, nil
 	})
-	if err != nil {
+	var result singleflight.Result
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result = <-pending:
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	models, ok := value.([]*pb.ClientModelConfig)
+	if result.Err != nil {
+		return nil, result.Err
+	}
+	models, ok := result.Val.([]*pb.ClientModelConfig)
 	if !ok {
 		return nil, errors.New("invalid Devin model cache result")
 	}
