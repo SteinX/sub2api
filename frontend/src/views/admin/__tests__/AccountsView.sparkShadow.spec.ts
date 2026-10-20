@@ -137,13 +137,19 @@ describe('admin AccountsView — 外审 F2:spark 影子创建接线', () => {
     wrapper.unmount()
   })
 
-  it('reloads accounts when Devin reauthorization finishes without an account payload', async () => {
+  it('preserves the current page when Devin reauthorization finishes without an account payload', async () => {
+    listAccounts.mockResolvedValue({ items: [], total: 60, page: 1, page_size: 20, pages: 3 })
     const wrapper = mountView()
+    await flushPromises()
+    const pagination = wrapper.getComponent({ name: 'Pagination' })
+    pagination.vm.$emit('update:page', 2)
     await flushPromises()
     const before = listAccounts.mock.calls.length
     wrapper.findComponent({ name: 'ReAuthAccountModal' }).vm.$emit('reauthorized')
     await flushPromises()
     expect(listAccounts.mock.calls.length).toBeGreaterThan(before)
+    expect(listAccounts.mock.calls.at(-1)?.[0]).toBe(2)
+    expect(pagination.props('page')).toBe(2)
     wrapper.unmount()
   })
 

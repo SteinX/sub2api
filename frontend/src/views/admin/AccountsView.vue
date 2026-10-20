@@ -2260,7 +2260,10 @@ const handleAccountUpdated = (updatedAccount: Account) => {
 }
 const handleReauthorized = (updatedAccount?: Account) => {
   if (updatedAccount) handleAccountUpdated(updatedAccount)
-  else void reload()
+  else {
+    enterAutoRefreshSilentWindow()
+    void load()
+  }
 }
 const formatExportTimestamp = () => {
   const now = new Date()
