@@ -234,3 +234,37 @@ func TestDevinStatusPreservesActiveValidationAndRecoversAnOrphan(t *testing.T) {
 		t.Fatal("orphaned validation was not terminated", v, err)
 	}
 }
+
+func TestDevinSuccessfulCallbackCanBeReadWithoutRepeatingTheExchange(t *testing.T) {
+	d, _, exchanges := devinTestService(t)
+	ctx := context.Background()
+	view, err := d.StartAuth(ctx, 7, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(view.AuthURL)
+	state := u.Query().Get("state")
+	for range 2 {
+		result, err := d.CompleteAuth(ctx, view.ID, "code", state, view.PairingTicket, -1)
+		if err != nil || result.Status != "ready" || result.PairingTicket != "" {
+			t.Fatal("successful callback replay did not return its existing outcome", result, err)
+		}
+	}
+	v, err := d.LoadAuth(ctx, view.ID, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Status = "connected"
+	v.AccountID = 12
+	v.Credentials = nil
+	if err = d.SaveAuth(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	result, err := d.CompleteAuth(ctx, view.ID, "code", state, view.PairingTicket, -1)
+	if err != nil || result.Status != "connected" || result.AccountID != 12 || exchanges.Load() != 1 {
+		t.Fatal("saved callback outcome was not idempotent", result, err, exchanges.Load())
+	}
+	if _, err = d.CompleteAuth(ctx, view.ID, "code", state, "wrong-ticket", -1); err == nil {
+		t.Fatal("terminal callback outcome was exposed without authentication")
+	}
+}

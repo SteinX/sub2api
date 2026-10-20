@@ -205,7 +205,7 @@ func (s *DevinService) ValidateAuth(ctx context.Context, v *DevinAuthSession) er
 	v.Status = "ready"
 	v.Error = ""
 	v.Verifier = ""
-	v.TicketHash = ""
+	// The ticket permits idempotent outcome reads until this short-lived session expires.
 	return s.SaveAuth(ctx, v)
 }
 func (s *DevinService) ImportAuth(ctx context.Context, owner int64, content string, proxyID *int64, target int64) (DevinAuthView, error) {
