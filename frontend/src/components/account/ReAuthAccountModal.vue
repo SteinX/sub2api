@@ -31,7 +31,7 @@
             }}</span>
             <span class="text-sm text-gray-500 dark:text-gray-400">
               {{
-                isOpenAI
+                account.platform === 'devin' ? 'Devin' : isOpenAI
                   ? t('admin.accounts.openaiAccount')
                   : isGemini
                     ? t('admin.accounts.geminiAccount')
@@ -116,7 +116,15 @@
         </div>
       </div>
 
+      <DevinConnectionFlow
+        v-if="account.platform === 'devin'"
+        :account-id="account.id"
+        :proxy-id="account.proxy_id"
+        :settings="{ name: account.name }"
+        @connected="emit('reauthorized'); handleClose()"
+      />
       <OAuthAuthorizationFlow
+        v-else
         ref="oauthFlowRef"
         :add-method="addMethod"
         :auth-url="currentAuthUrl"
@@ -142,7 +150,7 @@
           {{ t('common.cancel') }}
         </button>
         <button
-          v-if="isManualInputMethod"
+          v-if="account.platform !== 'devin' && isManualInputMethod"
           type="button"
           :disabled="!canExchangeCode"
           class="btn btn-primary"
@@ -196,6 +204,7 @@ import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import OAuthAuthorizationFlow from './OAuthAuthorizationFlow.vue'
+import DevinConnectionFlow from './DevinConnectionFlow.vue'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types

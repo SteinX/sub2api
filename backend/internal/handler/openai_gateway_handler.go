@@ -2406,6 +2406,10 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 // ResponsesWebSocket handles OpenAI Responses API WebSocket ingress endpoint
 // GET /openai/v1/responses (Upgrade: websocket)
 func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
+	if key, ok := middleware2.GetAPIKeyFromContext(c); ok && key.Group != nil && key.Group.Platform == service.PlatformDevin {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Devin supports HTTP Responses; WebSocket transport is unavailable")
+		return
+	}
 	if !isOpenAIWSUpgradeRequest(c.Request) {
 		h.errorResponse(c, http.StatusUpgradeRequired, "invalid_request_error", "WebSocket upgrade required (Upgrade: websocket)")
 		return

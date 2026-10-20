@@ -2805,6 +2805,19 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 	}
 
 	// Handle OpenAI accounts
+	if account.Platform == service.PlatformDevin {
+		ids, fetchErr := h.accountTestService.FetchUpstreamSupportedModels(c.Request.Context(), account)
+		if fetchErr != nil {
+			response.BadRequest(c, fetchErr.Error())
+			return
+		}
+		rows := make([]gin.H, 0, len(ids))
+		for _, id := range ids {
+			rows = append(rows, gin.H{"id": id, "object": "model", "owned_by": "devin", "name": id, "display_name": id})
+		}
+		response.Success(c, rows)
+		return
+	}
 	if account.IsOpenAI() {
 		// Prefer the shared, account-keyed upstream catalog. If discovery fails,
 		// retain the legacy local catalog below so the test dialog remains usable.

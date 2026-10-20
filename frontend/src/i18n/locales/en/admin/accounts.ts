@@ -1,5 +1,20 @@
 export default {
     accounts: {
+      devin: {
+        recoverBadge: 'Automatic session recovery', manualBadge: 'Reconnect when expired',
+        intro: 'Connect Devin to validate credentials, discover models and add the account to the pool.',
+        key: 'Durable API key (recommended for servers)', browser: 'Browser sign-in', import: 'Import existing login',
+        keyHint: 'Create a cog_ API key in Devin settings. Session credentials can be recovered automatically while the key and plan remain valid.',
+        browserHint: 'Sign in on the official Devin page. Download the one-shot helper and run it on the computer with your browser.',
+        importHint: 'Select credentials.toml / JSON, or paste a session token. Imported files are a snapshot and are not continuously synced.',
+        connect: 'Connect Devin', validating: 'Validating account and models…', save: 'Save to account pool', restart: 'Start again',
+        helperHint: 'Download and run locally: python3 sub2api-devin-login.py (python on Windows). The helper opens your browser and returns the authorization result automatically.',
+        downloadHelper: 'Download login helper', manualFallback: 'Cannot run the helper? Complete manually', openLogin: 'Open Devin sign-in',
+        callbackPlaceholder: 'Paste the full http://127.0.0.1:59653/callback?... address', continue: 'Continue sign-in',
+        modelsFound: '{count} models discovered', autoRecover: 'This account can recover session credentials using its API key.',
+        reloginRequired: 'This login has no standard refresh grant. Reconnect the existing account if it expires.', failed: 'Connection failed. Try again.', fileTooLarge: 'Credential files must be under 1 MB.',
+        status: { waiting: 'Waiting for Devin sign-in', exchanging: 'Exchanging authorization code', validating: 'Validating account and discovering models', ready: 'Validated; saving account', connected: 'Connected', failed: 'Authorization failed' }
+      },
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
       createAccount: 'Create Account',
@@ -996,7 +1011,7 @@ export default {
 	      notAvailable: 'No reset can be used right now; no credit was used',
 	      failed: 'Reset request failed'
 	    }
-	  },
+      },
       autoResetCredit: {
 	    title: 'Automatically use reset credits',
 	    hint: 'Uses the earliest-expiring available credit only when actual usage reaches a threshold. Off by default; the account remains paused if no credit is available or reset fails.',
@@ -1004,7 +1019,7 @@ export default {
 	    threshold7d: '7d auto-reset threshold (%)',
 	    thresholdHint: 'Each window is evaluated independently. Enter 0.1–100; both default to 100.',
 	    thresholdInvalid: 'Automatic reset-credit thresholds must be between 0.1% and 100%.'
-	  },
+      },
       // Quota control (Anthropic OAuth/SetupToken only)
       quotaControl: {
         title: 'Quota Control',

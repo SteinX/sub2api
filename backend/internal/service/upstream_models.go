@@ -213,6 +213,16 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // snapshot. When no model is complete, the existing account snapshot is left
 // untouched.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
+	if account != nil && account.Platform == PlatformDevin {
+		ids, _, err := s.fetchUpstreamModelList(ctx, account)
+		if err != nil {
+			return nil, err
+		}
+		if err = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{"devin_models": ids}); err != nil {
+			return nil, err
+		}
+		return &UpstreamModelCatalog{Models: ids}, nil
+	}
 	models, body, err := s.fetchUpstreamModelList(ctx, account)
 	liveListAvailable := err == nil
 	if err != nil {
@@ -734,6 +744,25 @@ func normalizeModelRegistryBaseURL(raw string) string {
 }
 
 func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account *Account) ([]string, []byte, error) {
+	if account != nil && account.Platform == PlatformDevin {
+		d := NewDevinService(s.accountRepo, nil, s.httpUpstream, s.cfg, nil)
+		models, err := d.Models(ctx, account)
+		if err != nil {
+			return nil, nil, err
+		}
+		body, err := DevinModelsBody(models)
+		var result struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(body, &result)
+		ids := make([]string, 0, len(result.Data))
+		for _, m := range result.Data {
+			ids = append(ids, m.ID)
+		}
+		return ids, body, err
+	}
 	if s == nil {
 		return nil, nil, newUpstreamModelSyncConfigError("Account test service is not configured", nil)
 	}
