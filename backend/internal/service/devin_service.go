@@ -110,6 +110,16 @@ func (s *DevinService) Client(ctx context.Context, a *Account) (*devin.Client, e
 	}}, nil
 }
 func (s *DevinService) Token(ctx context.Context, a *Account, force bool) (string, error) {
+	failed := ""
+	if force {
+		s.mu.Lock()
+		failed = s.runtime[s.runtimeKey(a)].token
+		s.mu.Unlock()
+	}
+	return s.token(ctx, a, force, failed)
+}
+
+func (s *DevinService) token(ctx context.Context, a *Account, force bool, failed string) (string, error) {
 	key := s.runtimeKey(a)
 	if a.GetCredential("api_key") == "" {
 		token := a.GetCredential("access_token")
@@ -123,102 +133,110 @@ func (s *DevinService) Token(ctx context.Context, a *Account, force bool) (strin
 	}
 	s.mu.Lock()
 	entry := s.runtime[key]
-	invalidToken := ""
-	if !force && entry.token != "" && time.Now().Before(entry.tokenUntil) {
+	if entry.token != "" && time.Now().Before(entry.tokenUntil) && (!force || failed != "" && entry.token != failed) {
 		s.mu.Unlock()
 		return entry.token, nil
 	}
+	s.mu.Unlock()
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		result, err, _ := s.flights.Do("token:"+key, func() (any, error) {
+			return s.loadOrMintToken(ctx, a, key, force, failed)
+		})
+		if err != nil {
+			return "", err
+		}
+		token, ok := result.(string)
+		if !ok {
+			return "", errors.New("invalid Devin token cache result")
+		}
+		if !force || failed == "" || token != failed {
+			return token, nil
+		}
+		// A normal lookup may already have been in flight when recovery began.
+		// Its result must satisfy this caller's rejection too.
+	}
+}
+
+func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key string, force bool, failed string) (string, error) {
+	s.mu.Lock()
+	e := s.runtime[key]
+	if e.token != "" && time.Now().Before(e.tokenUntil) && (!force || failed != "" && e.token != failed) {
+		s.mu.Unlock()
+		return e.token, nil
+	}
 	if force {
-		invalidToken = entry.token
-		entry.token = ""
-		entry.tokenUntil = time.Time{}
-		s.runtime[key] = entry
+		e.token = ""
+		e.tokenUntil = time.Time{}
+		s.runtime[key] = e
 	}
 	s.mu.Unlock()
-	result, err, _ := s.flights.Do("token:"+key, func() (any, error) {
-		s.mu.Lock()
-		e := s.runtime[key]
-		s.mu.Unlock()
-		if e.token != "" && time.Now().Before(e.tokenUntil) {
-			return e.token, nil
-		}
-		client, err := s.Client(ctx, a)
-		if err != nil {
-			return nil, err
-		}
-		mintCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-		if s.store != nil {
-			cacheKey := "devin:token:" + key
-			for {
-				if cached, cacheErr := s.store.Get(mintCtx, cacheKey); cacheErr == nil && len(cached) > 0 && string(cached) != invalidToken {
-					s.mu.Lock()
-					e := s.runtime[key]
-					e.token = string(cached)
-					e.tokenUntil = time.Now().Add(5 * time.Minute)
-					s.runtime[key] = e
-					s.mu.Unlock()
-					return string(cached), nil
-				}
-				unlock, ok, lockErr := s.store.Acquire(mintCtx, cacheKey+":lock", 40*time.Second)
-				if lockErr != nil {
-					return nil, lockErr
-				}
-				if ok {
-					defer unlock()
-					break
-				}
-				select {
-				case <-mintCtx.Done():
-					return nil, mintCtx.Err()
-				case <-time.After(50 * time.Millisecond):
-				}
-			}
-		}
-		token, err := client.Mint(mintCtx, a.GetCredential("api_key"))
-		if err != nil {
-			return nil, err
-		}
-		if s.store != nil {
-			if err = s.store.Set(mintCtx, "devin:token:"+key, []byte(token), 30*time.Minute); err != nil {
-				return nil, err
-			}
-		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if len(s.runtime) > 2048 {
-			for k, v := range s.runtime {
-				if time.Now().After(v.tokenUntil) && time.Now().After(v.modelsUntil) {
-					delete(s.runtime, k)
-				}
-			}
-		}
-		e = s.runtime[key]
-		e.token = token
-		e.tokenUntil = time.Now().Add(30 * time.Minute)
-		s.runtime[key] = e
-		return token, nil
-	})
+	client, err := s.Client(ctx, a)
 	if err != nil {
 		return "", err
 	}
-	token, ok := result.(string)
-	if !ok {
-		return "", errors.New("invalid Devin token cache result")
+	mintCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if s.store != nil {
+		cacheKey := "devin:token:" + key
+		for {
+			if cached, cacheErr := s.store.Get(mintCtx, cacheKey); cacheErr == nil && len(cached) > 0 && (!force || failed != "" && string(cached) != failed) {
+				s.mu.Lock()
+				e := s.runtime[key]
+				e.token = string(cached)
+				e.tokenUntil = time.Now().Add(5 * time.Minute)
+				s.runtime[key] = e
+				s.mu.Unlock()
+				return string(cached), nil
+			}
+			unlock, ok, lockErr := s.store.Acquire(mintCtx, cacheKey+":lock", 40*time.Second)
+			if lockErr != nil {
+				return "", lockErr
+			}
+			if ok {
+				defer unlock()
+				break
+			}
+			select {
+			case <-mintCtx.Done():
+				return "", mintCtx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
 	}
+	token, err := client.Mint(mintCtx, a.GetCredential("api_key"))
+	if err != nil {
+		return "", err
+	}
+	if force && failed != "" && token == failed {
+		return "", &devin.Error{Code: "unauthenticated", Status: 401}
+	}
+	if s.store != nil {
+		if err = s.store.Set(mintCtx, "devin:token:"+key, []byte(token), 30*time.Minute); err != nil {
+			return "", err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.runtime) > 2048 {
+		for k, v := range s.runtime {
+			if time.Now().After(v.tokenUntil) && time.Now().After(v.modelsUntil) {
+				delete(s.runtime, k)
+			}
+		}
+	}
+	e = s.runtime[key]
+	e.token = token
+	e.tokenUntil = time.Now().Add(30 * time.Minute)
+	s.runtime[key] = e
 	return token, nil
 }
 
 // RecoverToken reuses a credential another request has already recovered.
 func (s *DevinService) RecoverToken(ctx context.Context, a *Account, failed string) (string, error) {
-	key := s.runtimeKey(a)
-	s.mu.Lock()
-	entry := s.runtime[key]
-	s.mu.Unlock()
-	if entry.token != "" && entry.token != failed && time.Now().Before(entry.tokenUntil) {
-		return entry.token, nil
-	}
-	return s.Token(ctx, a, true)
+	return s.token(ctx, a, true, devin.NormalizeToken(failed))
 }
 
 func (s *DevinService) Models(ctx context.Context, a *Account) ([]*pb.ClientModelConfig, error) {
