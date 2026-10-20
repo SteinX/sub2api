@@ -19,7 +19,7 @@ func (s *OpenAIGatewayService) SetDevinService(d *DevinService) { s.devin = d }
 func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context, a *Account, body []byte, protocol, cacheKey, mapped string) (*OpenAIForwardResult, error) {
 	started := time.Now()
 	if s.devin == nil {
-		return nil, fmt.Errorf("Devin service is unavailable")
+		return nil, fmt.Errorf("devin service is unavailable")
 	}
 	var req *apicompat.ResponsesRequest
 	var err error
@@ -84,12 +84,12 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	}
 	if selected == nil {
 		writeError(400, "This Devin account does not advertise the requested model")
-		return nil, fmt.Errorf("Devin model is unavailable")
+		return nil, fmt.Errorf("devin model is unavailable")
 	}
 	if limit := selected.GetModelInfo().GetMaxOutputTokens(); limit > 0 {
 		if req.MaxOutputTokens != nil && *req.MaxOutputTokens > int(limit) {
 			writeError(400, "max_output_tokens exceeds this Devin model's limit")
-			return nil, fmt.Errorf("Devin output token limit exceeded")
+			return nil, fmt.Errorf("devin output token limit exceeded")
 		}
 		if wire.Configuration.MaxTokens > uint64(limit) {
 			wire.Configuration.MaxTokens = uint64(limit)
@@ -98,7 +98,7 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	for _, p := range wire.ChatMessagePrompts {
 		if len(p.Images) > 0 && !selected.SupportsImages && !selected.GetModelInfo().GetModelFeatures().GetSupportsImages() {
 			writeError(400, "The selected Devin model does not support images")
-			return nil, fmt.Errorf("Devin model has no image support")
+			return nil, fmt.Errorf("devin model has no image support")
 		}
 	}
 	client, err := s.devin.Client(ctx, a)

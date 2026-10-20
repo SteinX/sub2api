@@ -62,14 +62,14 @@ func (s *DevinService) Client(ctx context.Context, a *Account) (*devin.Client, e
 	proxy := upstreamModelsProxyURL(a)
 	if a.ProxyID != nil && a.Proxy == nil {
 		if s.proxyRepo == nil {
-			return nil, errors.New("Devin proxy is unavailable")
+			return nil, errors.New("devin proxy is unavailable")
 		}
 		p, err := s.proxyRepo.GetByID(ctx, *a.ProxyID)
 		if err != nil {
 			return nil, err
 		}
 		if p == nil {
-			return nil, errors.New("Devin proxy is unavailable")
+			return nil, errors.New("devin proxy is unavailable")
 		}
 		proxy = p.URL()
 	}
@@ -87,7 +87,7 @@ func (s *DevinService) Token(ctx context.Context, a *Account, force bool) (strin
 	if a.GetCredential("api_key") == "" {
 		token := a.GetCredential("access_token")
 		if token == "" {
-			return "", errors.New("Devin requires reauthorization")
+			return "", errors.New("devin requires reauthorization")
 		}
 		if force {
 			return "", &devin.Error{Code: "unauthenticated", Status: 401}

@@ -62,11 +62,11 @@ func (v *DevinAuthSession) transportID() int64 {
 
 func (s *DevinService) SaveAuth(ctx context.Context, session *DevinAuthSession) error {
 	if s.store == nil {
-		return errors.New("Devin authorization requires Redis")
+		return errors.New("devin authorization requires Redis")
 	}
 	ttl := time.Until(time.Unix(session.ExpiresAt, 0))
 	if ttl <= 0 {
-		return errors.New("Devin authorization expired")
+		return errors.New("devin authorization expired")
 	}
 	b, err := json.Marshal(session)
 	if err != nil {
@@ -76,11 +76,11 @@ func (s *DevinService) SaveAuth(ctx context.Context, session *DevinAuthSession) 
 }
 func (s *DevinService) LoadAuth(ctx context.Context, id string, owner int64) (*DevinAuthSession, error) {
 	if s.store == nil {
-		return nil, errors.New("Devin authorization requires Redis")
+		return nil, errors.New("devin authorization requires Redis")
 	}
 	b, err := s.store.Get(ctx, devinSessionKey(id))
 	if err != nil {
-		return nil, errors.New("Devin authorization expired or unavailable")
+		return nil, errors.New("devin authorization expired or unavailable")
 	}
 	var v DevinAuthSession
 	if json.Unmarshal(b, &v) != nil {
@@ -93,7 +93,7 @@ func (s *DevinService) LoadAuth(ctx context.Context, id string, owner int64) (*D
 }
 func (s *DevinService) AuthLock(ctx context.Context, id string) (func(), error) {
 	if s.store == nil {
-		return nil, errors.New("Devin authorization requires Redis")
+		return nil, errors.New("devin authorization requires Redis")
 	}
 	unlock, ok, err := s.store.Acquire(ctx, devinSessionKey(id)+":lock", 90*time.Second)
 	if err != nil {
@@ -139,7 +139,7 @@ func (s *DevinService) ValidateAuth(ctx context.Context, v *DevinAuthSession) er
 		return err
 	}
 	if len(models) == 0 {
-		return errors.New("Devin account returned no available models")
+		return errors.New("devin account returned no available models")
 	}
 	v.Models = make([]string, 0, len(models))
 	for _, m := range models {

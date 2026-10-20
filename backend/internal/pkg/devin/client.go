@@ -240,7 +240,7 @@ func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessa
 			return "", err
 		}
 		if a.GetAssignment().GetModelUid() == "" || a.GetAssignment().GetAssignmentJwt() == "" {
-			return "", errors.New("Devin returned an incomplete model assignment")
+			return "", errors.New("devin returned an incomplete model assignment")
 		}
 		req.ChatModelUid = a.Assignment.ModelUid
 		req.ModelAssignmentJwt = proto.String(a.Assignment.AssignmentJwt)
@@ -354,7 +354,7 @@ func ReadFrame(r io.Reader) (byte, []byte, error) {
 	}
 	n := binary.BigEndian.Uint32(h[1:])
 	if n > MaxFrameSize {
-		return 0, nil, errors.New("Devin frame too large")
+		return 0, nil, errors.New("devin frame too large")
 	}
 	if h[0]&^byte(3) != 0 {
 		return 0, nil, errors.New("invalid Devin frame flags")
@@ -412,7 +412,7 @@ func (c *Client) Mint(ctx context.Context, key string) (string, error) {
 		return "", err
 	}
 	if v.Token == "" {
-		return "", errors.New("Devin returned no session token")
+		return "", errors.New("devin returned no session token")
 	}
 	return NormalizeToken(v.Token), nil
 }
@@ -438,7 +438,7 @@ func (c *Client) Exchange(ctx context.Context, code, verifier string) (string, e
 		return "", err
 	}
 	if v.Token == "" {
-		return "", errors.New("Devin returned no login token")
+		return "", errors.New("devin returned no login token")
 	}
 	return NormalizeToken(v.Token), nil
 }

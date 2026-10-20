@@ -148,12 +148,12 @@ func (d *EventDecoder) Apply(m *pb.GetChatMessageResponse) error {
 			id = d.activeCall
 		}
 		if id == "" {
-			return fmt.Errorf("Devin tool argument delta has no call")
+			return fmt.Errorf("devin tool argument delta has no call")
 		}
 		index, ok := d.calls[id]
 		if !ok {
 			if call.Name == "" {
-				return fmt.Errorf("Devin tool call has no name")
+				return fmt.Errorf("devin tool call has no name")
 			}
 			index = len(d.Response.Output)
 			d.calls[id] = index
@@ -180,7 +180,7 @@ func (d *EventDecoder) Finish() error {
 		return &Error{Code: "permission_denied"}
 	}
 	if !d.Started {
-		return fmt.Errorf("Devin returned no content")
+		return fmt.Errorf("devin returned no content")
 	}
 	if err := d.closeBlock(); err != nil {
 		return err
@@ -204,7 +204,7 @@ func (d *EventDecoder) Finish() error {
 			continue
 		}
 		if !json.Valid([]byte(item.Arguments)) {
-			return fmt.Errorf("Devin returned incomplete tool arguments")
+			return fmt.Errorf("devin returned incomplete tool arguments")
 		}
 		item.Status = "completed"
 		if err := d.event(apicompat.ResponsesStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: i, ItemID: item.ID, CallID: item.CallID, Name: item.Name, Arguments: item.Arguments}); err != nil {

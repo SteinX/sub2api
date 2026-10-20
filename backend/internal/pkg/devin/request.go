@@ -27,17 +27,17 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 		return nil, fmt.Errorf("model is required")
 	}
 	if r.PreviousResponseID != "" {
-		return nil, fmt.Errorf("Devin requires complete input history; previous_response_id is unsupported")
+		return nil, fmt.Errorf("devin requires complete input history; previous_response_id is unsupported")
 	}
 	if r.Store != nil && *r.Store {
-		return nil, fmt.Errorf("Devin does not support persistent Responses storage")
+		return nil, fmt.Errorf("devin does not support persistent Responses storage")
 	}
 	if r.Text != nil && len(r.Text.Format) > 0 {
 		var f struct {
 			Type string `json:"type"`
 		}
 		if json.Unmarshal(r.Text.Format, &f) != nil || (f.Type != "" && f.Type != "text") {
-			return nil, fmt.Errorf("Devin does not support structured response_format")
+			return nil, fmt.Errorf("devin does not support structured response_format")
 		}
 	}
 	cascade := uuid.NewSHA1(uuid.NameSpaceOID, []byte(scope+"\x00"+r.Model)).String()
@@ -137,7 +137,7 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 	seen := map[string]bool{}
 	for _, t := range r.Tools {
 		if t.Type != "function" {
-			return nil, fmt.Errorf("Devin does not support tool type %q", t.Type)
+			return nil, fmt.Errorf("devin does not support tool type %q", t.Type)
 		}
 		if t.Name == "" || seen[t.Name] {
 			return nil, fmt.Errorf("tool names must be nonempty and unique")
@@ -189,7 +189,7 @@ func inputContent(raw json.RawMessage) (string, []*pb.ImageData, error) {
 		case "input_image":
 			meta, data, ok := strings.Cut(p.ImageURL, ",")
 			if !ok || !strings.HasPrefix(meta, "data:image/") || !strings.HasSuffix(meta, ";base64") {
-				return "", nil, fmt.Errorf("Devin images require a base64 data URL")
+				return "", nil, fmt.Errorf("devin images require a base64 data URL")
 			}
 			if _, err := base64.StdEncoding.DecodeString(data); err != nil {
 				return "", nil, fmt.Errorf("invalid image data")
