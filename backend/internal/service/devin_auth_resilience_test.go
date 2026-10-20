@@ -145,51 +145,60 @@ func TestDevinTerminalPersistenceFailureIsReported(t *testing.T) {
 }
 
 func TestDevinInterruptedSessionRecoversAfterStoreReturns(t *testing.T) {
-	for _, viaStatus := range []bool{false, true} {
-		t.Run(map[bool]string{false: "callback retry", true: "status polling"}[viaStatus], func(t *testing.T) {
-			d, _, _ := devinTestService(t)
-			probe := &devinAuthStoreProbe{SessionStore: d.store, failTerminal: true}
-			d.store = probe
-			upstream, ok := d.upstream.(*devinHTTP)
-			if !ok {
-				t.Fatal("missing upstream test double")
-			}
-			original := upstream.handle
-			exchanges := 0
-			upstream.handle = func(r *http.Request) (*http.Response, error) {
-				if r.URL.Path == "/auth/cli/token" {
-					exchanges++
-					return nil, errors.New("exchange failed")
-				}
-				return original(r)
-			}
-			ctx := context.Background()
-			view, err := d.StartAuth(ctx, 7, nil, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			u, _ := url.Parse(view.AuthURL)
-			state := u.Query().Get("state")
-			if _, err = d.CompleteAuth(ctx, view.ID, "code", state, view.PairingTicket, -1); !infraerrors.IsServiceUnavailable(err) {
-				t.Fatal("failed write should be retryable", err)
-			}
-			probe.failTerminal = false
-			if viaStatus {
-				var v *DevinAuthSession
-				v, err = d.AuthStatus(ctx, view.ID, 7)
-				if err != nil || v.Status != "failed" {
-					t.Fatal("polling did not recover the orphaned state", v, err)
-				}
-			} else {
-				var v DevinAuthView
-				v, err = d.CompleteAuth(ctx, view.ID, "code", state, view.PairingTicket, -1)
-				if err != nil || v.Status != "failed" {
-					t.Fatal("callback retry did not recover the orphaned state", v, err)
-				}
-			}
-			v, err := d.LoadAuth(ctx, view.ID, 7)
-			if err != nil || v.Status != "failed" || v.Credentials != nil || v.Verifier != "" || v.TicketHash != "" || exchanges != 1 {
-				t.Fatal("recovery retained secrets or replayed the code", v, err, exchanges)
+	for _, phase := range []string{"exchange", "validation"} {
+		t.Run(phase, func(t *testing.T) {
+			for _, viaStatus := range []bool{false, true} {
+				t.Run(map[bool]string{false: "callback retry", true: "status polling"}[viaStatus], func(t *testing.T) {
+					d, _, _ := devinTestService(t)
+					probe := &devinAuthStoreProbe{SessionStore: d.store, failTerminal: true}
+					d.store = probe
+					upstream, ok := d.upstream.(*devinHTTP)
+					if !ok {
+						t.Fatal("missing upstream test double")
+					}
+					original := upstream.handle
+					exchanges := 0
+					upstream.handle = func(r *http.Request) (*http.Response, error) {
+						if r.URL.Path == "/auth/cli/token" {
+							exchanges++
+							if phase == "exchange" {
+								return nil, errors.New("exchange failed")
+							}
+						}
+						if phase == "validation" && r.URL.Path == devin.ModelsPath {
+							return nil, errors.New("validation failed")
+						}
+						return original(r)
+					}
+					ctx := context.Background()
+					view, err := d.StartAuth(ctx, 7, nil, 0)
+					if err != nil {
+						t.Fatal(err)
+					}
+					u, _ := url.Parse(view.AuthURL)
+					state := u.Query().Get("state")
+					if _, err = d.CompleteAuth(ctx, view.ID, "code", state, view.PairingTicket, -1); !infraerrors.IsServiceUnavailable(err) {
+						t.Fatal("failed write should be retryable", err)
+					}
+					probe.failTerminal = false
+					if viaStatus {
+						var v *DevinAuthSession
+						v, err = d.AuthStatus(ctx, view.ID, 7)
+						if err != nil || v.Status != "failed" {
+							t.Fatal("polling did not recover the orphaned state", v, err)
+						}
+					} else {
+						var v DevinAuthView
+						v, err = d.CompleteAuth(ctx, view.ID, "code", state, view.PairingTicket, -1)
+						if err != nil || v.Status != "failed" {
+							t.Fatal("callback retry did not recover the orphaned state", v, err)
+						}
+					}
+					v, err := d.LoadAuth(ctx, view.ID, 7)
+					if err != nil || v.Status != "failed" || v.Credentials != nil || v.Verifier != "" || v.TicketHash != "" || exchanges != 1 {
+						t.Fatal("recovery retained secrets or replayed the code", v, err, exchanges)
+					}
+				})
 			}
 		})
 	}

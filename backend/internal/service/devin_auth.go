@@ -306,7 +306,7 @@ func (s *DevinService) CompleteAuth(ctx context.Context, id, code, state, ticket
 				v.Credentials = map[string]any{"access_token": token, "auth_mode": "cli"}
 				v.Status = "validating"
 				v.Verifier = ""
-				v.TicketHash = ""
+				// Keep authenticating callback retries until a terminal state is saved.
 				if err = s.SaveAuth(ctx, v); err == nil {
 					err = s.ValidateAuth(ctx, v)
 				}
