@@ -70,7 +70,7 @@ function showError(e: unknown) {
   error.value = v.response?.data?.detail || v.response?.data?.message || v.message || t('admin.accounts.devin.failed')
 }
 function persist() {
-  if (session.value) sessionStorage.setItem(storageKey.value, JSON.stringify({ id: session.value.id, settings: storedSettings.value }))
+  if (session.value) sessionStorage.setItem(storageKey.value, JSON.stringify({ id: session.value.id, settings: storedSettings.value, expires_at: session.value.expires_at }))
 }
 async function poll() {
   if (!session.value || stopped) return
@@ -87,7 +87,8 @@ async function poll() {
   } catch (e) {
     if (stopped || session.value?.id !== id) return
     showError(e)
-    const status = (e as { response?: { status?: number } }).response?.status
+    const failure = e as { status?: number; response?: { status?: number } }
+    const status = failure.status ?? failure.response?.status
     const recoverable = !status || status === 408 || status === 429 || status >= 500
     if (recoverable && Date.now() < session.value.expires_at * 1000) timer = setTimeout(poll, 3000)
   }
@@ -142,10 +143,19 @@ function downloadHelper() {
   const href = URL.createObjectURL(new Blob([source], { type: 'text/x-python' }))
   const link = document.createElement('a'); link.href = href; link.download = 'sub2api-devin-login.py'; link.click(); URL.revokeObjectURL(href)
 }
-onMounted(async () => {
+onMounted(() => {
   try {
     const saved = JSON.parse(sessionStorage.getItem(storageKey.value) || 'null')
-    if (saved?.id) { session.value = await devinAPI.status(saved.id); storedSettings.value = saved.settings; if (!stopped) void poll() }
+    if (typeof saved?.id !== 'string' || !saved.id) return
+    // Older saved flows have no expiry; permit one bounded restoration window.
+    const expiresAt = Math.min(saved.expires_at || Math.floor(Date.now() / 1000) + 600, Math.floor(Date.now() / 1000) + 600)
+    if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt * 1000) {
+      sessionStorage.removeItem(storageKey.value)
+      return
+    }
+    storedSettings.value = saved.settings
+    session.value = { id: saved.id, status: 'waiting', models: null, auto_recover: false, expires_at: expiresAt }
+    void poll()
   } catch { sessionStorage.removeItem(storageKey.value) }
 })
 onUnmounted(() => { stopped = true; if (timer) clearTimeout(timer); content.value = ''; callback.value = '' })

@@ -50,10 +50,10 @@ describe('Devin connection lifecycle', () => {
     wrapper.unmount()
   })
 
-  it.each([undefined, 429, 503])('recovers polling after a transient status failure %s and commits once', async (status) => {
+  it.each([0, 429, 503])('recovers polling after a transient status failure %s and commits once', async (status) => {
     vi.useFakeTimers()
     api.start.mockResolvedValue({ ...ready, status: 'waiting' })
-    api.status.mockRejectedValueOnce(Object.assign(new Error('Temporary connection failure'), { response: status ? { status } : undefined }))
+    api.status.mockRejectedValueOnce({ status, message: 'Temporary connection failure' })
       .mockResolvedValueOnce(ready)
     const wrapper = mount(DevinConnectionFlow, { props: { settings } })
     await wrapper.get('input[value=browser]').setValue()
@@ -81,16 +81,43 @@ describe('Devin connection lifecycle', () => {
     expect(api.commit).not.toHaveBeenCalled()
   })
 
-  it.each([400, 401, 403])('does not retry a permanent status failure %s', async (status) => {
+  it.each([400, 401, 403, 404])('does not retry a permanent status failure %s', async (status) => {
     vi.useFakeTimers()
     api.start.mockResolvedValue({ ...ready, status: 'waiting' })
-    api.status.mockRejectedValue({ response: { status } })
+    api.status.mockRejectedValue({ status, message: 'Permanent authorization failure' })
     const wrapper = mount(DevinConnectionFlow, { props: { settings } })
     await wrapper.get('input[value=browser]').setValue()
     await wrapper.get('button').trigger('click'); await flushPromises()
     await vi.advanceTimersByTimeAsync(9000)
     expect(api.status).toHaveBeenCalledTimes(1)
     expect(api.commit).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([0, 503])('preserves and restores a pending browser session after initial status failure %s', async (status) => {
+    vi.useFakeTimers()
+    const saved = JSON.stringify({ id: 'session', settings, expires_at: Math.floor(Date.now() / 1000) + 300 })
+    sessionStorage.setItem('devin-connection:new', saved)
+    api.status.mockRejectedValueOnce({ status, message: 'Temporary connection failure' }).mockResolvedValueOnce(ready)
+    const wrapper = mount(DevinConnectionFlow, { props: { settings: { name: 'replacement settings' } } })
+    await flushPromises()
+    expect(sessionStorage.getItem('devin-connection:new')).toBe(saved)
+    expect(api.start).not.toHaveBeenCalled()
+    expect(api.commit).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(3000); await flushPromises()
+    expect(api.status).toHaveBeenCalledTimes(2)
+    expect(api.commit).toHaveBeenCalledWith('session', settings)
+    expect(wrapper.emitted('connected')).toHaveLength(1)
+    expect(sessionStorage.getItem('devin-connection:new')).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('does not restore an expired saved authorization', async () => {
+    sessionStorage.setItem('devin-connection:new', JSON.stringify({ id: 'session', settings, expires_at: Math.floor(Date.now() / 1000) - 1 }))
+    const wrapper = mount(DevinConnectionFlow, { props: { settings } })
+    await flushPromises()
+    expect(api.status).not.toHaveBeenCalled()
+    expect(sessionStorage.getItem('devin-connection:new')).toBeNull()
     wrapper.unmount()
   })
 
