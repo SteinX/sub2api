@@ -19,6 +19,8 @@ import (
 
 const devinAuthTTL = 10 * time.Minute
 
+const devinAuthOperationTimeout = 75 * time.Second
+
 func devinAuthStoreUnavailable() error {
 	return infraerrors.ServiceUnavailable("DEVIN_AUTH_STORE_UNAVAILABLE", "devin authorization store is temporarily unavailable")
 }
@@ -111,7 +113,7 @@ func (s *DevinService) AuthLock(ctx context.Context, id string) (func(), error) 
 		return nil, devinAuthStoreUnavailable()
 	}
 	if !ok {
-		return nil, errors.New("authorization operation is already in progress")
+		return nil, infraerrors.Conflict("DEVIN_AUTH_BUSY", "authorization operation is already in progress")
 	}
 	return unlock, nil
 }
@@ -126,6 +128,38 @@ func (s *DevinService) failAuth(ctx context.Context, v *DevinAuthSession, messag
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	return s.SaveAuth(cleanup, v)
+}
+
+func (s *DevinService) recoverInterruptedAuth(ctx context.Context, v *DevinAuthSession) error {
+	if v.Status != "exchanging" && v.Status != "validating" {
+		return nil
+	}
+	return s.failAuth(ctx, v, "Devin authorization was interrupted; start a new connection")
+}
+
+// AuthStatus recovers orphaned intermediate records once no worker holds their
+// lock. Authorization codes are never replayed after an uncertain exchange.
+func (s *DevinService) AuthStatus(ctx context.Context, id string, owner int64) (*DevinAuthSession, error) {
+	v, err := s.LoadAuth(ctx, id, owner)
+	if err != nil || v.Status != "exchanging" && v.Status != "validating" {
+		return v, err
+	}
+	unlock, err := s.AuthLock(ctx, id)
+	if infraerrors.IsConflict(err) {
+		return v, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	v, err = s.LoadAuth(ctx, id, owner)
+	if err != nil {
+		return nil, err
+	}
+	if err = s.recoverInterruptedAuth(ctx, v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 func (s *DevinService) StartAuth(ctx context.Context, owner int64, proxyID *int64, target int64) (DevinAuthView, error) {
 	id, err := oauth.GenerateSessionID()
@@ -184,6 +218,13 @@ func (s *DevinService) ImportAuth(ctx context.Context, owner int64, content stri
 		return DevinAuthView{}, err
 	}
 	v := &DevinAuthSession{ID: id, Owner: owner, Status: "validating", Credentials: creds, ProxyID: proxyID, TargetAccountID: target, ExpiresAt: time.Now().Add(devinAuthTTL).Unix()}
+	unlock, err := s.AuthLock(ctx, id)
+	if err != nil {
+		return DevinAuthView{}, err
+	}
+	defer unlock()
+	ctx, cancel := context.WithTimeout(ctx, devinAuthOperationTimeout)
+	defer cancel()
 	if err = s.SaveAuth(ctx, v); err != nil {
 		return DevinAuthView{}, err
 	}
@@ -215,12 +256,17 @@ func (s *DevinService) CompleteAuth(ctx context.Context, id, code, state, ticket
 		return DevinAuthView{}, err
 	}
 	defer unlock()
+	ctx, cancel := context.WithTimeout(ctx, devinAuthOperationTimeout)
+	defer cancel()
 	// Cancellation or another callback may have changed the record while locking.
 	v, err := loadAuthorized()
 	if err != nil {
 		return DevinAuthView{}, err
 	}
 	if v.Status != "waiting" {
+		if err = s.recoverInterruptedAuth(ctx, v); err != nil {
+			return DevinAuthView{}, err
+		}
 		return DevinAuthSummary(v), nil
 	}
 	denied := false

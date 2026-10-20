@@ -85,7 +85,7 @@ func (h *DevinHandler) Start(c *gin.Context) {
 	response.Success(c, out)
 }
 func (h *DevinHandler) Status(c *gin.Context) {
-	v, err := h.devin.LoadAuth(c.Request.Context(), c.Param("id"), devinOwner(c))
+	v, err := h.devin.AuthStatus(c.Request.Context(), c.Param("id"), devinOwner(c))
 	if err != nil {
 		writeDevinAuthError(c, err)
 		return
