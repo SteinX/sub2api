@@ -4,6 +4,7 @@ import json
 import threading
 import time
 import unittest
+import urllib.error
 import urllib.request
 from http.server import HTTPServer
 from pathlib import Path
@@ -15,6 +16,37 @@ spec.loader.exec_module(helper)
 
 
 class DevinHelperTest(unittest.TestCase):
+    def test_retries_transient_callback_deliveries(self):
+        config = {"callback_url": "https://sub2api.example/callback"}
+        payload = b'{"code":"one-shot","state":"nonce","pairing_ticket":"ephemeral"}'
+        failures = [urllib.error.URLError("temporary connection failure")]
+        failures.extend(urllib.error.HTTPError(config["callback_url"], status, "temporary", {}, io.BytesIO()) for status in (408, 429, 503))
+        for failure in failures:
+            with self.subTest(failure=failure):
+                response = io.BytesIO(b'{"data":{"status":"ready"}}')
+                with patch.object(helper.urllib.request, "urlopen", side_effect=[failure, response]) as send, patch.object(helper.time, "sleep"):
+                    self.assertTrue(helper.deliver_callback(config, payload, time.time() + 10))
+                self.assertEqual(send.call_count, 2)
+                self.assertTrue(all(call.args[0].data == payload for call in send.call_args_list))
+
+    def test_does_not_retry_permanent_callback_failure(self):
+        config = {"callback_url": "https://sub2api.example/callback"}
+        failure = urllib.error.HTTPError(config["callback_url"], 400, "invalid ticket", {}, io.BytesIO())
+        with patch.object(helper.urllib.request, "urlopen", side_effect=failure) as send, patch.object(helper.time, "sleep") as sleep:
+            self.assertFalse(helper.deliver_callback(config, b'{}', time.time() + 10))
+        self.assertEqual(send.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_callback_retries_are_bounded_by_the_session_deadline(self):
+        config = {"callback_url": "https://sub2api.example/callback"}
+        clock = [0]
+        def advance(seconds):
+            clock[0] += seconds
+        with patch.object(helper.time, "time", side_effect=lambda: clock[0]), patch.object(helper.time, "sleep", side_effect=advance), patch.object(helper.urllib.request, "urlopen", side_effect=urllib.error.URLError("offline")) as send:
+            self.assertFalse(helper.deliver_callback(config, b'{}', 3))
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(clock[0], 3)
+
     def test_browser_callback_returns_only_one_shot_credentials(self):
         servers = []
         received = []

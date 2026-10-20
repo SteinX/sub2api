@@ -11,6 +11,36 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
+def deliver_callback(config, payload, deadline):
+    request = urllib.request.Request(config["callback_url"], data=payload,
+                                     headers={"Content-Type": "application/json"})
+    delay = 1
+    while time.time() < deadline:
+        try:
+            # Keep system TLS verification and proxy configuration.
+            with urllib.request.urlopen(request, timeout=min(75, deadline - time.time())) as response:
+                result = json.load(response)
+            if not isinstance(result, dict):
+                return False
+            data = result.get("data", result)
+            return isinstance(data, dict) and data.get("status") in ("ready", "connected")
+        except urllib.error.HTTPError as error:
+            retryable = error.code in (408, 429) or 500 <= error.code < 600
+            error.close()
+            if not retryable:
+                return False
+        except (OSError, urllib.error.URLError):
+            pass
+        except ValueError:
+            return False
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(delay, remaining))
+        delay = min(delay * 2, 5)
+    return False
+
+
 def run(config):
     target = urllib.parse.urlsplit(config["callback_url"])
     if target.scheme not in ("https", "http") or target.username or target.password:
@@ -44,18 +74,11 @@ def run(config):
                 callback_code = code or ("http://127.0.0.1:59653/callback?" + url.query)
                 payload = json.dumps({"code": callback_code, "state": state,
                                       "pairing_ticket": config["pairing_ticket"]}).encode()
-                request = urllib.request.Request(config["callback_url"], data=payload,
-                                                 headers={"Content-Type": "application/json"})
-                try:
-                    # Keep system TLS verification and proxy configuration.
-                    with urllib.request.urlopen(request, timeout=75) as response:
-                        result = json.load(response)
-                    data = result.get("data", result)
-                    outcome["success"] = data.get("status") in ("ready", "connected")
-                    if outcome["success"]:
-                        status = 200
-                        message = "Devin connected. Return to sub2api; you may close this tab."
-                except (OSError, ValueError, urllib.error.URLError):
+                outcome["success"] = deliver_callback(config, payload, deadline)
+                if outcome["success"]:
+                    status = 200
+                    message = "Devin connected. Return to sub2api; you may close this tab."
+                else:
                     message = "Could not finish authorization. Check the sub2api connection page."
             self.send_response(status)
             self.send_header("Content-Type", "text/plain; charset=utf-8")

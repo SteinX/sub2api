@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +41,32 @@ type DevinService struct {
 func NewDevinService(repo AccountRepository, proxyRepo ProxyRepository, upstream HTTPUpstream, cfg *config.Config, store devin.SessionStore) *DevinService {
 	return &DevinService{repo: repo, proxyRepo: proxyRepo, upstream: upstream, cfg: cfg, store: store, runtime: map[string]devinRuntime{}}
 }
+
+func (a *Account) devinModelIDs() []string {
+	switch ids := a.Extra["devin_models"].(type) {
+	case []string:
+		return ids
+	case []any:
+		out := make([]string, 0, len(ids))
+		for _, value := range ids {
+			if id, ok := value.(string); ok && id != "" {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// Both scheduler implementations call the ordinary account model gate. Apply
+// the account's credential catalog after resolving any explicit public alias.
+func (a *Account) supportsDevinModel(requested string) bool {
+	if mapping := a.GetModelMapping(); len(mapping) > 0 && !mappingSupportsRequestedModel(mapping, requested) {
+		return false
+	}
+	return slices.Contains(a.devinModelIDs(), a.GetMappedModel(requested))
+}
+
 func (s *DevinService) runtimeKey(a *Account) string {
 	proxy := ""
 	if a.ProxyID != nil {
