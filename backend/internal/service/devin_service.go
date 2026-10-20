@@ -181,15 +181,28 @@ func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key stri
 	defer cancel()
 	if s.store != nil {
 		cacheKey := "devin:token:" + key
+		cachedToken := func() (string, error) {
+			cached, cacheErr := s.store.Get(mintCtx, cacheKey)
+			if errors.Is(cacheErr, devin.ErrSessionNotFound) {
+				return "", nil
+			}
+			if cacheErr != nil {
+				return "", cacheErr
+			}
+			if len(cached) == 0 || force && (failed == "" || string(cached) == failed) {
+				return "", nil
+			}
+			s.mu.Lock()
+			e := s.runtime[key]
+			e.token = string(cached)
+			e.tokenUntil = time.Now().Add(5 * time.Minute)
+			s.runtime[key] = e
+			s.mu.Unlock()
+			return string(cached), nil
+		}
 		for {
-			if cached, cacheErr := s.store.Get(mintCtx, cacheKey); cacheErr == nil && len(cached) > 0 && (!force || failed != "" && string(cached) != failed) {
-				s.mu.Lock()
-				e := s.runtime[key]
-				e.token = string(cached)
-				e.tokenUntil = time.Now().Add(5 * time.Minute)
-				s.runtime[key] = e
-				s.mu.Unlock()
-				return string(cached), nil
+			if cached, _ := cachedToken(); cached != "" {
+				return cached, nil
 			}
 			unlock, ok, lockErr := s.store.Acquire(mintCtx, cacheKey+":lock", 40*time.Second)
 			if lockErr != nil {
@@ -197,6 +210,14 @@ func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key stri
 			}
 			if ok {
 				defer unlock()
+				// Another instance may have published a token between Get and Acquire.
+				cached, cacheErr := cachedToken()
+				if cacheErr != nil {
+					return "", cacheErr
+				}
+				if cached != "" {
+					return cached, nil
+				}
 				break
 			}
 			select {
