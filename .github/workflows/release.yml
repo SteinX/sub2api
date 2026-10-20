@@ -378,7 +378,9 @@ jobs:
 
   sync-version-file:
     needs: [prepare, release]
-    if: ${{ needs.release.result == 'success' && needs.prepare.outputs.dry_run != 'true' }}
+    # Keep main's VERSION aligned with upstream; fork tags set the built VERSION
+    # in prepare. Writing the fork suffix to main would conflict on the next sync.
+    if: ${{ needs.release.result == 'success' && needs.prepare.outputs.dry_run != 'true' && !(github.repository == 'SteinX/sub2api' && contains(needs.prepare.outputs.tag, '-stx.')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

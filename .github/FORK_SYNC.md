@@ -17,6 +17,8 @@ build binaries, checksums and GHCR images. It does not depend on tag-push events
 from `GITHUB_TOKEN`, which cannot trigger another workflow. The SemVer fork suffix
 makes the GitHub Release a prerelease under the existing GoReleaser configuration;
 the existing image publisher still updates `latest` after a successful build.
+The fork suffix is written into the built artifact, while main's tracked VERSION
+stays aligned with upstream to avoid a version-file conflict on the next sync.
 
 One fork release is made per upstream stable version. Existing completed releases
 are skipped, in-progress releases are allowed to finish, and existing tags are
