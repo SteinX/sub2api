@@ -13,10 +13,15 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/oauth"
 )
 
 const devinAuthTTL = 10 * time.Minute
+
+func devinAuthStoreUnavailable() error {
+	return infraerrors.ServiceUnavailable("DEVIN_AUTH_STORE_UNAVAILABLE", "devin authorization store is temporarily unavailable")
+}
 
 // DevinAuthSession is an internal Redis record, never an HTTP response.
 type DevinAuthSession struct {
@@ -62,7 +67,7 @@ func (v *DevinAuthSession) transportID() int64 {
 
 func (s *DevinService) SaveAuth(ctx context.Context, session *DevinAuthSession) error {
 	if s.store == nil {
-		return errors.New("devin authorization requires Redis")
+		return devinAuthStoreUnavailable()
 	}
 	ttl := time.Until(time.Unix(session.ExpiresAt, 0))
 	if ttl <= 0 {
@@ -72,37 +77,55 @@ func (s *DevinService) SaveAuth(ctx context.Context, session *DevinAuthSession) 
 	if err != nil {
 		return err
 	}
-	return s.store.Set(ctx, devinSessionKey(session.ID), b, ttl)
+	if err = s.store.Set(ctx, devinSessionKey(session.ID), b, ttl); err != nil {
+		return devinAuthStoreUnavailable()
+	}
+	return nil
 }
 func (s *DevinService) LoadAuth(ctx context.Context, id string, owner int64) (*DevinAuthSession, error) {
 	if s.store == nil {
-		return nil, errors.New("devin authorization requires Redis")
+		return nil, devinAuthStoreUnavailable()
 	}
 	b, err := s.store.Get(ctx, devinSessionKey(id))
+	if errors.Is(err, devin.ErrSessionNotFound) {
+		return nil, infraerrors.NotFound("DEVIN_AUTH_SESSION_NOT_FOUND", "devin authorization expired or unavailable")
+	}
 	if err != nil {
-		return nil, errors.New("devin authorization expired or unavailable")
+		return nil, devinAuthStoreUnavailable()
 	}
 	var v DevinAuthSession
 	if json.Unmarshal(b, &v) != nil {
 		return nil, errors.New("invalid authorization session")
 	}
 	if owner != -1 && owner != v.Owner {
-		return nil, errors.New("authorization session belongs to another administrator")
+		return nil, infraerrors.Forbidden("DEVIN_AUTH_SESSION_OWNER", "authorization session belongs to another administrator")
 	}
 	return &v, nil
 }
 func (s *DevinService) AuthLock(ctx context.Context, id string) (func(), error) {
 	if s.store == nil {
-		return nil, errors.New("devin authorization requires Redis")
+		return nil, devinAuthStoreUnavailable()
 	}
 	unlock, ok, err := s.store.Acquire(ctx, devinSessionKey(id)+":lock", 90*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, devinAuthStoreUnavailable()
 	}
 	if !ok {
 		return nil, errors.New("authorization operation is already in progress")
 	}
 	return unlock, nil
+}
+
+// A disconnected caller must not leave a persisted exchange/validation active.
+func (s *DevinService) failAuth(ctx context.Context, v *DevinAuthSession, message string) error {
+	v.Status = "failed"
+	v.Error = message
+	v.Credentials = nil
+	v.Verifier = ""
+	v.TicketHash = ""
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return s.SaveAuth(cleanup, v)
 }
 func (s *DevinService) StartAuth(ctx context.Context, owner int64, proxyID *int64, target int64) (DevinAuthView, error) {
 	id, err := oauth.GenerateSessionID()
@@ -165,26 +188,37 @@ func (s *DevinService) ImportAuth(ctx context.Context, owner int64, content stri
 		return DevinAuthView{}, err
 	}
 	if err = s.ValidateAuth(ctx, v); err != nil {
-		v.Status = "failed"
-		v.Error = "Credential validation failed: " + err.Error()
-		v.Credentials = nil
-		_ = s.SaveAuth(ctx, v)
+		if saveErr := s.failAuth(ctx, v, "Credential validation failed: "+err.Error()); saveErr != nil {
+			return DevinAuthView{}, saveErr
+		}
 		return DevinAuthSummary(v), nil
 	}
 	return DevinAuthSummary(v), nil
 }
 func (s *DevinService) CompleteAuth(ctx context.Context, id, code, state, ticket string, owner int64) (DevinAuthView, error) {
+	loadAuthorized := func() (*DevinAuthSession, error) {
+		v, err := s.LoadAuth(ctx, id, owner)
+		if err != nil {
+			return nil, err
+		}
+		if owner < 0 && subtle.ConstantTimeCompare([]byte(v.TicketHash), []byte(devin.CredentialFingerprint(ticket))) != 1 {
+			return nil, errors.New("invalid pairing ticket")
+		}
+		return v, nil
+	}
+	// Reject unknown sessions and unauthenticated tickets without allocating locks.
+	if _, err := loadAuthorized(); err != nil {
+		return DevinAuthView{}, err
+	}
 	unlock, err := s.AuthLock(ctx, id)
 	if err != nil {
 		return DevinAuthView{}, err
 	}
 	defer unlock()
-	v, err := s.LoadAuth(ctx, id, owner)
+	// Cancellation or another callback may have changed the record while locking.
+	v, err := loadAuthorized()
 	if err != nil {
 		return DevinAuthView{}, err
-	}
-	if owner < 0 && subtle.ConstantTimeCompare([]byte(v.TicketHash), []byte(devin.CredentialFingerprint(ticket))) != 1 {
-		return DevinAuthView{}, errors.New("invalid pairing ticket")
 	}
 	if v.Status != "waiting" {
 		return DevinAuthSummary(v), nil
@@ -206,12 +240,7 @@ func (s *DevinService) CompleteAuth(ctx context.Context, id, code, state, ticket
 		return DevinAuthView{}, errors.New("authorization code or state mismatch")
 	}
 	if denied {
-		v.Status = "failed"
-		v.Error = "Devin sign-in was cancelled or denied"
-		v.Verifier = ""
-		v.TicketHash = ""
-		v.Credentials = nil
-		if err = s.SaveAuth(ctx, v); err != nil {
+		if err = s.failAuth(ctx, v, "Devin sign-in was cancelled or denied"); err != nil {
 			return DevinAuthView{}, err
 		}
 		return DevinAuthSummary(v), nil
@@ -220,30 +249,28 @@ func (s *DevinService) CompleteAuth(ctx context.Context, id, code, state, ticket
 		return DevinAuthView{}, errors.New("authorization code is missing")
 	}
 	v.Status = "exchanging"
-	if err = s.SaveAuth(ctx, v); err != nil {
-		return DevinAuthView{}, err
-	}
-	a := &Account{ID: v.transportID(), ProxyID: v.ProxyID, Concurrency: 1, Credentials: map[string]any{}}
-	client, err := s.Client(ctx, a)
-	if err == nil {
-		var token string
-		token, err = client.Exchange(ctx, code, v.Verifier)
+	if err = s.SaveAuth(ctx, v); err == nil {
+		a := &Account{ID: v.transportID(), ProxyID: v.ProxyID, Concurrency: 1, Credentials: map[string]any{}}
+		var client *devin.Client
+		client, err = s.Client(ctx, a)
 		if err == nil {
-			v.Credentials = map[string]any{"access_token": token, "auth_mode": "cli"}
-			v.Status = "validating"
-			v.Verifier = ""
-			v.TicketHash = ""
-			_ = s.SaveAuth(ctx, v)
-			err = s.ValidateAuth(ctx, v)
+			var token string
+			token, err = client.Exchange(ctx, code, v.Verifier)
+			if err == nil {
+				v.Credentials = map[string]any{"access_token": token, "auth_mode": "cli"}
+				v.Status = "validating"
+				v.Verifier = ""
+				v.TicketHash = ""
+				if err = s.SaveAuth(ctx, v); err == nil {
+					err = s.ValidateAuth(ctx, v)
+				}
+			}
 		}
 	}
 	if err != nil {
-		v.Status = "failed"
-		v.Error = fmt.Sprintf("Devin authorization failed: %v", err)
-		v.Credentials = nil
-		v.Verifier = ""
-		v.TicketHash = ""
-		_ = s.SaveAuth(ctx, v)
+		if saveErr := s.failAuth(ctx, v, fmt.Sprintf("Devin authorization failed: %v", err)); saveErr != nil {
+			return DevinAuthView{}, saveErr
+		}
 	}
 	return DevinAuthSummary(v), nil
 }

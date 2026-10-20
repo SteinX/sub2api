@@ -2,11 +2,14 @@ package devin
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
+
+var ErrSessionNotFound = errors.New("devin session not found")
 
 // SessionStore keeps authorization state shared across server instances.
 type SessionStore interface {
@@ -24,7 +27,11 @@ func NewRedisSessionStore(client *redis.Client) SessionStore {
 	return &RedisSessionStore{client}
 }
 func (s *RedisSessionStore) Get(ctx context.Context, key string) ([]byte, error) {
-	return s.client.Get(ctx, key).Bytes()
+	b, err := s.client.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrSessionNotFound
+	}
+	return b, err
 }
 func (s *RedisSessionStore) Set(ctx context.Context, key string, b []byte, ttl time.Duration) error {
 	return s.client.Set(ctx, key, b, ttl).Err()

@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -21,6 +22,15 @@ type DevinHandler struct {
 
 func NewDevinHandler(d *service.DevinService, a service.AdminService, repo service.AccountRepository) *DevinHandler {
 	return &DevinHandler{d, a, repo}
+}
+
+func writeDevinAuthError(c *gin.Context, err error) {
+	var applicationError *infraerrors.ApplicationError
+	if errors.As(err, &applicationError) {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.BadRequest(c, err.Error())
 }
 func devinOwner(c *gin.Context) int64 {
 	subject, ok := middleware.GetAuthSubjectFromContext(c)
@@ -54,7 +64,7 @@ func (h *DevinHandler) Start(c *gin.Context) {
 		return
 	}
 	if err := h.checkTarget(c.Request.Context(), in.AccountID); err != nil {
-		response.BadRequest(c, err.Error())
+		writeDevinAuthError(c, err)
 		return
 	}
 	var out service.DevinAuthView
@@ -69,7 +79,7 @@ func (h *DevinHandler) Start(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeDevinAuthError(c, err)
 		return
 	}
 	response.Success(c, out)
@@ -77,7 +87,7 @@ func (h *DevinHandler) Start(c *gin.Context) {
 func (h *DevinHandler) Status(c *gin.Context) {
 	v, err := h.devin.LoadAuth(c.Request.Context(), c.Param("id"), devinOwner(c))
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeDevinAuthError(c, err)
 		return
 	}
 	response.Success(c, service.DevinAuthSummary(v))
@@ -96,14 +106,14 @@ func (h *DevinHandler) complete(c *gin.Context, owner int64) {
 	}
 	out, err := h.devin.CompleteAuth(c.Request.Context(), c.Param("id"), in.Code, in.State, in.Ticket, owner)
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeDevinAuthError(c, err)
 		return
 	}
 	response.Success(c, out)
 }
 func (h *DevinHandler) Cancel(c *gin.Context) {
 	if err := h.devin.CancelAuth(c.Request.Context(), c.Param("id"), devinOwner(c)); err != nil {
-		response.BadRequest(c, err.Error())
+		writeDevinAuthError(c, err)
 		return
 	}
 	response.Success(c, gin.H{"cancelled": true})
@@ -112,13 +122,13 @@ func (h *DevinHandler) Commit(c *gin.Context) {
 	ctx := c.Request.Context()
 	unlock, err := h.devin.AuthLock(ctx, c.Param("id"))
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeDevinAuthError(c, err)
 		return
 	}
 	defer unlock()
 	v, err := h.devin.LoadAuth(ctx, c.Param("id"), devinOwner(c))
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeDevinAuthError(c, err)
 		return
 	}
 	if v.Status == "connected" {
@@ -152,7 +162,7 @@ func (h *DevinHandler) Commit(c *gin.Context) {
 	fingerprint := devin.CredentialFingerprint(string(b))
 	credentialUnlock, err := h.devin.AuthLock(ctx, "credential:"+fingerprint)
 	if err != nil {
-		response.BadRequest(c, err.Error())
+		writeDevinAuthError(c, err)
 		return
 	}
 	defer credentialUnlock()

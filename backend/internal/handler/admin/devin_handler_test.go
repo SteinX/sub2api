@@ -4,6 +4,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -17,6 +18,37 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
+
+type devinStatusFailureStore struct {
+	devin.SessionStore
+	err error
+}
+
+func (s *devinStatusFailureStore) Get(context.Context, string) ([]byte, error) {
+	return nil, s.err
+}
+
+func TestDevinStatusDistinguishesExpiredSessionsFromStoreOutages(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+	}{{"expired", devin.ErrSessionNotFound, 404}, {"store outage", errors.New("private Redis diagnostic"), 503}} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := service.NewDevinService(nil, nil, nil, &config.Config{}, &devinStatusFailureStore{err: tc.err})
+			h := NewDevinHandler(d, nil, nil)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("GET", "/status", nil)
+			c.Params = gin.Params{{Key: "id", Value: "session"}}
+			c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 7})
+			h.Status(c)
+			if w.Code != tc.status || strings.Contains(w.Body.String(), "private Redis diagnostic") {
+				t.Fatal(w.Code, w.Body.String())
+			}
+		})
+	}
+}
 
 type devinAdminStub struct {
 	service.AdminService
