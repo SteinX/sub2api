@@ -242,6 +242,7 @@
                 </template>
               </HelpTooltip>
               <span v-else class="font-medium text-gray-900 dark:text-white">{{ value }}</span>
+              <span v-if="row.platform === 'devin'" class="text-xs text-gray-500" :title="t(row.type === 'apikey' ? 'admin.accounts.devin.autoRecover' : 'admin.accounts.devin.reloginRequired')">{{ t(row.type === 'apikey' ? 'admin.accounts.devin.recoverBadge' : 'admin.accounts.devin.manualBadge') }}</span>
               <span
                 v-if="accountDisplayEmail(row)"
                 class="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[200px]"

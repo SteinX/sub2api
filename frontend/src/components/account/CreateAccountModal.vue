@@ -173,6 +173,21 @@
             <PlatformIcon platform="typesafe" size="sm" />
             TypeSafe / Jev
           </button>
+          <button
+            type="button"
+            data-testid="platform-button-devin"
+            @click="form.platform = 'devin'; accountCategory = 'oauth-based'"
+            :aria-pressed="form.platform === 'devin'"
+            :class="[
+              'flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2.5 text-sm font-medium transition-all',
+              form.platform === 'devin'
+                ? 'bg-white text-sky-700 shadow-sm dark:bg-dark-600 dark:text-sky-300'
+                : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
+            ]"
+          >
+            <Icon name="link" size="sm" />
+            Devin
+          </button>
         </div>
         <!-- 国产厂商：Kimi / Zhipu GLM / DeepSeek / MiniMax -->
         <div class="mt-2 flex flex-wrap rounded-lg bg-gray-100 p-1 dark:bg-dark-700" data-testid="platform-row-cn">
@@ -3762,7 +3777,14 @@
 
     <!-- Step 2: OAuth Authorization -->
     <div v-else class="space-y-5">
+      <DevinConnectionFlow
+        v-if="form.platform === 'devin'"
+        :proxy-id="form.proxy_id"
+        :settings="{ name: form.name, notes: form.notes, group_ids: form.group_ids, concurrency: form.concurrency, priority: form.priority, rate_multiplier: form.rate_multiplier }"
+        @connected="emit('created'); handleClose()"
+      />
       <OAuthAuthorizationFlow
+        v-else
         ref="oauthFlowRef"
         :add-method="form.platform === 'anthropic' ? addMethod : 'oauth'"
         :auth-url="currentAuthUrl"
@@ -4215,6 +4237,7 @@ import {
   type OpenAIWSMode
 } from '@/utils/openaiWsMode'
 import OAuthAuthorizationFlow from './OAuthAuthorizationFlow.vue'
+import DevinConnectionFlow from './DevinConnectionFlow.vue'
 
 // Type for exposed OAuthAuthorizationFlow component
 // Note: defineExpose automatically unwraps refs, so we use the unwrapped types
@@ -5035,6 +5058,7 @@ const form = reactive({
 
 // Helper to check if current type needs OAuth flow
 const isOAuthFlow = computed(() => {
+  if (form.platform === 'devin') return true
   // Antigravity upstream 类型不需要 OAuth 流程
   if (form.platform === 'antigravity' && antigravityAccountType.value === 'upstream') {
     return false

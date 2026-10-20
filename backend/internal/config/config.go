@@ -2093,6 +2093,8 @@ func setDefaults() {
 	// Security
 	viper.SetDefault("security.url_allowlist.enabled", false)
 	viper.SetDefault("security.url_allowlist.upstream_hosts", []string{
+		"server.codeium.com",
+		"api.devin.ai",
 		"api.openai.com",
 		"api.anthropic.com",
 		"api.kimi.com",

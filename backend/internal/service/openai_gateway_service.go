@@ -461,6 +461,7 @@ type OpenAIGatewayService struct {
 	deferredService       *DeferredService
 	openAITokenProvider   *OpenAITokenProvider
 	grokTokenProvider     *GrokTokenProvider
+	devin                 *DevinService
 	toolCorrector         *CodexToolCorrector
 	openaiWSResolver      OpenAIWSProtocolResolver
 	resolver              *ModelPricingResolver
@@ -1208,6 +1209,9 @@ func hashSensitiveValueForLog(raw string) string {
 
 // GetAccessToken gets the access token for an OpenAI account
 func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Account) (string, string, error) {
+	if account != nil && account.Platform == PlatformDevin {
+		return "", "", errors.New("Devin credentials must be used through the Devin adapter")
+	}
 	if account.IsShadow() {
 		credAccount, err := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if err != nil {

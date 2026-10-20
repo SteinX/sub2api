@@ -1,5 +1,20 @@
 export default {
     accounts: {
+      devin: {
+        recoverBadge: '自动恢复会话', manualBadge: '失效后需重新登录',
+        intro: '连接 Devin 账号后，系统会校验凭据、同步模型并加入账号池。',
+        key: '长期 API Key（服务端推荐）', browser: '浏览器登录', import: '导入已有登录',
+        keyHint: '在 Devin 设置中创建 cog_ 开头的 API Key，系统会自动获取和恢复会话凭据。Key 被撤销或套餐不支持时需重新连接。',
+        browserHint: '通过 Devin 官方登录页面授权。下载一次性助手后，在浏览器所在电脑运行。',
+        importHint: '选择 credentials.toml / JSON 文件，或粘贴 session token。本次导入不会持续同步本地文件。',
+        connect: '连接 Devin', validating: '正在校验账号和模型…', save: '保存并加入账号池', restart: '重新开始',
+        helperHint: '下载助手并在本机运行：python3 sub2api-devin-login.py（Windows 可用 python）。助手会打开浏览器并自动回填授权结果。',
+        downloadHelper: '下载本次授权助手', manualFallback: '无法运行助手？手动回填', openLogin: '打开 Devin 登录页面',
+        callbackPlaceholder: '粘贴完整的 http://127.0.0.1:59653/callback?... 地址', continue: '继续授权',
+        modelsFound: '已发现 {count} 个可用模型', autoRecover: '此账号支持通过 API Key 自动恢复会话。',
+        reloginRequired: '此登录没有常规刷新凭据；失效后可在原账号上重新连接。', failed: '连接失败，请重试。', fileTooLarge: '凭据文件不能超过 1 MB。',
+        status: { waiting: '等待 Devin 授权', exchanging: '正在兑换授权凭据', validating: '正在校验账号和同步模型', ready: '校验完成，正在保存账号', connected: '已连接', failed: '授权失败' }
+      },
       title: '账号管理',
       description: '管理 AI 平台账号和 Cookie',
       createAccount: '添加账号',
@@ -1098,7 +1113,7 @@ export default {
 	      notAvailable: '当前没有可立即使用的重置，未消耗次数',
 	      failed: '重置请求失败'
 	    }
-	  },
+      },
       autoResetCredit: {
 	    title: '自动使用重置卡',
 	    hint: '仅在实际用量达到阈值时使用最早到期的可用卡；默认关闭。无卡或失败时账号保持暂停。',
@@ -1106,7 +1121,7 @@ export default {
 	    threshold7d: '7d 自动用卡阈值(%)',
 	    thresholdHint: '两个窗口独立判断，任一达到自身阈值即触发。可填写 0.1–100，默认均为 100。',
 	    thresholdInvalid: '自动使用重置卡阈值必须在 0.1% 到 100% 之间。'
-	  },
+      },
       // Quota control (Anthropic OAuth/SetupToken only)
       quotaControl: {
         title: '配额控制',

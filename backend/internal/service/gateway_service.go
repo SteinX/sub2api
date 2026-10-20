@@ -1449,6 +1449,18 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		}
 
 		mapping := acc.GetModelMapping()
+		if acc.Platform == PlatformDevin && len(mapping) == 0 {
+			if raw, ok := acc.Extra["devin_models"]; ok {
+				b, _ := json.Marshal(raw)
+				var ids []string
+				if json.Unmarshal(b, &ids) == nil {
+					for _, id := range ids {
+						modelSet[id] = struct{}{}
+						hasAnyMapping = true
+					}
+				}
+			}
+		}
 		for model := range mapping {
 			// Accounts pulled in through mixed scheduling only contribute the
 			// models that belong to the listing platform (e.g. an antigravity

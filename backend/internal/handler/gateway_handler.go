@@ -1199,6 +1199,10 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	}
 
 	// Fallback to default models
+	if platform == service.PlatformDevin {
+		writeModelsList(c, platform, availableModels)
+		return
+	}
 	if platform == service.PlatformOpenAI {
 		writeModelsListResponse(c, openai.DefaultModels)
 		return
@@ -1341,6 +1345,14 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 }
 
 func writeModelsList(c *gin.Context, platform string, modelIDs []string) {
+	if platform == service.PlatformDevin {
+		rows := make([]gin.H, 0, len(modelIDs))
+		for _, id := range modelIDs {
+			rows = append(rows, gin.H{"id": id, "object": "model", "owned_by": "devin"})
+		}
+		c.JSON(200, gin.H{"object": "list", "data": rows})
+		return
+	}
 	if platform == service.PlatformOpenAI {
 		writeOpenAIModelsList(c, modelIDs)
 		return
@@ -1482,6 +1494,8 @@ func defaultCodexModelIDsForPlatform(platform string) []string {
 
 func defaultModelIDsForPlatform(platform string) []string {
 	switch platform {
+	case service.PlatformDevin:
+		return nil // The account's credential-scoped catalog is authoritative.
 	case service.PlatformOpenAI:
 		return openai.DefaultModelIDs()
 	case service.PlatformGemini:
