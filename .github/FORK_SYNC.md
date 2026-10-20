@@ -5,18 +5,24 @@ and can also be run manually. GitHub may delay scheduled runs. It also runs afte
 updates to `SteinX/sub2api` main, including integration commits made by the agent.
 
 When the latest published stable upstream release has no corresponding fork
-release, it merges upstream **main** into fork **main**, preserving fork commits.
+release, it opens or reuses a `sync/upstream-vX.Y.Z` PR targeting fork **main**.
+It merges fork main into that candidate branch to retain fork commits and runs
+validation before it merges the PR. main is not changed by failed validation.
 This intentionally includes upstream commits made after the stable release tag.
-Conflicts stop the mechanical merge without overwriting fork changes. The hourly
-agent then reads both sides, resolves ordinary integration conflicts, preserves
+Conflicts leave an actionable PR and stop the mechanical merge without
+overwriting fork changes. The maintenance agent then reads both sides, resolves
+ordinary integration conflicts, preserves
 fork behavior, validates the result and updates main through a reviewable commit
 or pull request. A main update triggers this workflow again. Only unresolved
 product decisions, missing access or persistent failures need user intervention.
 Draft and upstream prereleases are excluded.
 
 Frontend lint, type checking and critical tests, plus backend unit and integration
-tests, must pass before an immutable annotated tag such as `v0.2.17-stx.1` is
-created. The existing full `Release` workflow is then explicitly dispatched to
+tests, must pass before the PR is merged. The PR head and main base must still
+match the validated commits; the merged commit must have the same source tree as
+the tested candidate. An immutable annotated tag such as `v0.2.17-stx.1` is then
+created. When main already contains upstream, validation and publication can run
+without an empty PR. The existing full `Release` workflow is explicitly dispatched to
 build binaries, checksums and GHCR images. It does not depend on tag-push events
 from `GITHUB_TOKEN`, which cannot trigger another workflow. The `-stx.N` suffix
 identifies the fork build. The publisher marks these as stable GitHub Releases so
@@ -34,11 +40,19 @@ next run validates that frozen tag and resumes publication. Failed release runs
 require inspection and rerunning the failed jobs in GitHub Actions; scheduled
 checks do not repeatedly retry a known failed publication.
 
-The recurring agent owns upstream integration and publication follow-up; Actions
+The maintenance agent owns upstream integration and publication follow-up; Actions
 executes the checks, builds and publication. A conflict or code failure is a work
 item for the agent to investigate and repair, not merely a notification to the
 user. It must inspect existing integration work and active runs before starting
 another attempt. It must never force-push main, move release tags or bypass tests.
+
+The existing scheduled ChatGPT agent is an exception monitor. It first checks
+managed sync PR mergeability and synchronization/release workflow results. Healthy
+runs and pending checks do not cause code analysis, repeated tests or notifications.
+Conflicts, failed checks and failed publication start active investigation and
+repair. The exposed ChatGPT Automations API only accepts schedules, so this is
+hourly exception polling rather than an instant GitHub webhook. No extra API key
+or GitHub-hosted Codex execution is configured.
 
 No personal access token is required. The workflow uses its repository-scoped
 `GITHUB_TOKEN` with `contents: write` and `actions: write`; the existing Release

@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+    types: [synchronize, reopened]
 
 concurrency:
   group: sync-upstream-release
@@ -15,21 +18,22 @@ concurrency:
 permissions:
   contents: write
   actions: write
+  pull-requests: write
 
 jobs:
   sync:
-    if: github.repository == 'SteinX/sub2api'
+    if: github.repository == 'SteinX/sub2api' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'sync/upstream-')))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.repository.default_branch }}
       - name: Verify and preserve synchronization tooling
         run: |
           node --test .github/test-sync-upstream.cjs
           cp .github/sync-upstream.cjs "$RUNNER_TEMP/sync-upstream.cjs"
-      - name: Check upstream and merge main
+      - name: Check upstream and prepare integration PR
         id: plan
         uses: actions/github-script@v8
         with:
@@ -75,9 +79,12 @@ jobs:
           SYNC_SHA: ${{ steps.plan.outputs.sha }}
           SYNC_TAG: ${{ steps.plan.outputs.tag }}
           UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          SYNC_PR: ${{ steps.plan.outputs.pr_number }}
+          SYNC_BASE_SHA: ${{ steps.plan.outputs.base_sha }}
         with:
           script: |
             await require(process.env.RUNNER_TEMP + '/sync-upstream.cjs').publish(
               {github, context, core},
-              {sha: process.env.SYNC_SHA, tag: process.env.SYNC_TAG, upstreamTag: process.env.UPSTREAM_TAG}
+              {sha: process.env.SYNC_SHA, tag: process.env.SYNC_TAG, upstreamTag: process.env.UPSTREAM_TAG,
+               prNumber: process.env.SYNC_PR, baseSha: process.env.SYNC_BASE_SHA}
             );

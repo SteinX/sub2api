@@ -27,6 +27,39 @@ function checkedSha(sha) {
   return sha;
 }
 
+async function integrationPullRequest({ github, core }, release, upstreamSha, baseSha) {
+  const branch = `sync/upstream-${release.tag_name}`;
+  let ref = await optional(() => github.rest.git.getRef({ ...FORK, ref: `heads/${branch}` }));
+  if (!ref) {
+    await github.rest.git.createRef({ ...FORK, ref: `refs/heads/${branch}`, sha: upstreamSha });
+  }
+  let conflicted = false;
+  try {
+    // Integrate main into the candidate branch, never into main before testing.
+    // An existing branch may contain agent repairs; do not reset or force it.
+    await github.rest.repos.merge({ ...FORK, base: branch, head: baseSha,
+      commit_message: `chore: retain fork main while syncing ${release.tag_name}` });
+  } catch (error) {
+    if (error.status !== 409) throw error;
+    conflicted = true;
+  }
+  const pulls = (await github.rest.pulls.list({ ...FORK, base: 'main',
+    head: `${FORK.owner}:${branch}`, state: 'open' })).data;
+  const pr = pulls[0] || (await github.rest.pulls.create({ ...FORK,
+    base: 'main', head: branch, title: `chore: sync upstream ${release.tag_name}`,
+    body: `Integrate upstream main for ${release.html_url}.\n\nPreserve fork changes. The synchronization workflow must validate this branch before merging and publishing.\n\n<!-- sub2api-upstream-sync:${release.tag_name} -->`,
+  })).data;
+  core.setOutput('pr_number', String(pr.number));
+  core.setOutput('base_sha', baseSha);
+  core.info(`Upstream integration PR: ${pr.html_url}`);
+  if (conflicted) {
+    core.setOutput('agent_needed', 'true');
+    core.setFailed(`Resolve upstream integration conflicts in ${pr.html_url}`);
+    return null;
+  }
+  return checkedSha((await github.rest.repos.getBranch({ ...FORK, branch })).data.commit.sha);
+}
+
 async function plan({ github, context, core }) {
   assertFork(context);
   const release = await optional(() => github.rest.repos.getLatestRelease(UPSTREAM));
@@ -56,12 +89,15 @@ async function plan({ github, context, core }) {
     sha = (await github.rest.repos.getCommit({ ...FORK, ref: tag })).data.sha;
   } else {
     const upstreamSha = checkedSha((await github.rest.repos.getBranch({ ...UPSTREAM, branch: 'main' })).data.commit.sha);
-    // Merge by immutable SHA. GitHub rejects conflicts; never force/reset main.
-    const merged = await github.rest.repos.merge({
-      ...FORK, base: 'main', head: upstreamSha,
-      commit_message: `chore: sync upstream main for ${release.tag_name}`,
-    });
-    sha = merged.data?.sha || (await github.rest.repos.getBranch({ ...FORK, branch: 'main' })).data.commit.sha;
+    const baseSha = checkedSha((await github.rest.repos.getBranch({ ...FORK, branch: 'main' })).data.commit.sha);
+    const comparison = (await github.rest.repos.compareCommitsWithBasehead({
+      ...FORK, basehead: `${baseSha}...${upstreamSha}`,
+    })).data;
+    sha = baseSha;
+    if (!['identical', 'behind'].includes(comparison.status)) {
+      sha = await integrationPullRequest({ github, core }, release, upstreamSha, baseSha);
+      if (!sha) return;
+    }
   }
   core.setOutput('sha', checkedSha(sha));
   core.setOutput('tag', tag);
@@ -70,7 +106,7 @@ async function plan({ github, context, core }) {
   core.info(`Validate ${tag} at ${sha} before publication`);
 }
 
-async function publish({ github, context, core }, { sha, tag, upstreamTag }) {
+async function publish({ github, context, core }, { sha, tag, upstreamTag, prNumber, baseSha }) {
   assertFork(context);
   checkedSha(sha);
   if (!/^v\d+\.\d+\.\d+$/.test(upstreamTag) || tag !== `${upstreamTag}-stx.1`) {
@@ -78,6 +114,25 @@ async function publish({ github, context, core }, { sha, tag, upstreamTag }) {
   }
   const release = (await github.rest.repos.getReleaseByTag({ ...UPSTREAM, tag: upstreamTag })).data;
   if (releaseTag(release) !== tag) throw new Error('Upstream release changed');
+  if (prNumber) {
+    if (!Number.isSafeInteger(Number(prNumber)) || Number(prNumber) < 1) throw new Error('Invalid sync PR number');
+    checkedSha(baseSha);
+    const pr = (await github.rest.pulls.get({ ...FORK, pull_number: Number(prNumber) })).data;
+    if (pr.head.repo.full_name !== 'SteinX/sub2api' || pr.base.ref !== 'main'
+        || pr.head.ref !== `sync/upstream-${upstreamTag}` || pr.head.sha !== sha || pr.state !== 'open') {
+      throw new Error('Sync PR changed during validation');
+    }
+    const main = (await github.rest.repos.getBranch({ ...FORK, branch: 'main' })).data.commit.sha;
+    if (main !== baseSha) throw new Error('main changed during PR validation; retry integration');
+    const testedTree = (await github.rest.git.getCommit({ ...FORK, commit_sha: sha })).data.tree.sha;
+    const merged = (await github.rest.pulls.merge({ ...FORK, pull_number: Number(prNumber),
+      sha, merge_method: 'merge' })).data;
+    if (!merged.merged) throw new Error('Sync PR was not merged');
+    const mergedSha = checkedSha(merged.sha);
+    const mergedTree = (await github.rest.git.getCommit({ ...FORK, commit_sha: mergedSha })).data.tree.sha;
+    if (mergedTree !== testedTree) throw new Error('Merged source differs from the tested PR; do not publish');
+    sha = mergedSha;
+  }
   const existingTag = await optional(() => github.rest.git.getRef({ ...FORK, ref: `tags/${tag}` }));
   if (existingTag) {
     const frozenSha = (await github.rest.repos.getCommit({ ...FORK, ref: tag })).data.sha;
