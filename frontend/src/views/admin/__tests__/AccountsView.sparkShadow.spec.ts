@@ -137,6 +137,16 @@ describe('admin AccountsView — 外审 F2:spark 影子创建接线', () => {
     wrapper.unmount()
   })
 
+  it('reloads accounts when Devin reauthorization finishes without an account payload', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const before = listAccounts.mock.calls.length
+    wrapper.findComponent({ name: 'ReAuthAccountModal' }).vm.$emit('reauthorized')
+    await flushPromises()
+    expect(listAccounts.mock.calls.length).toBeGreaterThan(before)
+    wrapper.unmount()
+  })
+
   it('同一账号复制请求未完成时忽略重复点击', async () => {
     let resolveDuplicate!: (account: { id: number; name: string }) => void
     duplicateAccount.mockImplementationOnce(() => new Promise(resolve => { resolveDuplicate = resolve }))

@@ -1,6 +1,7 @@
 export default {
     accounts: {
       devin: {
+        title: 'Devin Account Authorization', account: 'Devin Account',
         recoverBadge: 'Automatic session recovery', manualBadge: 'Reconnect when expired',
         intro: 'Connect Devin to validate credentials, discover models and add the account to the pool.',
         key: 'Durable API key (recommended for servers)', browser: 'Browser sign-in', import: 'Import existing login',

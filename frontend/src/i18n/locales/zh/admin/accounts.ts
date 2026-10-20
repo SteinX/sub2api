@@ -1,6 +1,7 @@
 export default {
     accounts: {
       devin: {
+        title: 'Devin 账号授权', account: 'Devin 账号',
         recoverBadge: '自动恢复会话', manualBadge: '失效后需重新登录',
         intro: '连接 Devin 账号后，系统会校验凭据、同步模型并加入账号池。',
         key: '长期 API Key（服务端推荐）', browser: '浏览器登录', import: '导入已有登录',

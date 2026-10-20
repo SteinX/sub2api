@@ -185,7 +185,7 @@
                 : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200'
             ]"
           >
-            <Icon name="link" size="sm" />
+            <PlatformIcon platform="devin" size="sm" />
             Devin
           </button>
         </div>
@@ -4263,6 +4263,7 @@ const oauthStepTitle = computed(() => {
   if (form.platform === 'gemini') return t('admin.accounts.oauth.gemini.title')
   if (form.platform === 'antigravity') return t('admin.accounts.oauth.antigravity.title')
   if (form.platform === 'grok') return t('admin.accounts.oauth.grok.title')
+  if (form.platform === 'devin') return t('admin.accounts.devin.title')
   return t('admin.accounts.oauth.title')
 })
 

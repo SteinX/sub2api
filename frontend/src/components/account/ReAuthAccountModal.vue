@@ -14,16 +14,19 @@
           <div
             :class="[
               'flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br',
-              isOpenAILike
-                ? 'from-green-500 to-green-600'
-                : isGemini
-                  ? 'from-blue-500 to-blue-600'
-                  : isAntigravity
-                    ? 'from-purple-500 to-purple-600'
-                    : 'from-orange-500 to-orange-600'
+              account.platform === 'devin'
+                ? 'from-sky-500 to-sky-600'
+                : isOpenAILike
+                  ? 'from-green-500 to-green-600'
+                  : isGemini
+                    ? 'from-blue-500 to-blue-600'
+                    : isAntigravity
+                      ? 'from-purple-500 to-purple-600'
+                      : 'from-orange-500 to-orange-600'
             ]"
           >
-            <Icon name="sparkles" size="md" class="text-white" />
+            <PlatformIcon v-if="account.platform === 'devin'" platform="devin" size="lg" class="text-white" />
+            <Icon v-else name="sparkles" size="md" class="text-white" />
           </div>
           <div>
             <span class="block font-semibold text-gray-900 dark:text-white">{{
@@ -31,7 +34,7 @@
             }}</span>
             <span class="text-sm text-gray-500 dark:text-gray-400">
               {{
-                account.platform === 'devin' ? 'Devin' : isOpenAI
+                account.platform === 'devin' ? t('admin.accounts.devin.account') : isOpenAI
                   ? t('admin.accounts.openaiAccount')
                   : isGemini
                     ? t('admin.accounts.geminiAccount')
@@ -203,6 +206,7 @@ import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
+import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import OAuthAuthorizationFlow from './OAuthAuthorizationFlow.vue'
 import DevinConnectionFlow from './DevinConnectionFlow.vue'
 
