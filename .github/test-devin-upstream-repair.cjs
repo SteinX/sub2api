@@ -280,6 +280,21 @@ test('monitor independently closes a published repair without reading or waking 
   assert.equal(f.calls.some(call => call.name === 'api'), false);
 });
 
+test('a finished session without verified publication raises attention only once', async () => {
+  const first = fixture();
+  await execute(first);
+  const f = fixture({ issue: first.issue, session: { status: 'running', status_detail: 'finished' } });
+  f.core.warning = message => f.calls.push({ name: 'warning', message });
+  await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
+  assert.equal(readState(f.issue).phase, 'active');
+  assert.equal(readState(f.issue).lastAttention, 'running/finished');
+  assert.match(f.issue.body, /Publication is not verified/);
+  assert.equal(f.calls.filter(call => call.name === 'warning').length, 1);
+  await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
+  assert.equal(f.calls.filter(call => call.name === 'warning').length, 1);
+  assert.equal(f.calls.some(call => call.name === 'api' && call.method === 'POST'), false);
+});
+
 test('an intentional release dry run cannot dispatch a missing-artifacts repair', async () => {
   const f = fixture({ source: { name: 'Release', path: '.github/workflows/release.yml',
     display_title: `Release ${TAG} (dry run)`, conclusion: 'success' } });

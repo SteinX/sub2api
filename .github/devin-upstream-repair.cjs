@@ -258,7 +258,7 @@ async function monitor({ github, core }, api, imageCheck) {
     const session = await api('GET', `sessions/${sessionId(state.sessionId)}`);
     const status = `${session.status}/${session.status_detail || 'unknown'}`;
     const attention = session.is_archived || TERMINAL.has(session.status) || QUOTA.test(session.status_detail || '')
-      || ['waiting_for_user', 'waiting_for_approval'].includes(session.status_detail);
+      || ['finished', 'waiting_for_user', 'waiting_for_approval'].includes(session.status_detail);
     if (attention && state.lastAttention !== status) {
       state.lastAttention = status;
       await saveState(github, issue, upstreamTag, state,
