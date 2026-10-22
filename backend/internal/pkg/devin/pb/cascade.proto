@@ -265,6 +265,8 @@ message ModelInfo {
   ModelFeatures model_features = 6;
   int32 max_output_tokens = 13;
   string model_uid = 17;
+  // Independently checked against oh-my-pi's full codeium_common.proto; see generate.go.
+  repeated string harness_uids = 20;
   DisplayOption display_option = 22;
   bool is_model_router = 25;
 }

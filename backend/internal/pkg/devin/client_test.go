@@ -130,8 +130,9 @@ func TestUserJWTAndRouterWireContract(t *testing.T) {
 	defer server.Close()
 	c := &Client{BaseURL: server.URL, Do: server.Client().Do}
 	q := &pb.GetChatMessageRequest{ChatModelUid: "router", CascadeId: "cascade"}
-	base, err := c.Prepare(context.Background(), "test", q, true)
-	if err != nil || base != server.URL || q.ChatModelUid != "actual" || q.GetModelAssignmentJwt() != "assignment" {
+	plan := PlanModel(&pb.ClientModelConfig{ModelUid: "router", ModelInfo: &pb.ModelInfo{IsModelRouter: true}})
+	prepared, err := c.Prepare(context.Background(), "test", q, plan, nil)
+	if err != nil || prepared.BaseURL != server.URL || q.ChatModelUid != "actual" || q.GetModelAssignmentJwt() != "assignment" {
 		t.Fatal(err, q)
 	}
 	f := q.Metadata.ProtoReflect().Descriptor().Fields().ByName("user_jwt")

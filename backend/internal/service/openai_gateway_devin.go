@@ -9,9 +9,14 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 func (s *OpenAIGatewayService) SetDevinService(d *DevinService) { s.devin = d }
@@ -58,6 +63,64 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	req.Stream = inbound.Stream
 	original := req.Model
 	req.Model = resolveOpenAIForwardModel(a, req.Model, mapped)
+	if profile := devinFusionProfile(a, req.Model); profile != nil {
+		return s.forwardDevinFusion(ctx, c, a, body, protocol, original, *profile)
+	}
+	if DevinFusionRequest(ctx) {
+		err := fusion.E("account_bound", "the bound Fusion account or profile is unavailable", 409)
+		WriteDevinFusionError(c, protocol, err)
+		return &OpenAIForwardResult{Model: original, FusionUsageSettled: true}, err
+	}
+	inboundModel, inboundSource := devinInboundModel(ctx, original)
+	traceID, _ := ctx.Value(ctxkey.RequestID).(string)
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	traceID = devin.DiagnosticModelID(traceID)
+	if len(traceID) > 64 {
+		traceID = uuid.NewString()
+	}
+	c.Header("X-Sub2API-Request-Id", traceID)
+	trace := &devin.ModelRouteTrace{TraceID: traceID, ClientRequestedModel: devin.DiagnosticModelID(inboundModel), GatewayEntryModel: devin.DiagnosticModelID(original), MappedModel: devin.DiagnosticModelID(req.Model), SchemaRevision: devin.CatalogSchemaRevision, PolicyRevision: devin.RoutePolicyRevision, IdentityRevision: devin.ResolveClientIdentity(ctx).Revision, RouteMode: devin.RouteBlocked, MechanismStatus: "unverified", Outcome: "failed"}
+	trace.ClientRequestedModelSource, trace.DecisionPhase = inboundSource, "preflight"
+	if inboundModel != original {
+		trace.MappingSteps = append(trace.MappingSteps, devin.RouteMapping{Stage: "handler_channel", From: trace.ClientRequestedModel, To: trace.GatewayEntryModel})
+	}
+	if original != req.Model {
+		// Account mappings take precedence; the dispatch hint is only used when
+		// no account mapping matched. Do not invent a step through an unused hint.
+		stage := "account_alias"
+		if _, matched := a.ResolveMappedModel(original); !matched && strings.TrimSpace(mapped) != "" {
+			stage = "gateway_dispatch"
+		}
+		trace.MappingSteps = append(trace.MappingSteps, devin.RouteMapping{Stage: stage, From: trace.GatewayEntryModel, To: trace.MappedModel})
+	}
+	c.Set("devin_route_trace", trace)
+	defer func() {
+		log := logger.FromContext(ctx).With(zap.String("component", "audit.devin.routing"), zap.String("platform", PlatformDevin))
+		log.Info("devin.route_decision", zap.String("request_id", traceID), zap.String("route_mode", trace.RouteMode), zap.String("decision_code", trace.DecisionCode), zap.String("outcome", trace.Outcome))
+		// Detailed identity/usage evidence is opt-in through the existing debug
+		// log level and authenticated admin system-log viewer, with bounded data.
+		log.Debug("devin.route_trace", zap.String("request_id", traceID), zap.Any("devin_route", trace))
+	}()
+	rejectRoute := func(err error) error {
+		var routeErr *devin.RouteError
+		if errors.As(err, &routeErr) {
+			trace.DecisionCode = routeErr.Code
+			trace.DecisionOrigin = routeErr.Origin()
+		}
+		WriteDevinRouteError(c, protocol, err)
+		return err
+	}
+	if err = devin.CheckModelIntent(nil, inboundModel, original, req.Model); err != nil {
+		for _, uid := range []string{inboundModel, original, req.Model} {
+			if p := devin.PlanModelUID(uid); uid != "" && p.Mode == devin.RouteBlocked {
+				trace.CatalogKind = p.CatalogKind
+				break
+			}
+		}
+		return nil, rejectRoute(err)
+	}
 	if strings.TrimSpace(cacheKey) == "" {
 		cacheKey = req.PromptCacheKey
 	}
@@ -76,31 +139,23 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	if err != nil {
 		return nil, s.devinForwardFailure(c, a, err)
 	}
-	var selected *pb.ClientModelConfig
-	for _, m := range models {
-		if devin.ModelID(m) == req.Model {
-			selected = m
-			break
-		}
-	}
+	trace.CatalogRevision = devin.CatalogRevision(models)
+	selected := devin.FindModel(models, req.Model)
 	if selected == nil {
-		writeError(400, "This Devin account does not advertise the requested model")
-		return nil, fmt.Errorf("devin model is unavailable")
+		return nil, rejectRoute(&devin.RouteError{Code: devin.CodeModelUnavailable})
 	}
-	if limit := selected.GetModelInfo().GetMaxOutputTokens(); limit > 0 {
-		if req.MaxOutputTokens != nil && *req.MaxOutputTokens > int(limit) {
-			writeError(400, "max_output_tokens exceeds this Devin model's limit")
-			return nil, fmt.Errorf("devin output token limit exceeded")
-		}
-		if wire.Configuration.MaxTokens > uint64(limit) {
-			wire.Configuration.MaxTokens = uint64(limit)
-		}
+	plan := devin.PlanModel(selected)
+	trace.CatalogKind, trace.RouteMode, trace.MechanismStatus = plan.CatalogKind, plan.Mode, plan.MechanismStatus
+	trace.CatalogHarnessUIDs = devin.DiagnosticIDs(plan.HarnessUIDs)
+	trace.CapabilitySource = "selected_catalog"
+	if err = devin.CheckModelIntent(models, inboundModel, original, req.Model); err != nil {
+		return nil, rejectRoute(err)
 	}
-	for _, p := range wire.ChatMessagePrompts {
-		if len(p.Images) > 0 && !selected.SupportsImages && !selected.GetModelInfo().GetModelFeatures().GetSupportsImages() {
-			writeError(400, "The selected Devin model does not support images")
-			return nil, fmt.Errorf("devin model has no image support")
-		}
+	if err = plan.Validate(); err != nil {
+		return nil, rejectRoute(err)
+	}
+	if err = devin.ValidateModelCapabilities(wire, selected, req.MaxOutputTokens); err != nil {
+		return nil, rejectRoute(err)
 	}
 	client, err := s.devin.Client(ctx, a)
 	if err != nil {
@@ -181,13 +236,30 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		drainInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
 	for attempt := 0; attempt < 2; attempt++ {
+		trace.DecisionPhase = "assignment"
 		wire.ChatModelUid = req.Model
 		wire.ModelAssignmentJwt = nil
-		base, prepErr := client.Prepare(ctx, token, wire, selected.GetModelInfo().GetIsModelRouter())
+		prepared, prepErr := client.Prepare(ctx, token, wire, plan, models)
+		attemptTrace := devin.RouteAttempt{Number: attempt + 1, AssignmentUsed: prepared.AssignmentUsed, AssignedModel: devin.DiagnosticModelID(prepared.AssignedModelUID), AssignedHarnessUIDs: devin.DiagnosticIDs(prepared.AssignedHarnessUIDs)}
 		err = prepErr
 		if err == nil {
-			err = consumeDevinChat(ctx, c, client, base, token, wire, decoder, req.Stream, &firstToken, &clientDisconnected, drainInterval, started)
+			finalModel := devin.FindModel(models, prepared.FinalModelUID)
+			trace.DecisionPhase = "final_capabilities"
+			if prepared.AssignmentUsed {
+				trace.CapabilitySource = "router_catalog"
+				if finalModel != nil {
+					trace.CapabilitySource = "assigned_catalog"
+				}
+			}
+			err = devin.ValidateModelCapabilities(wire, finalModel, req.MaxOutputTokens)
 		}
+		if err == nil {
+			attemptTrace.WireModel = devin.DiagnosticModelID(wire.ChatModelUid)
+			trace.DecisionPhase = "generation"
+			attemptTrace.GenerationAttempted = ctx.Err() == nil
+			err = consumeDevinChat(ctx, c, client, prepared.BaseURL, token, wire, decoder, req.Stream, &firstToken, &clientDisconnected, drainInterval, started)
+		}
+		trace.Attempts = append(trace.Attempts, attemptTrace)
 		if err == nil {
 			err = decoder.Finish()
 		}
@@ -200,10 +272,16 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		}
 	}
 	billingModel := decoder.BillingModel
+	trace.BillingSource = "upstream_usage"
 	if billingModel == "" {
 		billingModel = req.Model
+		trace.BillingSource = "mapped_request_fallback"
 	}
-	result := &OpenAIForwardResult{Model: original, BillingModel: billingModel, UpstreamModel: wire.ChatModelUid, UpstreamResponseModel: decoder.ActualModel, ResponseID: decoder.Response.ID, Stream: req.Stream, Duration: time.Since(started), FirstTokenMs: firstToken, ClientDisconnect: clientDisconnected || ctx.Err() != nil, UpstreamEndpoint: devin.ChatPath}
+	trace.BillingModel, trace.Evidence = devin.DiagnosticModelID(billingModel), decoder.Evidence
+	if decoder.Response.Usage == nil {
+		trace.BillingModel, trace.BillingSource = "", ""
+	}
+	result := &OpenAIForwardResult{RequestID: traceID, Model: original, BillingModel: billingModel, UpstreamModel: wire.ChatModelUid, UpstreamResponseModel: decoder.ActualModel, UpstreamResponseModelConflict: len(decoder.Evidence.ActualModels) > 1, ResponseID: decoder.Response.ID, Stream: req.Stream, Duration: time.Since(started), FirstTokenMs: firstToken, ClientDisconnect: clientDisconnected || ctx.Err() != nil, UpstreamEndpoint: devin.ChatPath, DevinRoute: trace}
 	if u := decoder.Response.Usage; u != nil {
 		result.Usage = OpenAIUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheCreationInputTokens: u.CacheCreationInputTokens}
 		if u.InputTokensDetails != nil {
@@ -211,25 +289,42 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		}
 	}
 	if result.ClientDisconnect {
+		trace.Outcome = "client_disconnected"
 		return result, err
 	}
 	if err != nil {
+		var routeErr *devin.RouteError
+		if errors.As(err, &routeErr) {
+			trace.DecisionCode = routeErr.Code
+			trace.DecisionOrigin = routeErr.Origin()
+		}
 		if !c.Writer.Written() {
+			if routeErr != nil {
+				WriteDevinRouteError(c, protocol, routeErr)
+				if decoder.Response.Usage != nil {
+					return result, err
+				}
+				return nil, err
+			}
 			if decoder.Started {
 				writeError(502, "Devin generation did not complete")
 				return result, err
 			}
 			return nil, s.devinForwardFailure(c, a, err)
 		}
+		code, message := "upstream_error", "Devin stream failed"
+		if routeErr != nil {
+			code, message = routeErr.Code, routeErr.Error()
+		}
 		switch protocol {
 		case "anthropic":
-			b, _ := json.Marshal(gin.H{"type": "error", "error": gin.H{"type": "api_error", "message": "Devin stream failed"}})
+			b, _ := json.Marshal(gin.H{"type": "error", "error": gin.H{"type": "api_error", "message": message}})
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", b)
 		case "chat":
-			b, _ := json.Marshal(gin.H{"error": gin.H{"type": "upstream_error", "message": "Devin stream failed"}})
+			b, _ := json.Marshal(gin.H{"error": gin.H{"type": "upstream_error", "code": code, "message": message}})
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
 		default:
-			_ = emit(apicompat.ResponsesStreamEvent{Type: "response.failed", Response: &apicompat.ResponsesResponse{ID: decoder.Response.ID, Object: "response", CreatedAt: decoder.Response.CreatedAt, Model: original, Status: "failed", Output: decoder.Response.Output, Error: &apicompat.ResponsesError{Code: "upstream_error", Message: "Devin stream failed"}}})
+			_ = emit(apicompat.ResponsesStreamEvent{Type: "response.failed", Response: &apicompat.ResponsesResponse{ID: decoder.Response.ID, Object: "response", CreatedAt: decoder.Response.CreatedAt, Model: original, Status: "failed", Output: decoder.Response.Output, Error: &apicompat.ResponsesError{Code: code, Message: message}}})
 		}
 		c.Writer.Flush()
 		return result, err
@@ -250,6 +345,8 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			c.Writer.Flush()
 		}
 	}
+	trace.Outcome = "completed"
+	trace.DecisionPhase = "completed"
 	return result, nil
 }
 

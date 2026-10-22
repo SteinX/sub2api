@@ -29,6 +29,7 @@ type EventDecoder struct {
 	Started         bool
 	ActualModel     string
 	BillingModel    string
+	Evidence        ModelEvidence
 }
 
 func NewEventDecoder(model string, emit func(apicompat.ResponsesStreamEvent) error) *EventDecoder {
@@ -97,6 +98,7 @@ func (d *EventDecoder) closeBlock() error {
 	return err
 }
 func (d *EventDecoder) Apply(m *pb.GetChatMessageResponse) error {
+	d.Evidence.Observe(m)
 	if m.MessageId != "" {
 		d.messageID = m.MessageId
 	}
@@ -112,6 +114,13 @@ func (d *EventDecoder) Apply(m *pb.GetChatMessageResponse) error {
 			d.BillingModel = model
 		}
 		d.Response.Usage = &apicompat.ResponsesUsage{InputTokens: int(u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens), OutputTokens: int(u.OutputTokens), TotalTokens: int(u.InputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.OutputTokens), CacheCreationInputTokens: int(u.CacheWriteTokens), InputTokensDetails: &apicompat.ResponsesInputTokensDetails{CachedTokens: int(u.CacheReadTokens), CacheCreationTokens: int(u.CacheWriteTokens)}}
+	}
+	// Preserve any observed usage before rejecting a conflicting upstream
+	// execution identity, including when content has already been streamed.
+	for _, uid := range []string{m.GetActualModelUid(), m.GetUsage().GetModelUid()} {
+		if uid != "" && PlanModelUID(uid).Mode == RouteBlocked {
+			return &RouteError{Code: CodeRouteMismatch}
+		}
 	}
 	if m.DeltaText == "" && m.DeltaThinking == "" && m.DeltaSignature == "" && len(m.DeltaToolCalls) == 0 {
 		return nil

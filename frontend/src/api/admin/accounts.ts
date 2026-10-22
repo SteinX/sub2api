@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import type { DevinModelRoute } from './devin'
 import type { OpenAIReferralRefreshResult, OpenAIReferralSendResult } from '@/types/openaiReferrals'
 import type {
   Account,
@@ -609,6 +610,7 @@ export async function getAvailableModels(id: number): Promise<ClaudeModel[]> {
 
 export interface SyncUpstreamModelsResult {
   models: string[]
+  devin_routes?: DevinModelRoute[]
   metadata?: Record<string, UpstreamModelMetadata>
   warnings?: UpstreamModelSyncWarning[]
 }

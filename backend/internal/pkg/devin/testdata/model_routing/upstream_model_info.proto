@@ -1,0 +1,13 @@
+syntax = "proto3";
+package exa.codeium_common_pb;
+
+// Independent fixture source, extracted from ModelInfo in:
+// https://github.com/can1357/oh-my-pi/blob/3a2758b68f7c8e6bdf22c3a76b86c8675e5e0c9e/packages/ai/src/providers/devin/proto/exa/codeium_common_pb/codeium_common.proto
+// Kept separate from the application's subset and generator. The fixture is
+// synthetic and contains no live account data or credentials.
+message ModelInfo {
+  string model_uid = 17;
+  int32 max_output_tokens = 13;
+  repeated string harness_uids = 20;
+  bool is_model_router = 25;
+}

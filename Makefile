@@ -14,6 +14,8 @@ FRONTEND_CRITICAL_VITEST := \
 	src/components/account/__tests__/credentialsBuilder.platformCatalog.spec.ts \
 	src/components/account/__tests__/CreateAccountModal.spec.ts \
 	src/components/account/__tests__/DevinConnectionFlow.spec.ts \
+	src/components/account/__tests__/DevinModelRoutes.spec.ts \
+	src/components/account/__tests__/DevinFusionProfiles.spec.ts \
 	src/components/account/__tests__/AccountUsageCell.spec.ts \
 	src/components/account/__tests__/ModelWhitelistSelector.spec.ts \
 	src/components/admin/account/__tests__/ReAuthAccountModal.devin.spec.ts \

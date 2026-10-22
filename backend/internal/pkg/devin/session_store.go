@@ -51,3 +51,18 @@ func (s *RedisSessionStore) Acquire(ctx context.Context, key string, ttl time.Du
 		_ = s.client.Eval(cleanup, `if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('del',KEYS[1]) end return 0`, []string{key}, ticket).Err()
 	}, true, nil
 }
+
+// CompareAndSwap persists an entire versioned Fusion session atomically. A nil
+// expected value creates only a missing key. Ordinary auth sessions keep Set.
+func (s *RedisSessionStore) CompareAndSwap(ctx context.Context, key string, expected, next []byte, ttl time.Duration) (bool, error) {
+	const script = `local current = redis.call('get', KEYS[1])
+ if (ARGV[1] == 'create' and not current) or (ARGV[1] == 'update' and current == ARGV[2]) then
+ redis.call('psetex', KEYS[1], ARGV[4], ARGV[3]); return 1 end
+ return 0`
+	mode := "update"
+	if expected == nil {
+		mode = "create"
+	}
+	n, err := s.client.Eval(ctx, script, []string{key}, mode, string(expected), string(next), max(ttl.Milliseconds(), 1)).Int()
+	return n == 1, err
+}

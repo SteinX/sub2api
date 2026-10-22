@@ -448,6 +448,13 @@ func setOpsRequestContext(c *gin.Context, model string, stream bool) {
 	c.Set(opsStreamKey, stream)
 	if c.Request != nil && model != "" {
 		ctx := context.WithValue(c.Request.Context(), ctxkey.Model, model)
+		if _, exists := ctx.Value(ctxkey.InboundModel).(string); !exists {
+			inbound := model
+			if public, ok := service.RequestedPublicModelFromContext(ctx); ok {
+				inbound = public
+			}
+			ctx = context.WithValue(ctx, ctxkey.InboundModel, inbound)
+		}
 		c.Request = c.Request.WithContext(ctx)
 	}
 }

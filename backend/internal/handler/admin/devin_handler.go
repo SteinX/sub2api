@@ -197,6 +197,9 @@ func (h *DevinHandler) Commit(c *gin.Context) {
 		kind = service.AccountTypeAPIKey
 	}
 	extra := map[string]any{"devin_credential_id": fingerprint, "devin_auth_source": v.Credentials["auth_mode"], "devin_models": v.Models, "devin_auth_session_id": v.ID}
+	if v.Catalog != nil {
+		extra["devin_model_catalog"] = v.Catalog
+	}
 	if v.TargetAccountID != 0 {
 		old, loadErr := h.admin.GetAccount(ctx, v.TargetAccountID)
 		if loadErr != nil {

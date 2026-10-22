@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -251,6 +252,12 @@ type OpenAIForwardResult struct {
 	// response before any client-facing rewrite or protocol conversion.
 	UpstreamResponseModel         string
 	UpstreamResponseModelConflict bool
+	// DevinRoute contains bounded internal diagnostics; standard API responses
+	// continue to use the client-facing model alias.
+	DevinRoute *devin.ModelRouteTrace
+	// FusionUsageSettled suppresses billing of the public aggregate. Each physical
+	// inference has already been settled with its own durable fusion: attempt ID.
+	FusionUsageSettled bool
 	// UpstreamResponseServiceTier is the tier the upstream reports having used
 	// (response service_tier: "priority" / "default" / "flex" / ...); "" when not declared.
 	UpstreamResponseServiceTier string
