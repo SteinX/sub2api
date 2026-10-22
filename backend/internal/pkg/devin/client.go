@@ -187,8 +187,8 @@ func (c *Client) Models(ctx context.Context, token string) ([]*pb.ClientModelCon
 }
 
 func ModelID(m *pb.ClientModelConfig) string {
-	if m.ModelUid != "" {
-		return m.ModelUid
+	if m.GetModelUid() != "" {
+		return m.GetModelUid()
 	}
 	if m.GetModelInfo().GetModelUid() != "" {
 		return m.ModelInfo.ModelUid
@@ -196,16 +196,39 @@ func ModelID(m *pb.ClientModelConfig) string {
 	return m.GetModelOrAlias().GetModel()
 }
 
-// Prepare resolves the account host and optional router before sending any chat content.
-func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessageRequest, router bool) (string, error) {
+type PrepareResult struct {
+	BaseURL             string   `json:"-"`
+	FinalModelUID       string   `json:"final_model_uid,omitempty"`
+	AssignmentUsed      bool     `json:"assignment_used"`
+	AssignedModelUID    string   `json:"assigned_model_uid,omitempty"`
+	AssignedHarnessUIDs []string `json:"assigned_harness_uids,omitempty"`
+}
+
+// Prepare validates a concrete route before authorization, then validates the
+// assignment before installing its UID/JWT. Local decisions never refresh auth.
+func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessageRequest, plan ModelRoutePlan, catalog []*pb.ClientModelConfig) (*PrepareResult, error) {
+	result := &PrepareResult{}
+	if err := plan.Validate(); err != nil {
+		return result, err
+	}
+	if req.GetChatModelUid() != plan.ModelUID || len(plan.HarnessUIDs) > 0 {
+		return result, &RouteError{Code: CodeRouteMismatch}
+	}
+	if err := CheckModelIntent(catalog, plan.ModelUID); err != nil {
+		return result, err
+	}
+	if selected := FindModel(catalog, plan.ModelUID); selected != nil && PlanModel(selected).Mode != plan.Mode {
+		return result, &RouteError{Code: CodeRouteMismatch}
+	}
+	req.ModelAssignmentJwt = nil
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out := &pb.GetUserJwtResponse{}
 	if err := c.unary(ctx, c.BaseURL, UserJWTPath, token, &pb.GetUserJwtRequest{Metadata: c.identity().Chat.metadata(token)}, out); err != nil {
-		return "", err
+		return result, err
 	}
 	if out.UserJwt == "" {
-		return "", errors.New("devin returned no user JWT")
+		return result, errors.New("devin returned no user JWT")
 	}
 	req.Metadata = c.identity().Chat.metadata(token)
 	req.Metadata.UserJwt = out.UserJwt
@@ -213,11 +236,13 @@ func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessa
 	if out.CustomApiServerUrl != "" {
 		u, parseErr := url.Parse(out.CustomApiServerUrl)
 		if parseErr != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			return "", errors.New("devin returned an invalid account API host")
+			return result, errors.New("devin returned an invalid account API host")
 		}
 		base = out.CustomApiServerUrl
 	}
-	if router {
+	result.BaseURL = base
+	if plan.Mode == RouteAssign {
+		result.AssignmentUsed = true
 		a := &pb.AssignModelResponse{}
 		in := &pb.AssignModelRequest{Metadata: req.Metadata, ModelRouterUid: req.ChatModelUid, CascadeId: req.CascadeId}
 		for i := len(req.ChatMessagePrompts) - 1; i >= 0; i-- {
@@ -227,15 +252,18 @@ func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessa
 			}
 		}
 		if err := c.unary(ctx, base, AssignPath, token, in, a); err != nil {
-			return "", err
+			return result, err
 		}
-		if a.GetAssignment().GetModelUid() == "" || a.GetAssignment().GetAssignmentJwt() == "" {
-			return "", errors.New("devin returned an incomplete model assignment")
+		result.AssignedModelUID = a.GetAssignment().GetModelUid()
+		result.AssignedHarnessUIDs = append([]string(nil), a.GetAssignment().GetHarnessUids()...)
+		if err := ValidateAssignment(a.GetAssignment(), catalog); err != nil {
+			return result, err
 		}
 		req.ChatModelUid = a.Assignment.ModelUid
 		req.ModelAssignmentJwt = proto.String(a.Assignment.AssignmentJwt)
 	}
-	return base, nil
+	result.FinalModelUID = req.ChatModelUid
+	return result, nil
 }
 
 func (c *Client) Chat(ctx context.Context, base, token string, in *pb.GetChatMessageRequest, emit func(*pb.GetChatMessageResponse) error) error {

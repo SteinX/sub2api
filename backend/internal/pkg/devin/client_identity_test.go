@@ -97,7 +97,8 @@ func TestClientIdentitySnapshotUsedAcrossRPCs(t *testing.T) {
 	}
 	ctx := context.Background()
 	chat := &pb.GetChatMessageRequest{ChatModelUid: "router"}
-	if _, err := client.Prepare(ctx, "test", chat, true); err != nil {
+	plan := PlanModel(&pb.ClientModelConfig{ModelUid: chat.ChatModelUid, ModelInfo: &pb.ModelInfo{IsModelRouter: true}})
+	if _, err := client.Prepare(ctx, "test", chat, plan, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.Models(ctx, "test"); err != nil {

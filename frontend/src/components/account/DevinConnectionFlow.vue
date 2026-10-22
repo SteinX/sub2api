@@ -33,6 +33,7 @@
       </template>
       <template v-if="session.status === 'ready' || session.status === 'connected'">
         <p class="text-sm">{{ t('admin.accounts.devin.modelsFound', { count: session.models?.length ?? 0 }) }}</p>
+        <DevinModelRoutes v-if="session.model_routes?.length" :routes="session.model_routes" />
         <p class="text-sm text-gray-500">{{ t(session.auto_recover ? 'admin.accounts.devin.autoRecover' : 'admin.accounts.devin.reloginRequired') }}</p>
         <button v-if="session.status === 'ready'" type="button" class="btn btn-primary" :disabled="busy" @click="commit">{{ t('admin.accounts.devin.save') }}</button>
       </template>
@@ -48,6 +49,7 @@ import { useI18n } from 'vue-i18n'
 import { buildApiUrl } from '@/api/client'
 import { devinAPI, type DevinAccountSettings, type DevinSession } from '@/api/admin/devin'
 import helperSource from './devin-auth-helper.py?raw'
+import DevinModelRoutes from './DevinModelRoutes.vue'
 
 const props = defineProps<{ accountId?: number; proxyId?: number | null; settings: DevinAccountSettings }>()
 const emit = defineEmits<{ connected: [] }>()

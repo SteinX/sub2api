@@ -29,6 +29,9 @@ const (
 	// Model 请求模型标识（用于统一请求链路日志字段）。
 	Model Key = "ctx_model"
 
+	// InboundModel is captured before handler/channel/account model mappings.
+	InboundModel Key = "ctx_inbound_model"
+
 	// Platform 当前请求最终命中的平台（用于统一请求链路日志字段）。
 	Platform Key = "ctx_platform"
 

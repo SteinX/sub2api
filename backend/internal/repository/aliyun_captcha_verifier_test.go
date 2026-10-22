@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -26,6 +27,9 @@ func newAliyunCaptchaTestTarget(t *testing.T, handler http.HandlerFunc) (*aliyun
 		SceneID:         "scene-1",
 		Endpoint:        strings.TrimPrefix(server.URL, "http://"),
 	}
+	// The SDK compares NO_PROXY entries to host:port literally. Keep the
+	// loopback mock local even in development/CI environments with a proxy.
+	t.Setenv("NO_PROXY", strings.Trim(os.Getenv("NO_PROXY")+","+cred.Endpoint, ","))
 	return verifier, cred
 }
 

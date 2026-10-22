@@ -27,36 +27,43 @@ func devinAuthStoreUnavailable() error {
 
 // DevinAuthSession is an internal Redis record, never an HTTP response.
 type DevinAuthSession struct {
-	ID              string         `json:"id"`
-	Owner           int64          `json:"owner"`
-	Status          string         `json:"status"`
-	State           string         `json:"state"`
-	Verifier        string         `json:"verifier,omitempty"`
-	TicketHash      string         `json:"ticket_hash,omitempty"`
-	Credentials     map[string]any `json:"credentials,omitempty"`
-	ProxyID         *int64         `json:"proxy_id,omitempty"`
-	TargetAccountID int64          `json:"target_account_id,omitempty"`
-	Models          []string       `json:"models,omitempty"`
-	Error           string         `json:"error,omitempty"`
-	AccountID       int64          `json:"account_id,omitempty"`
-	AutoRecover     bool           `json:"auto_recover,omitempty"`
-	ExpiresAt       int64          `json:"expires_at"`
+	ID              string                 `json:"id"`
+	Owner           int64                  `json:"owner"`
+	Status          string                 `json:"status"`
+	State           string                 `json:"state"`
+	Verifier        string                 `json:"verifier,omitempty"`
+	TicketHash      string                 `json:"ticket_hash,omitempty"`
+	Credentials     map[string]any         `json:"credentials,omitempty"`
+	ProxyID         *int64                 `json:"proxy_id,omitempty"`
+	TargetAccountID int64                  `json:"target_account_id,omitempty"`
+	Models          []string               `json:"models,omitempty"`
+	Catalog         *devin.CatalogSnapshot `json:"catalog,omitempty"`
+	Error           string                 `json:"error,omitempty"`
+	AccountID       int64                  `json:"account_id,omitempty"`
+	AutoRecover     bool                   `json:"auto_recover,omitempty"`
+	ExpiresAt       int64                  `json:"expires_at"`
 }
 type DevinAuthView struct {
-	ID            string   `json:"id"`
-	Status        string   `json:"status"`
-	AuthURL       string   `json:"auth_url,omitempty"`
-	PairingTicket string   `json:"pairing_ticket,omitempty"`
-	Models        []string `json:"models"`
-	AutoRecover   bool     `json:"auto_recover"`
-	Error         string   `json:"error,omitempty"`
-	AccountID     int64    `json:"account_id,omitempty"`
-	ExpiresAt     int64    `json:"expires_at"`
+	ID            string                 `json:"id"`
+	Status        string                 `json:"status"`
+	AuthURL       string                 `json:"auth_url,omitempty"`
+	PairingTicket string                 `json:"pairing_ticket,omitempty"`
+	Models        []string               `json:"models"`
+	ModelRoutes   []devin.ModelRoutePlan `json:"model_routes,omitempty"`
+	AutoRecover   bool                   `json:"auto_recover"`
+	Error         string                 `json:"error,omitempty"`
+	AccountID     int64                  `json:"account_id,omitempty"`
+	ExpiresAt     int64                  `json:"expires_at"`
 }
 
 func DevinAuthSummary(session *DevinAuthSession) DevinAuthView {
 	key, _ := session.Credentials["api_key"].(string)
-	return DevinAuthView{ID: session.ID, Status: session.Status, Models: session.Models, AutoRecover: key != "" || session.AutoRecover, Error: session.Error, AccountID: session.AccountID, ExpiresAt: session.ExpiresAt}
+	view := DevinAuthView{ID: session.ID, Status: session.Status, Models: session.Models, AutoRecover: key != "" || session.AutoRecover, Error: session.Error, AccountID: session.AccountID, ExpiresAt: session.ExpiresAt}
+	if session.Catalog != nil {
+		view.Models = devinEffectiveModelIDs(session.Catalog.Models, nil)
+		view.ModelRoutes = devinEffectiveModelRoutes(session.Catalog.Models, nil)
+	}
+	return view
 }
 func devinSessionKey(id string) string { return "devin:auth:" + id }
 
@@ -189,6 +196,7 @@ func (s *DevinService) StartAuth(ctx context.Context, owner int64, proxyID *int6
 	return out, nil
 }
 func (s *DevinService) ValidateAuth(ctx context.Context, v *DevinAuthSession) error {
+	ctx = devin.WithClientIdentity(ctx)
 	v.AutoRecover = v.Credentials["api_key"] != nil
 	a := &Account{ID: v.transportID(), Platform: PlatformDevin, Type: AccountTypeOAuth, Credentials: v.Credentials, ProxyID: v.ProxyID, Concurrency: 1}
 	if v.TargetAccountID != 0 {
@@ -215,6 +223,7 @@ func (s *DevinService) ValidateAuth(ctx context.Context, v *DevinAuthSession) er
 		return errors.New("devin account returned no available models")
 	}
 	v.Models = make([]string, 0, len(models))
+	v.Catalog = devin.NewCatalogSnapshot(models, devin.ResolveClientIdentity(ctx).Revision)
 	for _, m := range models {
 		v.Models = append(v.Models, devin.ModelID(m))
 	}

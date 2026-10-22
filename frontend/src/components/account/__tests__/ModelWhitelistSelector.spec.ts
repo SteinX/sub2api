@@ -86,6 +86,22 @@ function findModelRow(wrapper: ReturnType<typeof mountSelector>, modelId: string
 }
 
 describe('ModelWhitelistSelector', () => {
+  it('retains blocked Devin entries as diagnostics without adding them to selectable models', async () => {
+    syncUpstreamModels.mockResolvedValue({
+      models: [],
+      devin_routes: [{ model_uid: 'fusion-lead-sidekick-worker', catalog_kind: 'client_pairing_candidate', route_mode: 'blocked', mechanism_status: 'unverified' }],
+      warnings: [{ code: 'devin_model_routes_blocked', message: 'unsupported execution route' }]
+    })
+    const wrapper = mountSelector({ platform: 'devin', accountId: 44, availableModels: ['fusion-lead-sidekick-worker'] })
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.syncUpstreamModels')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.devin.routesBlocked')
+    expect(wrapper.get('[data-testid=devin-model-routes]').text()).toContain('fusion-lead-sidekick-worker')
+    expect(wrapper.get('[data-testid=devin-model-routes]').text()).toContain('admin.accounts.devin.routePairingUnsupported')
+    await wrapper.get('.relative > .cursor-pointer').trigger('click')
+    expect(wrapper.findAll('[data-testid=model-option]')).toHaveLength(0)
+  })
   it('discards an earlier Devin account sync after switching accounts', async () => {
     let finish!: (result: { models: string[] }) => void
     syncUpstreamModels.mockImplementation(() => new Promise(resolve => { finish = resolve }))

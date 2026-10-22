@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
 	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sync/singleflight"
@@ -30,18 +31,36 @@ type devinRuntime struct {
 
 // DevinService owns credential-scoped runtime caches; account scheduling stays in the gateway.
 type DevinService struct {
-	repo      AccountRepository
-	proxyRepo ProxyRepository
-	upstream  HTTPUpstream
-	cfg       *config.Config
-	store     devin.SessionStore
-	mu        sync.Mutex
-	runtime   map[string]devinRuntime
-	flights   singleflight.Group
+	repo         AccountRepository
+	proxyRepo    ProxyRepository
+	upstream     HTTPUpstream
+	cfg          *config.Config
+	store        devin.SessionStore
+	mu           sync.Mutex
+	runtime      map[string]devinRuntime
+	flights      singleflight.Group
+	fusionRunner *fusion.MaintenanceRunner
+	fusionCache  *fusion.CacheKeepaliveController
 }
 
 func NewDevinService(repo AccountRepository, proxyRepo ProxyRepository, upstream HTTPUpstream, cfg *config.Config, store devin.SessionStore) *DevinService {
 	return &DevinService{repo: repo, proxyRepo: proxyRepo, upstream: upstream, cfg: cfg, store: store, runtime: map[string]devinRuntime{}}
+}
+
+func (s *DevinService) fusionEngine() *fusion.Engine {
+	s.mu.Lock()
+	if s.fusionRunner == nil {
+		s.fusionRunner = fusion.NewMaintenanceRunner(16)
+	}
+	if s.fusionCache == nil {
+		s.fusionCache = fusion.NewCacheKeepaliveController(s.store)
+	}
+	runner, cache := s.fusionRunner, s.fusionCache
+	s.mu.Unlock()
+	e := fusion.New(s.store)
+	e.Runner = runner
+	e.Cache = cache
+	return e
 }
 
 func (a *Account) devinModelIDs() []string {
@@ -66,7 +85,18 @@ func (a *Account) supportsDevinModel(requested string) bool {
 	if mapping := a.GetModelMapping(); len(mapping) > 0 && !mappingSupportsRequestedModel(mapping, requested) {
 		return false
 	}
-	return slices.Contains(a.devinModelIDs(), a.GetMappedModel(requested))
+	target := a.GetMappedModel(requested)
+	if profile := devinFusionProfile(a, target); profile != nil {
+		return validateDevinFusionMembers(*profile, devinFusionCatalog(a)) == nil
+	}
+	if !slices.Contains(a.devinModelIDs(), target) {
+		return false
+	}
+	var catalog []*pb.ClientModelConfig
+	if snapshot := devinAccountCatalog(a); snapshot != nil {
+		catalog = snapshot.Models
+	}
+	return devin.CheckModelIntent(catalog, requested, target) == nil
 }
 
 func (s *DevinService) runtimeKey(ctx context.Context, a *Account) string {
@@ -74,7 +104,7 @@ func (s *DevinService) runtimeKey(ctx context.Context, a *Account) string {
 	if a.ProxyID != nil {
 		proxy = strconv.FormatInt(*a.ProxyID, 10)
 	}
-	return devin.CredentialFingerprint(strconv.FormatInt(a.ID, 10), a.GetCredential("api_key"), a.GetCredential("access_token"), a.GetCredential("base_url"), proxy, devin.ResolveClientIdentity(ctx).Fingerprint())
+	return devin.CredentialFingerprint(strconv.FormatInt(a.ID, 10), a.GetCredential("api_key"), a.GetCredential("access_token"), a.GetCredential("base_url"), proxy, devin.ResolveClientIdentity(ctx).Fingerprint(), devin.CatalogSchemaRevision, devin.RoutePolicyRevision)
 }
 func (s *DevinService) ValidateURL(raw string) (string, error) {
 	return (&AccountTestService{cfg: s.cfg}).validateUpstreamBaseURL(raw)
@@ -294,9 +324,19 @@ func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([
 	e := s.runtime[key]
 	s.mu.Unlock()
 	if (len(force) == 0 || !force[0]) && e.models != nil && time.Now().Before(e.modelsUntil) {
-		return e.models, nil
+		return devin.CloneModels(e.models), nil
 	}
 	pending := s.flights.DoChan("models:"+key, func() (any, error) {
+		// Another caller may populate the cache between the first lookup and
+		// entering singleflight after an earlier flight has already completed.
+		if len(force) == 0 || !force[0] {
+			s.mu.Lock()
+			cached := s.runtime[key]
+			s.mu.Unlock()
+			if cached.models != nil && time.Now().Before(cached.modelsUntil) {
+				return cached.models, nil
+			}
+		}
 		sharedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		token, err := s.Token(sharedCtx, a, false)
@@ -346,14 +386,23 @@ func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([
 	if !ok {
 		return nil, errors.New("invalid Devin model cache result")
 	}
-	return models, nil
+	return devin.CloneModels(models), nil
 }
 
-func DevinModelsBody(models []*pb.ClientModelConfig) ([]byte, error) {
+func DevinModelsBody(models []*pb.ClientModelConfig, accounts ...*Account) ([]byte, error) {
+	var account *Account
+	if len(accounts) > 0 {
+		account = accounts[0]
+	}
+	routes := devinEffectiveModelRoutes(models, account)
 	rows := make([]map[string]any, 0, len(models))
-	for _, m := range models {
+	for i, m := range models {
+		plan := routes[i]
+		if plan.Mode == devin.RouteBlocked {
+			continue
+		}
 		f := m.GetModelInfo().GetModelFeatures()
-		rows = append(rows, map[string]any{"id": devin.ModelID(m), "object": "model", "owned_by": "devin", "name": m.Label, "context_window": m.MaxTokens, "max_output_tokens": m.GetModelInfo().GetMaxOutputTokens(), "supports_images": m.SupportsImages || f.GetSupportsImages(), "supports_tool_calls": f.GetSupportsToolCalls(), "supports_thinking": f.GetSupportsThinking(), "is_model_router": m.GetModelInfo().GetIsModelRouter()})
+		rows = append(rows, map[string]any{"id": devin.ModelID(m), "object": "model", "owned_by": "devin", "name": m.Label, "context_window": m.MaxTokens, "max_output_tokens": m.GetModelInfo().GetMaxOutputTokens(), "supports_images": m.SupportsImages || f.GetSupportsImages(), "supports_tool_calls": f.GetSupportsToolCalls() || plan.Mode == fusion.RouteMode, "supports_thinking": f.GetSupportsThinking(), "is_model_router": plan.Mode == devin.RouteAssign})
 	}
 	return json.Marshal(map[string]any{"object": "list", "data": rows})
 }

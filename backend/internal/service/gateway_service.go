@@ -1450,7 +1450,17 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 
 		mapping := acc.GetModelMapping()
 		if acc.Platform == PlatformDevin && len(mapping) == 0 {
-			for _, id := range acc.devinModelIDs() {
+			ids := append([]string(nil), acc.devinModelIDs()...)
+			profiles, _ := devinFusionProfiles(&acc)
+			for _, profile := range profiles {
+				if profile.Enabled {
+					ids = append(ids, profile.PublicModel)
+				}
+			}
+			for _, id := range ids {
+				if !acc.supportsDevinModel(id) {
+					continue
+				}
 				modelSet[id] = struct{}{}
 				hasAnyMapping = true
 			}

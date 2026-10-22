@@ -1,11 +1,23 @@
 import { apiClient } from '../client'
 
+export interface DevinModelRoute {
+  model_uid: string
+  catalog_kind: string
+  lead_model_uid?: string
+  sidekick_model_uid?: string
+  pair_source?: string
+  route_mode: string
+  decision_code?: string
+  mechanism_status: string
+}
+
 export interface DevinSession {
   id: string
   status: 'waiting' | 'exchanging' | 'validating' | 'ready' | 'connected' | 'failed'
   auth_url?: string
   pairing_ticket?: string
   models: string[] | null
+  model_routes?: DevinModelRoute[]
   auto_recover: boolean
   error?: string
   account_id?: number
