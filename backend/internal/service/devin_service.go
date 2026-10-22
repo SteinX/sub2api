@@ -249,9 +249,9 @@ func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key stri
 	if err != nil {
 		var upstreamError *devin.Error
 		if errors.As(err, &upstreamError) && upstreamError.HTTPStatus() == http.StatusForbidden {
-			return "", fmt.Errorf("Devin CLI session token exchange (GetSelfDevinSessionToken) was denied: %w; a cog_ prefix or service user Admin role alone does not establish CLI access. Use browser sign-in or import CLI credentials", err)
+			return "", fmt.Errorf("devin CLI session token exchange (GetSelfDevinSessionToken) was denied: %w; a cog_ prefix or service user Admin role alone does not establish CLI access. Use browser sign-in or import CLI credentials", err)
 		}
-		return "", fmt.Errorf("Devin CLI session token exchange (GetSelfDevinSessionToken) failed: %w", err)
+		return "", fmt.Errorf("devin CLI session token exchange (GetSelfDevinSessionToken) failed: %w", err)
 	}
 	if force && failed != "" && token == failed {
 		return "", &devin.Error{Code: "unauthenticated", Status: 401}

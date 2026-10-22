@@ -62,11 +62,11 @@ func (s *SettingService) validateDevinIdentitySource(raw string) (string, error)
 	}
 	normalized, err := urlvalidator.ValidateHTTPSURL(raw, options)
 	if err != nil {
-		return "", errors.New("Devin identity source must be an allowed public HTTPS URL")
+		return "", errors.New("devin identity source must be an allowed public HTTPS URL")
 	}
 	u, err := url.Parse(normalized)
 	if err != nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", errors.New("Devin identity source must not contain credentials, a query or a fragment")
+		return "", errors.New("devin identity source must not contain credentials, a query or a fragment")
 	}
 	return normalized, nil
 }
@@ -299,7 +299,7 @@ func (s *SettingService) fetchDevinClientIdentity(ctx context.Context, source st
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return empty, fmt.Errorf("Devin identity source returned HTTP %d", resp.StatusCode)
+		return empty, fmt.Errorf("devin identity source returned HTTP %d", resp.StatusCode)
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, devin.MaxClientIdentitySize+1))
 	if err != nil {

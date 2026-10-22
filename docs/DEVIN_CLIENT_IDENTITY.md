@@ -4,7 +4,7 @@
 
 支持三种来源，优先级为：**手动固定 → 同一发布地址最近成功同步的配置 → 内置配置**。
 
-- 手动固定：启用后修改 JSON 并点击“保存 Devin 配置”。本实例的新请求立即生效，其他实例最多五秒后读取到新设置，无需重启或发布后端。可以固定较早版本进行回退。
+- 手动固定：启用后修改 JSON 并点击“保存 Devin 配置”。本实例的新请求立即生效，其他实例在五秒缓存过期后由后续请求触发后台读取新设置，无需重启或发布后端。可以固定较早版本进行回退。
 - 独立发布：将完整配置 JSON 发布到你维护的公共 HTTPS 地址（例如独立仓库的 raw JSON、静态站点或对象存储），在面板保存该 URL 并开启自动同步。配置包与 sub2api 程序可以独立发布。
 - 自动同步在请求到达时触发后台检查，检查间隔为一分钟；请求继续使用当前有效配置，不等待远程读取，没有流量时不轮询。点击“立即同步”可以等待已保存地址的同步结果。手动固定期间暂停自动检查，“立即同步”仍可更新备用远程配置。同步返回时重新核对发布地址和手动固定配置，丢弃已过时的结果。
 - 远程读取失败、文档不完整、字段不合法、schema 不兼容或保存失败时，继续使用最近有效配置。该配置保存在数据库，重启后仍可使用。更换地址后不会复用旧地址的配置。
@@ -63,7 +63,7 @@
 沿用现有管理员认证、限流和审计：
 
 - `GET /api/v1/admin/settings/devin-client-identity`：查看配置、当前生效值、来源及最近同步状态。
-- `PUT /api/v1/admin/settings/devin-client-identity`：完整保存 `{ "manual": null, "source_url": "https://example.com/profile.json", "auto_sync": true }`。可由独立配置发布流水线调用；发布单个实例后其他实例最多五秒后读取。
+- `PUT /api/v1/admin/settings/devin-client-identity`：完整保存 `{ "manual": null, "source_url": "https://example.com/profile.json", "auto_sync": true }`。可由独立配置发布流水线调用；其他实例在五秒缓存过期后由请求触发后台读取。
 - `POST /api/v1/admin/settings/devin-client-identity/sync`：立即同步已保存的地址；检查响应中的 `sync_error` 确认结果。此操作不会覆盖手动固定值。
 
 这项配置只改变客户端声明，不能增加账号或 service user 的上游权限。
