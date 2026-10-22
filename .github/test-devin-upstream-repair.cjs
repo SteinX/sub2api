@@ -286,3 +286,37 @@ test('an intentional release dry run cannot dispatch a missing-artifacts repair'
   await execute(f);
   assert.equal(f.issue, undefined);
 });
+
+test('simple releases are excluded even when their fork version matches the latest target', async () => {
+  for (const conclusion of ['success', 'failure']) {
+    const f = fixture({ source: { name: 'Release', path: '.github/workflows/release.yml',
+      display_title: `Release ${TAG} (simple)`, conclusion } });
+    await execute(f);
+    assert.equal(f.issue, undefined);
+  }
+});
+
+test('managed PR runs accept current PR snapshots even when run SHA is a synthetic merge', async () => {
+  const source = { event: 'pull_request', head_branch: 'sync/upstream-v0.2.17', head_sha: 'c'.repeat(40),
+    pull_requests: [{ number: 42, head: { sha: HEAD }, base: { sha: SHA } }] };
+  const f = fixture({ source });
+  await execute(f);
+  assert.equal(readState(f.issue).phase, 'active');
+  for (const snapshot of [{ number: 42, head: { sha: SHA }, base: { sha: SHA } },
+    { number: 42, head: { sha: HEAD }, base: { sha: HEAD } }]) {
+    const stale = fixture({ source: { ...source, pull_requests: [snapshot] } });
+    await execute(stale);
+    assert.equal(stale.issue, undefined);
+  }
+});
+
+test('without PR metadata a merge run must have both current source parents', async () => {
+  for (const current of [true, false]) {
+    const f = fixture({ source: { event: 'pull_request', head_branch: 'sync/upstream-v0.2.17', head_sha: 'c'.repeat(40) } });
+    const getCommit = f.github.rest.repos.getCommit;
+    f.github.rest.repos.getCommit = async args => args.ref === 'c'.repeat(40)
+      ? { data: { parents: [{ sha: SHA }, { sha: current ? HEAD : SHA }] } } : getCommit(args);
+    await execute(f);
+    assert.equal(!!f.issue, current);
+  }
+});

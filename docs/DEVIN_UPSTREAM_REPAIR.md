@@ -99,7 +99,9 @@ repair the same branch. Neither this change nor preflight disables that task.
 - Only completed runs from the two named workflows in this same repository are
   eligible. Other repositories, other PR branches, older releases, superseded
   runs/attempts, moving main/candidate commits, cancellations and normal waiting
-  do not start sessions. Dry-run Releases have a distinct run title and are ignored.
+  do not start sessions. Dry-run and simple Releases have distinct run titles and
+  are ignored. PR snapshots or verified merge parents establish the current head
+  and base even when GitHub validates a synthetic merge commit.
 - `workflow_run` executes only tooling checked out from trusted `main`, without
   persisted checkout credentials. It never downloads a source run's artifacts or
   executes its branch in the privileged dispatcher. The API token goes only to

@@ -119,8 +119,21 @@ async function sourceWork({ github, core, context }, id, imageCheck) {
     pr = candidate;
   }
   if (!isRelease) {
+    if (run.event === 'pull_request' && (!pr || run.head_branch !== pr.head.ref)) return null;
     if (run.head_branch === 'main' && run.head_sha !== main) return null;
-    if (run.head_branch !== 'main' && (!pr || run.head_sha !== pr.head.sha)) return null;
+    if (run.head_branch !== 'main') {
+      if (!pr) return null;
+      const snapshot = run.pull_requests?.find(item => item.number === pr.number);
+      if (snapshot) {
+        if (snapshot.head?.sha !== pr.head.sha || snapshot.base?.sha !== main) return null;
+      } else if (run.head_sha !== pr.head.sha) {
+        // Some PR runs expose a synthetic merge SHA instead of the branch SHA.
+        // Its two parents must match the CURRENT base and managed PR head.
+        if (run.event !== 'pull_request') return null;
+        const merge = (await github.rest.repos.getCommit({ ...FORK, ref: run.head_sha })).data;
+        if (merge.parents?.length !== 2 || merge.parents[0].sha !== main || merge.parents[1].sha !== pr.head.sha) return null;
+      }
+    }
     // A candidate pushed after this run finished will be validated by its own run.
     if (pr) {
       const commit = (await github.rest.repos.getCommit({ ...FORK, ref: pr.head.sha })).data;
@@ -131,8 +144,8 @@ async function sourceWork({ github, core, context }, id, imageCheck) {
     ...FORK, run_id: run.id, filter: 'latest', per_page: 100,
   });
   const failures = jobs.filter(job => ['failure', 'timed_out'].includes(job.conclusion)).map(job => ({
-    job: job.name, steps: (job.steps || []).filter(step => ['failure', 'timed_out'].includes(step.conclusion)).map(step => step.name),
-  }));
+    job: job.name, steps: (job.steps || []).filter(step => ['failure', 'timed_out'].includes(step.conclusion)).map(step => step.name).sort(),
+  })).sort((a, b) => a.job.localeCompare(b.job));
   if (run.conclusion !== 'success' && !failures.length) {
     core.info('No failed jobs in the latest attempt; wait for GitHub to settle.');
     return null;
