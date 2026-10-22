@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { plan, publish, releaseTag } = require('./sync-upstream.cjs');
+const { plan, publish, publishOrWait, releaseTag } = require('./sync-upstream.cjs');
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -134,9 +134,19 @@ test('in-progress release blocks another publication', async () => {
 });
 
 test('previous failed publication needs inspection instead of repeated dispatch', async () => {
-  const f = fixture({ runs: [{ status: 'completed', conclusion: 'failure',
-    display_title: `Release ${request.tag}`, html_url: 'https://github.com/run/1' }] });
-  await assert.rejects(plan(f), /rerun its failed jobs/);
+  for (const suffix of ['', ' (simple)']) {
+    const f = fixture({ tagExists: true, runs: [{ status: 'completed', conclusion: 'failure',
+      display_title: `Release ${request.tag}${suffix}`, html_url: 'https://github.com/run/1' }] });
+    await assert.rejects(plan(f), /rerun its failed jobs/);
+    assert.equal(f.calls.some(call => call.name === 'dispatch'), false);
+  }
+});
+
+test('completed dry runs do not block a real publication', async () => {
+  const f = fixture({ runs: [{ status: 'completed', conclusion: 'success',
+    display_title: `Release ${request.tag} (dry run)` }] });
+  await plan(f);
+  assert.equal(f.output.publish, 'true');
 });
 
 test('interrupted dispatch resumes from frozen tag without merging newer main', async () => {
@@ -190,4 +200,14 @@ test('another repository cannot run the writer', async () => {
   await assert.rejects(plan(f), /restricted/);
   await assert.rejects(publish(f, request), /restricted/);
   assert.deepEqual(f.calls, []);
+});
+
+test('publication races wait for fresh validation without becoming repair failures', async () => {
+  const f = fixture({ head: OTHER });
+  await publishOrWait(f, request);
+  assert.equal(f.calls.some(call => call.name === 'tag' || call.name === 'dispatch'), false);
+  const moved = fixture({ prHead: OTHER });
+  await publishOrWait(moved, { ...request, sha: CANDIDATE, prNumber: 42, baseSha: SHA });
+  const mismatch = fixture({ wrongTree: true });
+  await assert.rejects(publishOrWait(mismatch, { ...request, sha: CANDIDATE, prNumber: 42, baseSha: SHA }), /differs/);
 });
