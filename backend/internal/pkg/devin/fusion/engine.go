@@ -89,6 +89,17 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 	if err != nil {
 		return result, err
 	}
+	stopped := s.State == Cancelled || s.State == Uncertain || s.State == Failed || s.State == BudgetExhausted
+	if cancelled || in.Cancel || stopped {
+		// Stopping work must not bypass recovery of usage already observed by a
+		// summary worker. Reconcile only; never apply a summary or run inference.
+		billingCtx, release := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		err = e.collectCompactions(billingCtx, s, &raw, executor)
+		release()
+		if err != nil {
+			return result, err
+		}
+	}
 	if cancelled || in.Cancel {
 		// Cancellation does not erase a terminal physical usage record awaiting billing.
 		if s.ActiveRequest >= 0 && len(s.Attempts) > 0 {
@@ -117,7 +128,7 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 		}
 		return result, E("cancelled", "Fusion session was cancelled", 409)
 	}
-	if s.State == Cancelled || s.State == Uncertain || s.State == Failed || s.State == BudgetExhausted {
+	if stopped {
 		return result, E("session_stopped", "Fusion session is "+s.State+"; start a new session", 409)
 	}
 	requestDigest := Digest(struct {

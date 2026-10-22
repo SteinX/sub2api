@@ -234,6 +234,58 @@ func TestFusionCompactionBillingRecoveryAndUnknownNeverReplay(t *testing.T) {
 	require.Len(t, x.calls, 2)
 	require.Greater(t, s.AuxReservedUSD, 0.0)
 }
+
+func TestFusionStoppedSessionsReconcileSummaryBillingWithoutRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, code string
+		cancelFlag        bool
+		cancelInput       bool
+	}{
+		{name: "cancel flag", state: Cancelled, code: "cancelled", cancelFlag: true},
+		{name: "cancel input", state: RunningSidekick, code: "cancelled", cancelInput: true},
+		{name: "cancelled", state: Cancelled, code: "session_stopped"},
+		{name: "failed", state: Failed, code: "session_stopped"},
+		{name: "budget exhausted", state: BudgetExhausted, code: "session_stopped"},
+		{name: "uncertain", state: Uncertain, code: "session_stopped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, s, raw, base := summarySession(t, Sidekick)
+			var err error
+			s.Contract, err = contract(base)
+			require.NoError(t, err)
+			require.NoError(t, e.save(context.Background(), s, &raw))
+			x := &summaryExecutor{response: summaryResponse(), failSettle: true}
+			prepared, err := e.prepareCompaction(context.Background(), s, &raw, base, x, false)
+			require.NoError(t, err)
+			require.True(t, prepared)
+			require.Zero(t, x.charged)
+			s.State = tc.state
+			require.NoError(t, e.save(context.Background(), s, &raw))
+			if tc.cancelFlag {
+				require.NoError(t, e.Cancel(context.Background(), s.Scope, s.ID))
+			}
+			before := Digest([]any{s.Lead, s.Sidekick, s.Public})
+			in := input(base)
+			in.SessionID, in.Profile, in.Cancel = s.ID, s.Profile, tc.cancelInput
+			// Use the public continuation entry point after reconstructing the engine.
+			restarted := New(e.Store)
+			for range 2 {
+				_, err = restarted.Advance(context.Background(), in, x)
+				requireCode(t, err, tc.code)
+			}
+			stored, _, err := restarted.Load(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.InDelta(t, .1, stored.Maintenance.CompactionCostUSD, .00001)
+			require.InDelta(t, .1, x.charged, .00001)
+			require.Zero(t, stored.AuxReservedUSD)
+			require.True(t, stored.roleContext(Sidekick).Job.Accounted)
+			require.Zero(t, stored.roleContext(Sidekick).Epoch)
+			require.Equal(t, before, Digest([]any{stored.Lead, stored.Sidekick, stored.Public}))
+			require.Len(t, x.calls, 1, "stopped sessions must not repeat summary or normal inference")
+		})
+	}
+}
+
 func TestFusionCompactionRejectsUnsafeSummariesAndUnshrinkableContext(t *testing.T) {
 	for _, response := range []*apicompat.ResponsesResponse{textResponse(""), textResponse("not JSON"), tool("bad", "shell", `{}`)} {
 		e, s, raw, base := summarySession(t, Sidekick)
