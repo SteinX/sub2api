@@ -384,6 +384,15 @@ test('simple releases are excluded even when their fork version matches the late
   }
 });
 
+test('a newer simple publication cannot hide an incomplete full release', async () => {
+  const f = fixture({ published: true, assets: [], source: { name: 'Release',
+    path: '.github/workflows/release.yml', display_title: `Release ${TAG}` },
+    runs: [{ id: 101, run_number: 11, status: 'completed', conclusion: 'success',
+      display_title: `Release ${TAG} (simple)`, head_repository: { full_name: 'SteinX/sub2api' } }] });
+  await execute(f);
+  assert.equal(readState(f.issue).phase, 'active');
+});
+
 test('managed PR runs accept current PR snapshots even when run SHA is a synthetic merge', async () => {
   const source = { event: 'pull_request', head_branch: 'sync/upstream-v0.2.17', head_sha: 'c'.repeat(40),
     pull_requests: [{ number: 42, head: { sha: HEAD }, base: { sha: SHA } }] };

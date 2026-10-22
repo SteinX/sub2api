@@ -97,7 +97,7 @@ async function publication(github, tag, imageCheck) {
 function managedRun(run, upstreamTag, isRelease) {
   if (run.head_repository?.full_name !== REPOSITORY) return false;
   return isRelease
-    ? [`Release ${upstreamTag}-stx.1`, `Release ${upstreamTag}-stx.1 (simple)`].includes(run.display_title)
+    ? run.display_title === `Release ${upstreamTag}-stx.1`
     : ['main', `sync/upstream-${upstreamTag}`].includes(run.head_branch);
 }
 
