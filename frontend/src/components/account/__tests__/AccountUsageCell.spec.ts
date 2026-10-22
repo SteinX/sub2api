@@ -170,15 +170,16 @@ describe('AccountUsageCell', () => {
       let wrapper = mountCell()
       await flushPromises()
       wrapper.unmount()
-      clock.mockReturnValue(start + 30_000)
-      wrapper = mountCell()
-      await flushPromises()
       expect(getUsage).toHaveBeenCalledTimes(1)
-      wrapper.unmount()
       clock.mockReturnValue(start + 60_000)
+      getUsage.mockResolvedValue({
+        updated_at: new Date(start + 60_000).toISOString(),
+        daily: { utilization: 0, resets_at: new Date(start + 86_460_000).toISOString() }
+      })
       wrapper = mountCell()
       await flushPromises()
       expect(getUsage).toHaveBeenCalledTimes(2)
+      expect(wrapper.getComponent(UsageProgressBar).props('utilization')).toBe(0)
       wrapper.unmount()
     } finally {
       clock.mockRestore()

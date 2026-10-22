@@ -708,7 +708,7 @@ import {
 } from './credentialsBuilder'
 import OpenCodeGoUsageCell from './OpenCodeGoUsageCell.vue'
 
-// Module-level cache shared across all AccountUsageCell instances
+// Cache repeated usage loads within this cell instance.
 const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
 const USAGE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
