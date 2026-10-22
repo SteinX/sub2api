@@ -200,6 +200,21 @@ func (s *Session) LaneScope(role Role) string {
 	return base
 }
 
+func (s *Session) NeedsUsageReconciliation() bool {
+	if len(s.Attempts) > 0 {
+		a := s.Attempts[len(s.Attempts)-1]
+		if !a.Applied && (!a.Settled || a.Status == "started" || a.Status == "unknown") {
+			return true
+		}
+	}
+	for _, c := range s.Contexts {
+		if c.Job != nil && !c.Job.Accounted {
+			return true
+		}
+	}
+	return false
+}
+
 type Call struct {
 	AttemptID   string
 	Role        Role

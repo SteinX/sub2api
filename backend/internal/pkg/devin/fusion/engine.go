@@ -90,45 +90,32 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 		return result, err
 	}
 	stopped := s.State == Cancelled || s.State == Uncertain || s.State == Failed || s.State == BudgetExhausted
+	var maintenanceErr error
 	if cancelled || in.Cancel || stopped {
-		// Stopping work must not bypass recovery of usage already observed by a
-		// summary worker. Reconcile only; never apply a summary or run inference.
+		// Recover each independent usage stream before returning a stop/error.
+		// An unknown summary must not block known foreground usage, or vice versa.
 		billingCtx, release := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		err = e.collectCompactions(billingCtx, s, &raw, executor)
+		_, inferenceErr := e.reconcileInference(billingCtx, s, &raw, executor)
+		maintenanceErr = e.collectCompactions(billingCtx, s, &raw, executor)
 		release()
-		if err != nil {
-			return result, err
+		if inferenceErr != nil {
+			return result, inferenceErr
 		}
 	}
 	if cancelled || in.Cancel {
-		// Cancellation does not erase a terminal physical usage record awaiting billing.
-		if s.ActiveRequest >= 0 && len(s.Attempts) > 0 {
-			attempt := &s.Attempts[len(s.Attempts)-1]
-			if err := e.recoverAttempt(ctx, s, attempt); err != nil {
-				return result, err
-			}
-			if attempt.Status == "completed" && !attempt.Settled {
-				billingCtx, release := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				cost, billErr := executor.Settle(billingCtx, *attempt)
-				release()
-				if billErr != nil {
-					return result, E("billing_pending", "cancel requested; terminal usage still requires settlement", 503)
-				}
-				attempt.Settled = true
-				attempt.CostUSD = cost
-				s.TurnCostUSD += cost
-			}
-			s.Requests[s.ActiveRequest].Error = E("cancelled", "Fusion session was cancelled", 409)
-			s.ActiveRequest = -1
-		}
-		s.State = Cancelled
-		s.Pending = nil
-		if err = e.save(context.WithoutCancel(ctx), s, &raw); err != nil {
+		if err = e.finalizeCancellation(context.WithoutCancel(ctx), s, &raw); err != nil {
 			return result, err
+		}
+		result.State = Cancelled
+		if maintenanceErr != nil {
+			return result, maintenanceErr
 		}
 		return result, E("cancelled", "Fusion session was cancelled", 409)
 	}
 	if stopped {
+		if maintenanceErr != nil {
+			return result, maintenanceErr
+		}
 		return result, E("session_stopped", "Fusion session is "+s.State+"; start a new session", 409)
 	}
 	requestDigest := Digest(struct {
@@ -228,6 +215,78 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 	return e.run(ctx, s, &raw, in.Request, executor, result)
 }
 
+// Reconcile only known inference usage. Unknown attempts retain their identity
+// and reservation; callers still reconcile independent summaries before stopping.
+func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte, x Executor) (*Attempt, error) {
+	if len(s.Attempts) == 0 || s.Attempts[len(s.Attempts)-1].Applied {
+		return nil, nil
+	}
+	a := &s.Attempts[len(s.Attempts)-1]
+	previousStatus := a.Status
+	if err := e.recoverAttempt(ctx, s, a); err != nil {
+		return a, err
+	}
+	if a.Status != "completed" || a.Settled {
+		if a.Status != previousStatus {
+			return a, e.save(ctx, s, raw)
+		}
+		return a, nil
+	}
+	cost, err := x.Settle(ctx, *a)
+	if err != nil {
+		return a, E("billing_pending", "usage settlement is pending; retry exactly the same request", 503)
+	}
+	if !validCost(cost) {
+		return a, E("billing_invalid", "invalid physical inference cost", 502)
+	}
+	a.CostUSD = cost
+	a.Settled = true
+	s.TurnCostUSD += cost
+	_ = e.journal(ctx, s, a)
+	return a, e.save(ctx, s, raw)
+}
+
+// ReconcileUsage runs before execution admission. It only recovers and settles
+// existing attempts; it never prepares requests, applies results or starts work.
+func (e *Engine) ReconcileUsage(ctx context.Context, scope, id string, x Executor) (*Session, error) {
+	if e.Store == nil {
+		return nil, E("store_unavailable", "Fusion requires a shared atomic session store", 503)
+	}
+	unlock, ok, err := e.Store.Acquire(ctx, sessionKey(scope, id)+":lock", 33*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, E("session_busy", "another request is advancing this Fusion session", 409)
+	}
+	defer unlock()
+	s, raw, err := e.Load(ctx, scope, id)
+	if err != nil {
+		return nil, err
+	}
+	_, inferenceErr := e.reconcileInference(ctx, s, &raw, x)
+	maintenanceErr := e.collectCompactions(ctx, s, &raw, x)
+	cancelled, cancelErr := e.cancelled(ctx, s)
+	if cancelled {
+		cancelErr = e.finalizeCancellation(ctx, s, &raw)
+	}
+	return s, errors.Join(inferenceErr, maintenanceErr, cancelErr)
+}
+
+func (e *Engine) finalizeCancellation(ctx context.Context, s *Session, raw *[]byte) error {
+	e.Runner.Cancel(s.Scope, s.ID)
+	if e.Cache != nil {
+		_ = e.Cache.Stop(ctx, s, "cancelled")
+	}
+	if s.ActiveRequest >= 0 {
+		s.Requests[s.ActiveRequest].Error = E("cancelled", "Fusion session was cancelled", 409)
+		s.ActiveRequest = -1
+	}
+	s.State = Cancelled
+	s.Pending = nil
+	return e.save(ctx, s, raw)
+}
+
 func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicompat.ResponsesRequest, x Executor, result *Result) (*Result, error) {
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Duration(s.Profile.MaxWallSeconds+120)*time.Second)
 	defer cancel()
@@ -254,44 +313,27 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 	}
 	for {
 		result.State = s.State
-		if err := e.collectCompactions(persistCtx, s, raw, x); err != nil {
+		pendingAttempt, inferenceErr := e.reconcileInference(persistCtx, s, raw, x)
+		maintenanceErr := e.collectCompactions(persistCtx, s, raw, x)
+		if inferenceErr != nil {
 			var typed *Error
-			if errors.As(err, &typed) && typed.Code == "devin_fusion_compaction_uncertain" {
-				return stop(err, Uncertain)
+			if errors.As(inferenceErr, &typed) && typed.Code == "devin_fusion_billing_invalid" {
+				return stop(inferenceErr, Failed)
 			}
-			return result, err
+			return result, inferenceErr
 		}
-		// Finish durable usage before accepting cancellation or attempting another role.
-		var pendingAttempt *Attempt
-		if len(s.Attempts) > 0 {
-			a := &s.Attempts[len(s.Attempts)-1]
-			if !a.Applied {
-				pendingAttempt = a
+		if maintenanceErr != nil {
+			var typed *Error
+			if errors.As(maintenanceErr, &typed) && typed.Code == "devin_fusion_compaction_uncertain" {
+				return stop(maintenanceErr, Uncertain)
 			}
+			return result, maintenanceErr
 		}
+		// Both usage streams have been reconciled before applying any result.
 		if pendingAttempt != nil {
 			a := pendingAttempt
-			if err := e.recoverAttempt(persistCtx, s, a); err != nil {
-				return result, err
-			}
 			if a.Status == "started" || a.Status == "unknown" {
 				return stop(E("attempt_uncertain", "provider outcome is unknown; inference will not be repeated automatically", 409), Uncertain)
-			}
-			if !a.Settled {
-				cost, err := x.Settle(persistCtx, *a)
-				if err != nil {
-					return result, E("billing_pending", "usage settlement is pending; retry exactly the same request", 503)
-				}
-				if math.IsNaN(cost) || math.IsInf(cost, 0) || cost < 0 {
-					return stop(E("billing_invalid", "invalid physical inference cost", 502), Failed)
-				}
-				a.CostUSD = cost
-				a.Settled = true
-				s.TurnCostUSD += cost
-				_ = e.journal(persistCtx, s, a)
-				if err = e.save(persistCtx, s, raw); err != nil {
-					return result, err
-				}
 			}
 			if a.Failure != "" {
 				a.Applied = true

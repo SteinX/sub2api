@@ -29,13 +29,20 @@ import (
 
 type fusionAccountRepo struct {
 	AccountRepository
-	account *Account
+	account            *Account
+	hideFromScheduling bool
 }
 
 func (r *fusionAccountRepo) ListSchedulable(context.Context) ([]Account, error) {
+	if r.hideFromScheduling {
+		return nil, nil
+	}
 	return []Account{*r.account}, nil
 }
 func (r *fusionAccountRepo) ListSchedulableByGroupID(context.Context, int64) ([]Account, error) {
+	if r.hideFromScheduling {
+		return nil, nil
+	}
 	return []Account{*r.account}, nil
 }
 func (r *fusionAccountRepo) GetByID(context.Context, int64) (*Account, error) { return r.account, nil }
@@ -514,4 +521,96 @@ func TestFusionPendingSummaryReservationSurvivesHTTPAndReleasesOnRecovery(t *tes
 	require.NoError(t, err)
 	require.Zero(t, cache.count())
 	require.Len(t, bills.commands, 1)
+}
+
+func TestFusionIngressSettlesUsageWithoutExecutionAdmission(t *testing.T) {
+	for _, condition := range []string{"member removed", "member disabled", "account paused", "account rate limited", "profile disabled", "cancel control"} {
+		for _, protocol := range []string{"responses", "chat", "anthropic"} {
+			t.Run(condition+"/"+protocol, func(t *testing.T) {
+				ctx := context.Background()
+				p := fusionTestProfile()
+				models := []*pb.ClientModelConfig{{ModelUid: p.LeadModel}, {ModelUid: p.SidekickModel}}
+				a := &Account{ID: 7, Platform: PlatformDevin, Status: StatusActive, Schedulable: true}
+				switch condition {
+				case "member removed":
+					models = models[:1]
+				case "member disabled":
+					models[1].Disabled = true
+				case "account paused":
+					a.Schedulable = false
+				case "account rate limited":
+					until := time.Now().Add(time.Hour)
+					a.RateLimitResetAt = &until
+				}
+				a.Extra = devinCatalogExtra(models, "fixture")
+				a.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+				if condition == "profile disabled" {
+					a.Extra[fusion.ExtraEnabled] = false
+				}
+				repo := &fusionAccountRepo{account: a, hideFromScheduling: !a.IsSchedulable()}
+				cfg := &config.Config{}
+				cfg.Default.RateMultiplier = 1
+				cfg.Billing.InflightReservation.Enabled = true
+				cache := &fusionTestBillingCache{newMemInflightCache(100)}
+				bills := &fusionBillingRepo{}
+				svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{inserted: true}, bills, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+				svc.cfg, svc.accountRepo = cfg, repo
+				svc.billingCacheService = NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
+				defer svc.billingCacheService.Stop()
+				rdb := redis.NewClient(&redis.Options{Addr: miniredis.RunT(t).Addr()})
+				defer rdb.Close()
+				store := devin.NewRedisSessionStore(rdb)
+				providerCalls := 0
+				upstream := &devinHTTP{handle: func(*http.Request) (*http.Response, error) {
+					providerCalls++
+					return nil, fmt.Errorf("settlement-only ingress must not call the provider")
+				}}
+				svc.devin = NewDevinService(repo, nil, upstream, cfg, store)
+				key := &APIKey{ID: 2, UserID: 1, User: &User{ID: 1, Balance: 100}}
+				job := &fusion.CompactionJob{ID: "pending-summary", Role: fusion.Sidekick, Turn: 1, ProfileRevision: p.Revision(), PrefixDigest: fusion.Digest("source"), Policy: "fusion-summary-v1", State: "ready", EstimateUSD: 1}
+				session := &fusion.Session{ID: "settlement-session", Scope: fusion.Scope(key.UserID, key.ID), AccountID: a.ID, Profile: p, ProfileRevision: p.Revision(), PublicModel: p.PublicModel, Role: fusion.Sidekick, Turn: 1, State: fusion.Failed, ActiveRequest: -1, ExpiresAt: time.Now().Add(time.Hour), AuxReservedUSD: 1, Contexts: map[fusion.Role]*fusion.RoleContext{fusion.Sidekick: {Job: job}}, Sidekick: []apicompat.ResponsesInputItem{{Type: "message", Role: "user", Content: json.RawMessage(`"original task"`)}}}
+				aid := "summary-paid-before-admission-changed"
+				attempt := fusion.Attempt{ID: aid, Purpose: fusion.Compaction, Role: fusion.Sidekick, Turn: 1, Model: p.SidekickModel, BillingModel: p.SidekickModel, StartedAt: time.Now(), Status: "completed", EstimateUSD: 1, Response: &apicompat.ResponsesResponse{Model: p.SidekickModel, Status: "completed", Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 10}}}
+				journal, err := json.Marshal(map[string]any{"job": job, "attempt": attempt})
+				require.NoError(t, err)
+				require.NoError(t, store.Set(ctx, "devin:fusion:index:"+session.Scope+":compaction:"+fusion.Digest(session.ID+":"+job.ID), journal, time.Hour))
+				payload, err := json.Marshal(session)
+				require.NoError(t, err)
+				require.NoError(t, store.Set(ctx, "devin:fusion:session:"+session.Scope+":"+fusion.Digest(session.ID), payload, time.Hour))
+				owner := &devinFusionExecutor{service: svc, account: a, key: key, profile: p, reservations: map[string]*InflightReservation{}, holdUnsettled: map[string]bool{aid: true}}
+				reservation, err := owner.reserve(ctx, 1, aid)
+				require.NoError(t, err)
+				owner.reservations[aid] = reservation
+				owner.Close()
+				require.Equal(t, 1, cache.count())
+				for range 2 {
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/"+protocol, nil)
+					c.Request.Header.Set(fusion.HeaderSession, session.ID)
+					if condition == "cancel control" {
+						c.Request.Header.Set(fusion.HeaderCancel, "true")
+					}
+					bound, bindErr := svc.BindDevinFusionRequest(c, key, p.PublicModel, fusionProtocolBody(protocol, false, ""), protocol, nil)
+					require.True(t, bound)
+					if condition == "cancel control" {
+						require.True(t, DevinFusionHandled(bindErr))
+					} else {
+						var typed *fusion.Error
+						require.ErrorAs(t, bindErr, &typed)
+						require.Equal(t, "devin_fusion_session_stopped", typed.Code)
+					}
+				}
+				stored, _, err := svc.devin.fusionEngine().Load(ctx, session.Scope, session.ID)
+				require.NoError(t, err)
+				require.Greater(t, stored.Maintenance.CompactionCostUSD, 0.0)
+				require.Zero(t, stored.AuxReservedUSD)
+				require.Zero(t, cache.count())
+				require.Len(t, bills.commands, 1)
+				require.Equal(t, "fusion:"+aid, bills.commands[0].RequestID)
+				require.Equal(t, session.Sidekick, stored.Sidekick)
+				require.Zero(t, stored.Contexts[fusion.Sidekick].Epoch)
+				require.Zero(t, providerCalls)
+			})
+		}
+	}
 }

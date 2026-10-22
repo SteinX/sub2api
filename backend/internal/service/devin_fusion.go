@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
@@ -289,8 +290,9 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 		return false, nil
 	}
 	binding := &devinFusionBinding{SessionID: id, AccountID: accountID, Updater: updater}
+	var session *fusion.Session
 	if accountID > 0 {
-		session, _, err := engine.Load(ctx, scope, id)
+		session, _, err = engine.Load(ctx, scope, id)
 		if err != nil {
 			return true, err
 		}
@@ -303,17 +305,57 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 	if id != "" {
 		c.Header(fusion.HeaderSession, id)
 	}
-	if c.GetHeader(fusion.HeaderCancel) != "" {
+	cancelRequested := c.GetHeader(fusion.HeaderCancel) != ""
+	if cancelRequested {
 		if c.GetHeader(fusion.HeaderCancel) != "true" || accountID == 0 {
 			return true, fusion.E("cancel_invalid", "cancel requires true and an existing scoped session", 400)
 		}
 		if err = engine.Cancel(ctx, scope, id); err != nil {
 			return true, err
 		}
+	}
+	if session != nil && session.NeedsUsageReconciliation() {
+		// Fees already incurred do not require a current model grant or an
+		// inference-schedulable account. This path cannot issue provider requests.
+		recovered, reconcileErr := s.reconcileDevinFusionUsage(c, key, session, updater)
+		if reconcileErr != nil {
+			var typed *fusion.Error
+			// An active worker observes the durable cancel flag itself. Do not
+			// delay acknowledgement just because it still owns the session lock.
+			if !cancelRequested || !errors.As(reconcileErr, &typed) || typed.Code != "devin_fusion_session_busy" {
+				return true, reconcileErr
+			}
+		} else {
+			session = recovered
+		}
+	}
+	if cancelRequested {
 		c.JSON(200, gin.H{"object": "fusion.session", "id": id, "status": "cancel_requested"})
 		return true, errDevinFusionHandled
 	}
+	if session != nil && (session.State == fusion.Cancelled || session.State == fusion.Failed || session.State == fusion.BudgetExhausted || session.State == fusion.Uncertain) {
+		return true, fusion.E("session_stopped", "Fusion session is "+session.State+"; start a new session", 409)
+	}
 	return true, nil
+}
+
+func (s *OpenAIGatewayService) reconcileDevinFusionUsage(c *gin.Context, key *APIKey, session *fusion.Session, updater APIKeyQuotaUpdater) (*fusion.Session, error) {
+	ctx, release := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 30*time.Second)
+	defer release()
+	if s.accountRepo == nil || key.User == nil {
+		return nil, fusion.E("billing_unavailable", "scoped billing context is unavailable for Fusion recovery", 503)
+	}
+	a, err := s.accountRepo.GetByID(ctx, session.AccountID)
+	if err != nil || a == nil || a.ID != session.AccountID || a.Platform != PlatformDevin {
+		return nil, fusion.E("billing_pending", "original Fusion account is unavailable for usage settlement", 503)
+	}
+	var subscription *UserSubscription
+	if v, ok := c.Get("subscription"); ok {
+		subscription, _ = v.(*UserSubscription)
+	}
+	x := &devinFusionExecutor{service: s, account: a, key: key, subscription: subscription, updater: updater, profile: session.Profile, sessionID: session.ID, publicModel: session.PublicModel, reservations: map[string]*InflightReservation{}, inboundEndpoint: c.Request.URL.Path, userAgent: c.Request.UserAgent(), ipAddress: c.ClientIP()}
+	defer x.Close()
+	return s.devin.fusionEngine().ReconcileUsage(ctx, session.Scope, session.ID, x)
 }
 
 var errDevinFusionHandled = errors.New("fusion control request handled")

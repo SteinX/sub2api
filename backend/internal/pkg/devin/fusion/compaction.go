@@ -247,6 +247,7 @@ func (e *Engine) performCompaction(ctx context.Context, s *Session, r *compactio
 }
 
 func (e *Engine) collectCompactions(ctx context.Context, s *Session, raw *[]byte, x Executor) error {
+	var pendingErr error
 	for _, c := range s.Contexts {
 		j := c.Job
 		if j == nil || j.Accounted {
@@ -254,10 +255,12 @@ func (e *Engine) collectCompactions(ctx context.Context, s *Session, raw *[]byte
 		}
 		r, old, err := e.readCompaction(ctx, s, j)
 		if errors.Is(err, devin.ErrSessionNotFound) {
-			return E("compaction_pending", "summary preparation was interrupted before its journal; retry this request", 503)
+			pendingErr = errors.Join(pendingErr, E("compaction_pending", "summary preparation was interrupted before its journal; retry this request", 503))
+			continue
 		}
 		if err != nil {
-			return err
+			pendingErr = errors.Join(pendingErr, err)
+			continue
 		}
 		if r.Attempt.Status == "prepared" || r.Attempt.Status == "started" {
 			if e.now().Before(j.Deadline) {
@@ -277,7 +280,8 @@ func (e *Engine) collectCompactions(ctx context.Context, s *Session, raw *[]byte
 			old, _ = json.Marshal(r)
 		}
 		if r.Attempt.Status == "unknown" {
-			return E("compaction_uncertain", "summary provider outcome is unknown; no inference will be automatically replayed", 409)
+			pendingErr = errors.Join(pendingErr, E("compaction_uncertain", "summary provider outcome is unknown; no inference will be automatically replayed", 409))
+			continue
 		}
 		if r.Attempt.Status != "completed" {
 			continue
@@ -285,7 +289,8 @@ func (e *Engine) collectCompactions(ctx context.Context, s *Session, raw *[]byte
 		if !r.Attempt.Settled {
 			cost, billErr := x.Settle(ctx, r.Attempt)
 			if billErr != nil || !validCost(cost) {
-				return E("billing_pending", "compaction usage settlement is pending", 503)
+				pendingErr = errors.Join(pendingErr, E("billing_pending", "compaction usage settlement is pending", 503))
+				continue
 			}
 			r.Attempt.Settled = true
 			r.Attempt.CostUSD = cost
@@ -310,7 +315,7 @@ func (e *Engine) collectCompactions(ctx context.Context, s *Session, raw *[]byte
 			return err
 		}
 	}
-	return nil
+	return pendingErr
 }
 
 func (e *Engine) applyCompaction(ctx context.Context, s *Session, raw *[]byte, role Role, base *apicompat.ResponsesRequest, x Executor) (bool, error) {

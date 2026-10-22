@@ -286,6 +286,99 @@ func TestFusionStoppedSessionsReconcileSummaryBillingWithoutRestart(t *testing.T
 	}
 }
 
+func TestFusionUnknownSummaryDoesNotBlockKnownInferenceSettlement(t *testing.T) {
+	for _, tc := range []struct {
+		state     string
+		reconcile bool
+	}{
+		{state: ""}, {state: Cancelled}, {state: Failed}, {state: BudgetExhausted}, {state: Uncertain},
+		{state: "", reconcile: true}, {state: Cancelled, reconcile: true},
+	} {
+		t.Run(fmt.Sprintf("state=%s/reconcile=%t", tc.state, tc.reconcile), func(t *testing.T) {
+			e, s, raw, base := summarySession(t, Sidekick)
+			var err error
+			s.Contract, err = contract(base)
+			require.NoError(t, err)
+			require.NoError(t, e.save(context.Background(), s, &raw))
+			in := input(base)
+			in.SessionID, in.Profile = s.ID, s.Profile
+			x := &scriptExecutor{t: t, responses: []*apicompat.ResponsesResponse{delegation("known-inference")}, failSettle: true}
+			_, err = e.Advance(context.Background(), in, x)
+			requireCode(t, err, "billing_pending")
+			s, raw, err = e.Load(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			// Model an independently running summary whose terminal result was lost.
+			s.Role = Sidekick
+			summary := &summaryExecutor{}
+			prepared, err := e.prepareCompaction(context.Background(), s, &raw, base, summary, false)
+			require.NoError(t, err)
+			require.True(t, prepared)
+			s.Role = Lead
+			if tc.state != "" {
+				s.State = tc.state
+			}
+			require.NoError(t, e.save(context.Background(), s, &raw))
+			if tc.state == Cancelled {
+				require.NoError(t, e.Cancel(context.Background(), s.Scope, s.ID))
+			}
+			before := Digest([]any{s.Lead, s.Sidekick, s.Public})
+			restarted := New(e.Store)
+			for range 2 {
+				if tc.reconcile {
+					_, err = restarted.ReconcileUsage(context.Background(), s.Scope, s.ID, x)
+				} else {
+					_, err = restarted.Advance(context.Background(), in, x)
+				}
+				requireCode(t, err, "compaction_uncertain")
+			}
+			stored, _, err := restarted.Load(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.True(t, stored.Attempts[0].Settled)
+			require.Equal(t, 1.0, x.charged)
+			require.Len(t, x.calls, 1)
+			require.Len(t, summary.calls, 1)
+			require.Greater(t, stored.AuxReservedUSD, 0.0, "unknown summary must retain its reservation")
+			require.Zero(t, stored.Maintenance.CompactionCostUSD)
+			require.Equal(t, before, Digest([]any{stored.Lead, stored.Sidekick, stored.Public}))
+			if tc.state == Cancelled {
+				require.Equal(t, Cancelled, stored.State)
+				require.Equal(t, -1, stored.ActiveRequest)
+			}
+		})
+	}
+}
+
+func TestFusionUnknownRoleSummaryDoesNotBlockOtherRoleSettlement(t *testing.T) {
+	for _, unknown := range []Role{Lead, Sidekick} {
+		t.Run(string(unknown)+" unknown", func(t *testing.T) {
+			e, s, raw, base := summarySession(t, Sidekick)
+			s.Lead = append([]apicompat.ResponsesInputItem(nil), s.Sidekick...)
+			known := &summaryExecutor{response: summaryResponse(), failSettle: true}
+			lost := &summaryExecutor{}
+			for _, role := range []Role{Lead, Sidekick} {
+				s.Role = role
+				x := known
+				if role == unknown {
+					x = lost
+				}
+				prepared, err := e.prepareCompaction(context.Background(), s, &raw, base, x, false)
+				require.NoError(t, err)
+				require.True(t, prepared)
+			}
+			for range 2 {
+				err := e.collectCompactions(context.Background(), s, &raw, known)
+				requireCode(t, err, "compaction_uncertain")
+			}
+			require.InDelta(t, .1, s.Maintenance.CompactionCostUSD, .00001)
+			require.InDelta(t, .1, s.AuxReservedUSD, .00001)
+			require.InDelta(t, .1, known.charged, .00001)
+			require.False(t, s.roleContext(unknown).Job.Accounted)
+			require.Len(t, known.calls, 1)
+			require.Len(t, lost.calls, 1)
+		})
+	}
+}
+
 func TestFusionCompactionRejectsUnsafeSummariesAndUnshrinkableContext(t *testing.T) {
 	for _, response := range []*apicompat.ResponsesResponse{textResponse(""), textResponse("not JSON"), tool("bad", "shell", `{}`)} {
 		e, s, raw, base := summarySession(t, Sidekick)
