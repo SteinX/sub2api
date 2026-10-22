@@ -157,6 +157,34 @@ describe('AccountUsageCell', () => {
     wrapper.unmount()
   })
 
+  it('refetches Devin usage on a revisit after a quota reset', async () => {
+    const start = Date.parse('2026-10-22T12:00:00Z')
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
+    const account = makeAccount({ id: 9350, platform: 'devin', type: 'apikey' })
+    getUsage.mockResolvedValue({
+      updated_at: new Date(start).toISOString(),
+      daily: { utilization: 100, resets_at: new Date(start + 60_000).toISOString() }
+    })
+    const mountCell = () => mount(AccountUsageCell, { props: { account }, global: { stubs: { UsageProgressBar: true } } })
+    try {
+      let wrapper = mountCell()
+      await flushPromises()
+      wrapper.unmount()
+      clock.mockReturnValue(start + 30_000)
+      wrapper = mountCell()
+      await flushPromises()
+      expect(getUsage).toHaveBeenCalledTimes(1)
+      wrapper.unmount()
+      clock.mockReturnValue(start + 60_000)
+      wrapper = mountCell()
+      await flushPromises()
+      expect(getUsage).toHaveBeenCalledTimes(2)
+      wrapper.unmount()
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
   it('uses the batch loader for Devin and distinguishes missing quota from query failures', async () => {
     const requestBatchedUsage = vi.fn()
     const account = makeAccount({ id: 9303, platform: 'devin', type: 'apikey' })

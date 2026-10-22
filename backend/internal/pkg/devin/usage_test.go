@@ -58,6 +58,11 @@ func TestUsagePreservesMissingQuotaAndAcceptsSnakeCase(t *testing.T) {
 	require.Nil(t, usage.Daily)
 	require.Nil(t, usage.Weekly)
 
+	usage, err = parseUsageStatus([]byte(`{"userStatus":{"planStatus":{"weeklyQuotaResetAtUnix":"1800600000"}}}`))
+	require.NoError(t, err)
+	require.Equal(t, 0.0, *usage.Weekly.RemainingPercent, "reset-backed omitted ProtoJSON zero is exhausted")
+	require.Nil(t, usage.Daily)
+
 	for _, value := range []string{`-1`, `101`, `"NaN"`, `"+Inf"`, `"bad"`, `true`, `null`} {
 		usage, err = parseUsageStatus([]byte(`{"userStatus":{"planStatus":{"weeklyQuotaRemainingPercent":` + value + `}}}`))
 		require.NoError(t, err)

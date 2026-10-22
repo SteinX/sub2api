@@ -69,7 +69,11 @@ func (s *DevinService) Usage(ctx context.Context, account *Account, force bool) 
 		if result.Err != nil {
 			return nil, result.Err
 		}
-		return result.Val.(*UsageInfo), nil
+		usage, ok := result.Val.(*UsageInfo)
+		if !ok {
+			return nil, errors.New("invalid Devin usage cache result")
+		}
+		return usage, nil
 	}
 }
 

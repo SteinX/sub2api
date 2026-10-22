@@ -358,7 +358,7 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 	accountID := account.ID
 	if account.Platform == PlatformDevin {
 		if s.devinService == nil {
-			return nil, fmt.Errorf("Devin usage service is unavailable")
+			return nil, fmt.Errorf("devin usage service is unavailable")
 		}
 		return s.devinService.Usage(ctx, account, forceProbe)
 	}

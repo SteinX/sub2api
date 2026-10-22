@@ -113,7 +113,7 @@ const mountView = (showUsageRows = false) =>
 describe('admin AccountsView — 外审 F2:spark 影子创建接线', () => {
   beforeEach(() => {
     localStorage.clear()
-    for (const fn of [listAccounts, listWithEtag, getBatchTodayStats, getAllProxies, getAllGroups, duplicateAccount, createSparkShadow, showSuccess, showError]) {
+    for (const fn of [listAccounts, listWithEtag, getBatchTodayStats, getBatchUsage, getAllProxies, getAllGroups, duplicateAccount, createSparkShadow, showSuccess, showError]) {
       fn.mockReset()
     }
     listAccounts.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
@@ -171,6 +171,38 @@ describe('admin AccountsView — 外审 F2:spark 影子创建接线', () => {
     await flushPromises()
     expect(getBatchUsage).toHaveBeenCalledWith([account.id], true)
     wrapper.unmount()
+  })
+
+  it('refetches the desktop Devin batch after the weekly quota resets', async () => {
+    const start = Date.parse('2026-10-22T12:00:00Z')
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
+    const account = { id: 9351, name: 'Devin', platform: 'devin', type: 'apikey', extra: {} }
+    listAccounts.mockResolvedValue({ items: [account], total: 1, page: 1, page_size: 20, pages: 1 })
+    getBatchUsage.mockResolvedValue({ usage: { [account.id]: {
+      updated_at: new Date(start).toISOString(),
+      seven_day: { utilization: 100, resets_at: new Date(start + 60_000).toISOString() }
+    } }, errors: {} })
+    const wrapper = mountView(true)
+    try {
+      await flushPromises()
+      const request = wrapper.getComponent({ name: 'AccountUsageCell' }).props('requestBatchedUsage')
+      const load = async () => {
+        request(account)
+        await new Promise(resolve => setTimeout(resolve, 10))
+        await flushPromises()
+      }
+      await load()
+      expect(getBatchUsage).toHaveBeenCalledTimes(1)
+      clock.mockReturnValue(start + 30_000)
+      await load()
+      expect(getBatchUsage).toHaveBeenCalledTimes(1)
+      clock.mockReturnValue(start + 60_000)
+      await load()
+      expect(getBatchUsage).toHaveBeenCalledTimes(2)
+    } finally {
+      wrapper.unmount()
+      clock.mockRestore()
+    }
   })
 
   it('同一账号复制请求未完成时忽略重复点击', async () => {

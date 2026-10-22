@@ -219,6 +219,9 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		if err != nil {
 			return nil, err
 		}
+		if len(models) == 0 {
+			return nil, errors.New("devin returned no usable models; existing catalog was preserved")
+		}
 		ids := make([]string, 0, len(models))
 		for _, model := range models {
 			ids = append(ids, devin.ModelID(model))

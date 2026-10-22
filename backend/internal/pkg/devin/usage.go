@@ -153,6 +153,12 @@ func usageQuota(plan map[string]any, prefix string) *QuotaWindow {
 		t := time.Unix(int64(*reset), 0).UTC()
 		resetsAt = &t
 	}
+	// ProtoJSON omits implicit-presence scalar zero values. A reported window
+	// reset distinguishes an exhausted quota from an entirely absent window.
+	if _, reported := plan[prefix+"quotaremainingpercent"]; !reported && resetsAt != nil {
+		zero := 0.0
+		remaining = &zero
+	}
 	if remaining == nil && resetsAt == nil {
 		return nil
 	}

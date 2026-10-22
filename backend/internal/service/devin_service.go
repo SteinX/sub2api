@@ -284,7 +284,7 @@ func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([
 	s.mu.Lock()
 	e := s.runtime[key]
 	s.mu.Unlock()
-	if !(len(force) > 0 && force[0]) && e.models != nil && time.Now().Before(e.modelsUntil) {
+	if (len(force) == 0 || !force[0]) && e.models != nil && time.Now().Before(e.modelsUntil) {
 		return e.models, nil
 	}
 	pending := s.flights.DoChan("models:"+key, func() (any, error) {

@@ -106,6 +106,23 @@ func TestDevinManualModelSyncRefreshesTheSharedCatalog(t *testing.T) {
 	require.Equal(t, int32(2), probes.Load())
 }
 
+func TestDevinManualModelSyncPreservesCatalogWithoutUsableModels(t *testing.T) {
+	for _, models := range [][]*pb.ClientModelConfig{nil, {{ModelUid: "swe-2-max", Disabled: true}}} {
+		upstream := &devinHTTP{handle: func(*http.Request) (*http.Response, error) {
+			body, err := proto.Marshal(&pb.GetCliModelConfigsResponse{ClientModelConfigs: models})
+			assert.NoError(t, err)
+			return devinReply(200, body), nil
+		}}
+		account := &Account{ID: 1, Platform: PlatformDevin, Credentials: map[string]any{"access_token": "session"}, Extra: map[string]any{"devin_models": []string{"swe-2-max"}}}
+		repo := &devinFeatureRepo{}
+		s := &AccountTestService{accountRepo: repo, devin: NewDevinService(repo, nil, upstream, &config.Config{}, nil)}
+		_, err := s.SyncUpstreamModelCatalog(context.Background(), account)
+		require.ErrorContains(t, err, "no usable models")
+		require.Nil(t, repo.updates, "must not overwrite the last working scheduling catalog")
+		require.True(t, account.supportsDevinModel("swe-2-max"))
+	}
+}
+
 func TestDevinReauthorizationValidatesTheExistingEndpointAndProxy(t *testing.T) {
 	d, _, _ := devinTestService(t)
 	proxyID := int64(3)
