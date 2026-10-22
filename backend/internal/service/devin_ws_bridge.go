@@ -158,7 +158,7 @@ func (s *OpenAIGatewayService) proxyDevinWSBridgeTurn(ctx context.Context, c *gi
 		c.Set(devinWSRequestStateKey, next)
 		c.Set(devinWSCascadeScopeKey, cacheKey)
 		c.Set(devinWSReplayToolsKey, replayTools)
-		return &OpenAIForwardResult{Model: response.Model, BillingModel: response.Model, ResponseID: response.ID, Stream: true, ResponseHeaders: make(http.Header), wsReplayInputExists: true}, nil
+		return &OpenAIForwardResult{Model: response.Model, BillingModel: response.Model, ResponseID: response.ID, Stream: true, FusionUsageSettled: DevinFusionRequest(ctx), ResponseHeaders: make(http.Header), wsReplayInputExists: true}, nil
 	}
 	writer := &devinWSResponseWriter{ResponseWriter: c.Writer, header: make(http.Header), status: http.StatusOK, size: -1, writeMessage: write}
 	bridge := c.Copy()

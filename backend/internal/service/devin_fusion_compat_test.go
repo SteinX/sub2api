@@ -106,6 +106,7 @@ func TestDevinFusionEntryPreservesClientToolDeclarations(t *testing.T) {
 						require.NoError(t, err)
 						require.Equal(t, []string{"response.created", "response.completed"}, events)
 						require.Zero(t, result.Usage.InputTokens)
+						require.True(t, result.FusionUsageSettled, "the WS handler must also skip aggregate billing for warmups")
 						require.Empty(t, billing.commands)
 						require.Zero(t, turn, "binding and warming must not start inference")
 					}
