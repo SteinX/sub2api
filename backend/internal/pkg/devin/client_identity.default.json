@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "revision": "builtin-2026-10-22",
+  "chat": {
+    "ide_name": "devin-cli",
+    "ide_type": "chisel",
+    "ide_version": "3000.6.2",
+    "extension_name": "chisel",
+    "extension_version": "3000.6.2",
+    "os": "linux",
+    "locale": "en"
+  },
+  "discovery": {
+    "ide_name": "chisel",
+    "ide_version": "0.0.0-dev",
+    "extension_name": "chisel",
+    "extension_version": "0.0.0-dev",
+    "os": "linux",
+    "locale": "en"
+  },
+  "token_exchange": {
+    "ide_name": "windsurf",
+    "ide_version": "1.48.2",
+    "extension_name": "windsurf",
+    "extension_version": "1.48.2",
+    "os": "windows",
+    "locale": "en"
+  }
+}

@@ -67,17 +67,18 @@ func (a *Account) supportsDevinModel(requested string) bool {
 	return slices.Contains(a.devinModelIDs(), a.GetMappedModel(requested))
 }
 
-func (s *DevinService) runtimeKey(a *Account) string {
+func (s *DevinService) runtimeKey(ctx context.Context, a *Account) string {
 	proxy := ""
 	if a.ProxyID != nil {
 		proxy = strconv.FormatInt(*a.ProxyID, 10)
 	}
-	return devin.CredentialFingerprint(strconv.FormatInt(a.ID, 10), a.GetCredential("api_key"), a.GetCredential("access_token"), a.GetCredential("base_url"), proxy)
+	return devin.CredentialFingerprint(strconv.FormatInt(a.ID, 10), a.GetCredential("api_key"), a.GetCredential("access_token"), a.GetCredential("base_url"), proxy, devin.ResolveClientIdentity(ctx).Fingerprint())
 }
 func (s *DevinService) ValidateURL(raw string) (string, error) {
 	return (&AccountTestService{cfg: s.cfg}).validateUpstreamBaseURL(raw)
 }
 func (s *DevinService) Client(ctx context.Context, a *Account) (*devin.Client, error) {
+	ctx = devin.WithClientIdentity(ctx)
 	base := a.GetCredential("base_url")
 	if base == "" {
 		base = devin.DefaultBaseURL
@@ -101,7 +102,8 @@ func (s *DevinService) Client(ctx context.Context, a *Account) (*devin.Client, e
 		proxy = p.URL()
 	}
 	baseURL, _ := url.Parse(base)
-	return &devin.Client{BaseURL: base, ValidateURL: s.ValidateURL, Do: func(req *http.Request) (*http.Response, error) {
+	identity := devin.ResolveClientIdentity(ctx)
+	return &devin.Client{BaseURL: base, Identity: &identity, ValidateURL: s.ValidateURL, Do: func(req *http.Request) (*http.Response, error) {
 		requestCtx := WithHTTPUpstreamRedirectsDisabled(req.Context())
 		if req.URL.Host != baseURL.Host {
 			requestCtx = WithHTTPUpstreamPublicHostsOnly(requestCtx)
@@ -110,20 +112,22 @@ func (s *DevinService) Client(ctx context.Context, a *Account) (*devin.Client, e
 	}}, nil
 }
 func (s *DevinService) Token(ctx context.Context, a *Account, force bool) (string, error) {
+	ctx = devin.WithClientIdentity(ctx)
 	failed := ""
 	if force {
 		s.mu.Lock()
-		failed = s.runtime[s.runtimeKey(a)].token
+		failed = s.runtime[s.runtimeKey(ctx, a)].token
 		s.mu.Unlock()
 	}
 	return s.token(ctx, a, force, failed)
 }
 
 func (s *DevinService) token(ctx context.Context, a *Account, force bool, failed string) (string, error) {
+	ctx = devin.WithClientIdentity(ctx)
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	key := s.runtimeKey(a)
+	key := s.runtimeKey(ctx, a)
 	if a.GetCredential("api_key") == "" {
 		token := a.GetCredential("access_token")
 		if token == "" {
@@ -243,7 +247,11 @@ func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key stri
 	}
 	token, err := client.Mint(mintCtx, a.GetCredential("api_key"))
 	if err != nil {
-		return "", err
+		var upstreamError *devin.Error
+		if errors.As(err, &upstreamError) && upstreamError.HTTPStatus() == http.StatusForbidden {
+			return "", fmt.Errorf("devin CLI session token exchange (GetSelfDevinSessionToken) was denied: %w; a cog_ prefix or service user Admin role alone does not establish CLI access. Use browser sign-in or import CLI credentials", err)
+		}
+		return "", fmt.Errorf("devin CLI session token exchange (GetSelfDevinSessionToken) failed: %w", err)
 	}
 	if force && failed != "" && token == failed {
 		return "", &devin.Error{Code: "unauthenticated", Status: 401}
@@ -275,10 +283,11 @@ func (s *DevinService) RecoverToken(ctx context.Context, a *Account, failed stri
 }
 
 func (s *DevinService) Models(ctx context.Context, a *Account) ([]*pb.ClientModelConfig, error) {
+	ctx = devin.WithClientIdentity(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	key := s.runtimeKey(a)
+	key := s.runtimeKey(ctx, a)
 	s.mu.Lock()
 	e := s.runtime[key]
 	s.mu.Unlock()

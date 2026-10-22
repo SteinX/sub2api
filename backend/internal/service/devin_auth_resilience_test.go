@@ -8,12 +8,64 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
+
+func TestDevinPermissionDeniedIdentifiesCredentialValidationStage(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, stage string
+	}{
+		{"session exchange", devin.MintPath, "GetSelfDevinSessionToken"},
+		{"model discovery", devin.ModelsPath, "GetCliModelConfigs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _, _ := devinTestService(t)
+			upstream, ok := d.upstream.(*devinHTTP)
+			if !ok {
+				t.Fatal("missing upstream test double")
+			}
+			original := upstream.handle
+			upstream.handle = func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == tc.path {
+					return devinReply(http.StatusForbidden, []byte(`{"code":"permission_denied","message":"private upstream detail cog_private"}`)), nil
+				}
+				return original(r)
+			}
+			ctx := context.Background()
+			a := &Account{Platform: PlatformDevin, Credentials: map[string]any{"api_key": "cog_private"}}
+			_, err := d.Models(ctx, a)
+			var upstreamError *devin.Error
+			if !errors.As(err, &upstreamError) || upstreamError.HTTPStatus() != http.StatusForbidden || upstreamError.Code != "permission_denied" {
+				t.Fatalf("upstream error classification was lost: %v", err)
+			}
+			view, err := d.ImportAuth(ctx, 7, "cog_private", nil, 0)
+			if err != nil || view.Status != "failed" || !strings.Contains(view.Error, tc.stage) {
+				t.Fatalf("missing failed validation stage: %+v, %v", view, err)
+			}
+			if tc.path == devin.MintPath && !strings.Contains(view.Error, "browser sign-in") {
+				t.Fatal("denied session exchange did not suggest a supported login flow")
+			}
+			if tc.path == devin.ModelsPath && strings.Contains(view.Error, "GetSelfDevinSessionToken") {
+				t.Fatal("model access rejection was misreported as a session exchange failure")
+			}
+			public, _ := json.Marshal(view)
+			for _, secret := range []string{"cog_private", "private upstream detail", "devin-session-token$minted"} {
+				if strings.Contains(string(public), secret) {
+					t.Fatalf("validation failure leaked %q", secret)
+				}
+			}
+			persisted, err := d.LoadAuth(ctx, view.ID, 7)
+			if err != nil || persisted.Status != "failed" || persisted.Credentials != nil {
+				t.Fatal("failed validation retained credentials", err)
+			}
+		})
+	}
+}
 
 type devinAuthStoreProbe struct {
 	devin.SessionStore

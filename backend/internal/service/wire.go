@@ -824,6 +824,7 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	claude.SetCLIVersionResolver(func() string {
 		return svc.GetClaudeCodeClientVersion(context.Background())
 	})
+	devin.SetClientIdentityResolver(svc.GetDevinClientIdentity)
 	return svc
 }
 
