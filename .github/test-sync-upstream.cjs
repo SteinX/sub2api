@@ -134,9 +134,19 @@ test('in-progress release blocks another publication', async () => {
 });
 
 test('previous failed publication needs inspection instead of repeated dispatch', async () => {
-  const f = fixture({ runs: [{ status: 'completed', conclusion: 'failure',
-    display_title: `Release ${request.tag}`, html_url: 'https://github.com/run/1' }] });
-  await assert.rejects(plan(f), /rerun its failed jobs/);
+  for (const suffix of ['', ' (simple)']) {
+    const f = fixture({ tagExists: true, runs: [{ status: 'completed', conclusion: 'failure',
+      display_title: `Release ${request.tag}${suffix}`, html_url: 'https://github.com/run/1' }] });
+    await assert.rejects(plan(f), /rerun its failed jobs/);
+    assert.equal(f.calls.some(call => call.name === 'dispatch'), false);
+  }
+});
+
+test('completed dry runs do not block a real publication', async () => {
+  const f = fixture({ runs: [{ status: 'completed', conclusion: 'success',
+    display_title: `Release ${request.tag} (dry run)` }] });
+  await plan(f);
+  assert.equal(f.output.publish, 'true');
 });
 
 test('interrupted dispatch resumes from frozen tag without merging newer main', async () => {

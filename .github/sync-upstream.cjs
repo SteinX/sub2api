@@ -77,7 +77,7 @@ async function plan({ github, context, core }) {
     core.info('A release is still running; check again on the next scheduled run');
     return;
   }
-  const previous = runs.find(run => run.display_title === `Release ${tag}`);
+  const previous = runs.find(run => [`Release ${tag}`, `Release ${tag} (simple)`].includes(run.display_title));
   if (previous) {
     throw new Error(`${tag} has an unfinished or failed publication; inspect ${previous.html_url} and rerun its failed jobs`);
   }
