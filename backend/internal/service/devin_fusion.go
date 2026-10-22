@@ -115,27 +115,45 @@ func devinEffectiveModelRoutes(models []*pb.ClientModelConfig, a *Account) []dev
 	}
 	routes := make([]devin.ModelRoutePlan, 0, len(models))
 	configured, _ := devinFusionProfiles(a)
+	seen := make(map[string]bool, len(models))
 	for _, m := range models {
 		plan := devin.PlanModel(m)
+		seen[strings.ToLower(plan.ModelUID)] = true
 		if p := devinFusionProfile(a, devin.ModelID(m)); p != nil && validateDevinFusionMembers(*p, models) == nil {
-			plan.Mode = fusion.RouteMode
-			plan.CatalogKind = devin.KindPairing
-			plan.DecisionCode = ""
-			plan.MechanismStatus = "gateway_orchestrated"
-			plan.LeadModelUID = p.LeadModel
-			plan.SidekickModelUID = p.SidekickModel
-			plan.PairSource = "model_id"
+			source := "model_id"
 			for _, override := range configured {
-				if override.PublicModel == p.PublicModel {
-					plan.PairSource = "configured"
+				if strings.EqualFold(override.PublicModel, p.PublicModel) {
+					source = "configured"
 					break
 				}
 			}
+			plan = devinFusionRoute(plan, *p, source)
 		}
 		routes = append(routes, plan)
 	}
+	if devinFusionEnabled(a) {
+		for _, p := range configured {
+			if !p.Enabled || seen[strings.ToLower(p.PublicModel)] || validateDevinFusionMembers(p, models) != nil {
+				continue
+			}
+			routes = append(routes, devinFusionRoute(devin.PlanModelUID(p.PublicModel), p, "configured"))
+			seen[strings.ToLower(p.PublicModel)] = true
+		}
+	}
 	return routes
 }
+
+func devinFusionRoute(plan devin.ModelRoutePlan, p fusion.Profile, source string) devin.ModelRoutePlan {
+	plan.Mode = fusion.RouteMode
+	plan.CatalogKind = devin.KindPairing
+	plan.DecisionCode = ""
+	plan.MechanismStatus = "gateway_orchestrated"
+	plan.LeadModelUID = p.LeadModel
+	plan.SidekickModelUID = p.SidekickModel
+	plan.PairSource = source
+	return plan
+}
+
 func devinEffectiveModelIDs(models []*pb.ClientModelConfig, a *Account) []string {
 	var ids []string
 	for _, p := range devinEffectiveModelRoutes(models, a) {

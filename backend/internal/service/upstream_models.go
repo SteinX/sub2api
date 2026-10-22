@@ -233,8 +233,11 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 			return nil, errors.New("invalid Devin catalog snapshot")
 		}
 		catalog := &UpstreamModelCatalog{Models: devinEffectiveModelIDs(models, account), DevinRoutes: snapshot.Routes}
-		if len(catalog.Models) != len(models) {
-			catalog.Warnings = []UpstreamModelSyncWarning{{Code: "devin_model_routes_blocked", Message: "Some advertised Devin models require unsupported or unverified execution routes; their metadata was retained for diagnosis."}}
+		for _, route := range snapshot.Routes {
+			if route.Mode == devin.RouteBlocked {
+				catalog.Warnings = []UpstreamModelSyncWarning{{Code: "devin_model_routes_blocked", Message: "Some advertised Devin models require unsupported or unverified execution routes; their metadata was retained for diagnosis."}}
+				break
+			}
 		}
 		return catalog, nil
 	}

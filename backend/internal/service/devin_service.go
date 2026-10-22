@@ -394,10 +394,23 @@ func DevinModelsBody(models []*pb.ClientModelConfig, account *Account) ([]byte, 
 		return nil, errors.New("account is required for Devin model projection")
 	}
 	routes := devinEffectiveModelRoutes(models, account)
-	rows := make([]map[string]any, 0, len(models))
-	for i, m := range models {
-		plan := routes[i]
+	byID := make(map[string]*pb.ClientModelConfig, len(models))
+	for _, m := range models {
+		id := devin.ModelID(m)
+		if _, exists := byID[id]; !exists {
+			byID[id] = m
+		}
+	}
+	rows := make([]map[string]any, 0, len(routes))
+	for _, plan := range routes {
 		if plan.Mode == devin.RouteBlocked {
+			continue
+		}
+		m := byID[plan.ModelUID]
+		if m == nil {
+			// Configured virtual profiles have no provider metadata of their own.
+			// Advertise only the identity and tool contract verified for the pair.
+			rows = append(rows, map[string]any{"id": plan.ModelUID, "object": "model", "owned_by": "devin", "name": plan.ModelUID, "supports_tool_calls": true, "is_model_router": false})
 			continue
 		}
 		f := m.GetModelInfo().GetModelFeatures()

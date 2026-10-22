@@ -472,9 +472,68 @@ func TestFusionPublicModelListRespectsAccountPolicyOnCachedCatalog(t *testing.T)
 	restored, err := svc.FetchOpenAIModelsList(context.Background(), account)
 	require.NoError(t, err)
 	require.Contains(t, string(restored.Body), public)
+	// Custom aliases are accepted without needing their own provider catalog row.
+	account.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+	custom, err := svc.FetchOpenAIModelsList(context.Background(), account)
+	require.NoError(t, err)
+	require.Contains(t, string(custom.Body), p.PublicModel)
+	require.Contains(t, devinEffectiveModelIDs(models, account), p.PublicModel)
+	routes := devinEffectiveModelRoutes(models, account)
+	require.Len(t, routes, len(models)+1)
+	require.Equal(t, "configured", routes[len(models)].PairSource)
+	require.Equal(t, p.LeadModel, routes[len(models)].LeadModelUID)
+	require.Equal(t, p.SidekickModel, routes[len(models)].SidekickModelUID)
+	p.Enabled = false
+	account.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+	customDisabled, err := svc.FetchOpenAIModelsList(context.Background(), account)
+	require.NoError(t, err)
+	require.NotContains(t, string(customDisabled.Body), p.PublicModel)
+	require.NotContains(t, devinEffectiveModelIDs(models, account), p.PublicModel)
+	require.Contains(t, string(customDisabled.Body), public)
+	p.Enabled, p.SidekickModel = true, "unavailable-member"
+	account.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+	stale, err := svc.FetchOpenAIModelsList(context.Background(), account)
+	require.NoError(t, err)
+	require.NotContains(t, string(stale.Body), p.PublicModel)
 	require.Equal(t, 1, modelCalls, "policy edits must be applied to the cached raw catalog")
 	_, err = DevinModelsBody(models, nil)
 	require.Error(t, err)
+}
+
+func TestFusionAliasSyncPreservesRawCatalogAndBlockedWarnings(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("blocked=%t", blocked), func(t *testing.T) {
+			p := fusionTestProfile()
+			models := []*pb.ClientModelConfig{{ModelUid: p.LeadModel}, {ModelUid: p.SidekickModel}}
+			if blocked {
+				models = append(models, &pb.ClientModelConfig{ModelUid: "opaque-harness", ModelInfo: &pb.ModelInfo{HarnessUids: []string{"unknown"}}})
+			}
+			a := &Account{ID: 7, Platform: PlatformDevin, Credentials: map[string]any{"access_token": "synthetic"}, Extra: map[string]any{fusion.ExtraProfiles: []fusion.Profile{p}}}
+			upstream := &devinHTTP{handle: func(r *http.Request) (*http.Response, error) {
+				require.Equal(t, devin.ModelsPath, r.URL.Path)
+				b, err := proto.Marshal(&pb.GetCliModelConfigsResponse{ClientModelConfigs: models})
+				require.NoError(t, err)
+				return devinReply(200, b), nil
+			}}
+			repo := &devinFeatureRepo{}
+			d := NewDevinService(repo, nil, upstream, &config.Config{}, nil)
+			result, err := (&AccountTestService{devin: d, accountRepo: repo}).SyncUpstreamModelCatalog(context.Background(), a)
+			require.NoError(t, err)
+			require.Contains(t, result.Models, p.PublicModel)
+			require.NotContains(t, result.Models, "opaque-harness")
+			require.Len(t, result.DevinRoutes, len(models)+1)
+			if blocked {
+				require.Len(t, result.Warnings, 1)
+				require.Equal(t, "devin_model_routes_blocked", result.Warnings[0].Code)
+			} else {
+				require.Empty(t, result.Warnings)
+			}
+			stored := repo.updates[devinCatalogExtraKey].(*devin.CatalogSnapshot)
+			require.Len(t, stored.Models, len(models))
+			require.Nil(t, devin.FindModel(stored.Models, p.PublicModel))
+			require.NotContains(t, repo.updates["devin_models"], p.PublicModel)
+		})
+	}
 }
 
 type fusionAuxCapacityCache struct {
