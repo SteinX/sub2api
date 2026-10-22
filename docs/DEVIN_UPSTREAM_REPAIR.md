@@ -123,7 +123,10 @@ repair the same branch. Neither this change nor preflight disables that task.
 - Every hour at minute 43 UTC, a lightweight monitor only reads open tracking
   issues, session status and release metadata. It creates no sessions and sends
   no agent prompts. A newly observed quota/input/approval/terminal blocker updates
-  the issue once; unchanged blockers do not repeatedly update it.
+  the issue once; unchanged blockers do not repeatedly update it. Observed
+  recovery clears the marker so a later new blocker is reported again. A finished
+  session stays quiet while its managed synchronization/full publication is still
+  queued or running; unrelated feature workflows do not suppress real blockers.
 - A successful full Release is independently checked for five nonempty uploaded
   archives, `checksums.txt`, and a versioned GHCR index containing Linux amd64
   and arm64. Only this verification closes the tracking issue. A service error

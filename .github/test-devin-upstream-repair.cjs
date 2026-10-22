@@ -173,7 +173,7 @@ test('unrelated, untrusted, canceled, healthy and pending runs never call Devin'
 
 test('newer runs, source attempts, moved main and newer candidate commits suppress stale work', async () => {
   for (const options of [
-    { runs: [{ id: 101, run_number: 11, status: 'in_progress' }] },
+    { runs: [{ id: 101, run_number: 11, status: 'in_progress', head_branch: 'main', head_repository: { full_name: 'SteinX/sub2api' } }] },
     { payload: { workflow_run: { id: 100, run_attempt: 0 } } },
     { main: HEAD },
     { commitDate: '2026-10-22T02:00:00Z' },
@@ -182,6 +182,17 @@ test('newer runs, source attempts, moved main and newer candidate commits suppre
     const f = fixture(options);
     await execute(f);
     assert.equal(f.calls.some(call => call.name === 'api'), false);
+  }
+});
+
+test('newer unrelated or external-fork runs cannot suppress a managed failure', async () => {
+  for (const run of [
+    { head_branch: 'feat/other', head_repository: { full_name: 'SteinX/sub2api' } },
+    { head_branch: 'sync/upstream-v0.2.17', head_repository: { full_name: 'visitor/sub2api' } },
+  ]) {
+    const f = fixture({ runs: [{ id: 101, run_number: 11, status: 'completed', conclusion: 'skipped', ...run }] });
+    await execute(f);
+    assert.equal(readState(f.issue).phase, 'active');
   }
 });
 
@@ -307,6 +318,54 @@ test('a finished session without verified publication raises attention only once
   await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
   assert.equal(f.calls.filter(call => call.name === 'warning').length, 1);
   assert.equal(f.calls.some(call => call.name === 'api' && call.method === 'POST'), false);
+});
+
+test('finished sessions remain quiet while their publication runs, then report a real blocker', async () => {
+  const first = fixture();
+  await execute(first);
+  const options = { issue: first.issue, session: { status: 'running', status_detail: 'finished' },
+    runs: [{ status: 'in_progress', display_title: `Release ${TAG}`, head_repository: { full_name: 'SteinX/sub2api' } }] };
+  const f = fixture(options);
+  f.core.warning = message => f.calls.push({ name: 'warning', message });
+  await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
+  assert.equal(f.calls.some(call => call.name === 'warning' || call.name === 'updateIssue'), false);
+  options.runs[0].status = 'completed';
+  await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
+  assert.equal(f.calls.filter(call => call.name === 'warning').length, 1);
+});
+
+test('attention is reported again after an observed recovery, while unchanged work stays quiet', async () => {
+  const first = fixture();
+  await execute(first);
+  const options = { issue: first.issue, session: { status: 'running', status_detail: 'waiting_for_user' } };
+  const f = fixture(options);
+  f.core.warning = message => f.calls.push({ name: 'warning', message });
+  const monitor = () => execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
+  await monitor();
+  options.session.status_detail = 'working';
+  await monitor();
+  assert.equal(readState(f.issue).lastAttention, undefined);
+  const writesAfterRecovery = f.calls.filter(call => call.name === 'updateIssue').length;
+  await monitor();
+  assert.equal(f.calls.filter(call => call.name === 'updateIssue').length, writesAfterRecovery);
+  options.session.status_detail = 'waiting_for_user';
+  await monitor();
+  assert.equal(f.calls.filter(call => call.name === 'warning').length, 2);
+  assert.equal(f.calls.some(call => call.name === 'api' && call.method === 'POST'), false);
+});
+
+test('a successful follow-up clears attention even when the hourly monitor missed the recovery', async () => {
+  const first = fixture();
+  await execute(first);
+  const state = readState(first.issue);
+  state.lastAttention = 'running/waiting_for_user';
+  first.issue.body = first.issue.body.replace(/<!-- devin-upstream-state\n[^]*?\n-->/,
+    `<!-- devin-upstream-state\n${JSON.stringify(state)}\n-->`);
+  const f = fixture({ issue: first.issue });
+  const work = await sourceWork(f, '100', f.imageCheck);
+  await dispatch(f, { ...work, fingerprint: 'new-failure-after-recovery' }, settings, f.api);
+  assert.equal(readState(f.issue).lastAttention, undefined);
+  assert.equal(f.calls.filter(call => call.name === 'api' && call.method === 'POST').length, 1);
 });
 
 test('an intentional release dry run cannot dispatch a missing-artifacts repair', async () => {

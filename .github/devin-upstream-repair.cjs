@@ -94,6 +94,25 @@ async function publication(github, tag, imageCheck) {
   return { complete: true, url: `https://github.com/${REPOSITORY}/releases/tag/${tag}` };
 }
 
+function managedRun(run, upstreamTag, isRelease) {
+  if (run.head_repository?.full_name !== REPOSITORY) return false;
+  return isRelease
+    ? [`Release ${upstreamTag}-stx.1`, `Release ${upstreamTag}-stx.1 (simple)`].includes(run.display_title)
+    : ['main', `sync/upstream-${upstreamTag}`].includes(run.head_branch);
+}
+
+async function publicationPending(github, upstreamTag) {
+  const releases = await github.paginate(github.rest.actions.listWorkflowRuns,
+    { ...FORK, workflow_id: 'release.yml', per_page: 100 });
+  if (releases.some(run => run.status !== 'completed' && managedRun(run, upstreamTag, true)
+      && run.display_title === `Release ${upstreamTag}-stx.1`)) return true;
+  const syncs = await github.paginate(github.rest.actions.listWorkflowRuns,
+    { ...FORK, workflow_id: 'sync-upstream.yml', per_page: 100 });
+  const upstream = await optional(() => github.rest.repos.getLatestRelease({ owner: 'Wei-Shaw', repo: 'sub2api' }));
+  return syncs.some(run => run.status !== 'completed' && managedRun(run, upstreamTag, false)
+    && (run.head_branch !== 'main' || upstream?.tag_name === upstreamTag));
+}
+
 async function sourceWork({ github, core, context }, id, imageCheck) {
   if (!/^[1-9]\d*$/.test(String(id || ''))) throw new Error('A valid source workflow run ID is required.');
   const run = (await github.rest.actions.getWorkflowRun({ ...FORK, run_id: Number(id) })).data;
@@ -110,7 +129,7 @@ async function sourceWork({ github, core, context }, id, imageCheck) {
       || !['schedule', 'workflow_dispatch', 'push', 'pull_request'].includes(run.event))) return null;
   const runs = await github.paginate(github.rest.actions.listWorkflowRuns, { ...FORK, workflow_id: run.workflow_id, per_page: 100 });
   if (runs.some(other => other.id !== run.id && other.run_number > run.run_number
-      && (!isRelease || other.display_title === run.display_title))) return null;
+      && managedRun(other, upstream.tag_name, isRelease))) return null;
   if (!FAILURES.has(run.conclusion) && run.conclusion !== 'success') return null;
   if (!isRelease && run.conclusion === 'success') return null;
 
@@ -247,6 +266,7 @@ async function dispatch({ github, core }, work, settings, api) {
     throw error;
   }
   state.phase = 'active';
+  delete state.lastAttention;
   await saveState(github, issue, work.upstreamTag, state, `Repair dispatched for [source run](${work.runUrl}). Publication has not yet been verified.`);
   core.info(`Devin repair: https://app.devin.ai/sessions/${state.sessionId}; tracking issue #${issue.number}.`);
 }
@@ -267,12 +287,18 @@ async function monitor({ github, core }, api, imageCheck) {
     if (!state.sessionId || state.phase !== 'active') continue;
     const session = await api('GET', `sessions/${sessionId(state.sessionId)}`);
     const status = `${session.status}/${session.status_detail || 'unknown'}`;
-    const attention = needsAttention(session);
+    const waitingForChecks = session.status_detail === 'finished' && await publicationPending(github, upstreamTag);
+    const attention = needsAttention(session) && !waitingForChecks;
     if (attention && state.lastAttention !== status) {
       state.lastAttention = status;
       await saveState(github, issue, upstreamTag, state,
         `Devin needs attention (${status}). Publication is not verified; inspect the session and source workflow before resuming.`);
       core.warning(`Devin repair needs attention (${status}); tracking issue #${issue.number}.`);
+    } else if (!attention && state.lastAttention) {
+      delete state.lastAttention;
+      await saveState(github, issue, upstreamTag, state,
+        waitingForChecks ? 'Publication checks are running. Publication has not yet been verified.'
+          : 'Devin resumed work. Publication has not yet been verified.');
     }
   }
 }
