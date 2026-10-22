@@ -33,7 +33,8 @@ type EventDecoder struct {
 }
 
 func NewEventDecoder(model string, emit func(apicompat.ResponsesStreamEvent) error) *EventDecoder {
-	return &EventDecoder{Response: apicompat.ResponsesResponse{ID: "resp_" + uuid.NewString(), Object: "response", CreatedAt: time.Now().Unix(), Model: model, Status: "in_progress", Output: []apicompat.ResponsesOutput{}}, emit: emit, active: -1, calls: map[string]int{}}
+	store := false
+	return &EventDecoder{Response: apicompat.ResponsesResponse{ID: "resp_" + uuid.NewString(), Object: "response", CreatedAt: time.Now().Unix(), Model: model, Status: "in_progress", Store: &store, Output: []apicompat.ResponsesOutput{}}, emit: emit, active: -1, calls: map[string]int{}}
 }
 func (d *EventDecoder) event(e apicompat.ResponsesStreamEvent) error {
 	e.SequenceNumber = d.seq

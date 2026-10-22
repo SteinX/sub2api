@@ -35,6 +35,53 @@ function readBlobAsText(blob: Blob): Promise<string> {
 }
 
 describe('UseKeyModal', () => {
+  it('uses live Devin models across Codex, Claude Code, OpenCode and CC Switch', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify({ models: [{ slug: 'fusion-test' }, { slug: 'swe-test' }] })
+    }))
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-devin', baseUrl: 'https://example.com/v1/', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }, Icon: true } }
+    })
+    await flushPromises()
+    const code = () => wrapper.findAll('pre code').map(node => node.text()).join('\n')
+    expect(code()).toContain('Sub2API Devin')
+    expect(code()).toContain('model = "fusion-test"')
+    expect(code()).not.toContain('gpt-5.5')
+    expect(code()).not.toContain('/v1/v1')
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('swe-test')
+    await wrapper.get('[data-testid="devin-ccswitch-import"]').trigger('click')
+    expect(wrapper.emitted('ccswitchImport')?.[0]).toEqual([{ clientType: 'codex', model: 'swe-test' }])
+    const tabs = wrapper.get('nav[aria-label="Client"]').findAll('button')
+    await tabs.find(tab => tab.text().includes('claudeCode'))!.trigger('click')
+    expect(code()).toContain('ANTHROPIC_MODEL="swe-test"')
+    expect(code()).toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL')
+    await tabs.find(tab => tab.text().includes('opencode'))!.trigger('click')
+    const config = JSON.parse(wrapper.get('pre code').text())
+    expect(config.model).toBe('devin/swe-test')
+    expect(config.provider.devin.npm).toBe('@ai-sdk/openai-compatible')
+    expect(Object.keys(config.provider.devin.models)).toEqual(['fusion-test', 'swe-test'])
+    wrapper.unmount()
+  })
+
+  it('does not generate guessed Devin models when discovery fails or returns no models', async () => {
+    for (const response of [
+      { ok: false, status: 403 },
+      { ok: true, text: async () => JSON.stringify({ models: [] }) }
+    ]) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+      const wrapper = mount(UseKeyModal, {
+        props: { show: true, apiKey: 'sk-devin', baseUrl: 'https://example.com', platform: 'devin' },
+        global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+      })
+      await flushPromises()
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      expect(wrapper.find('[data-testid="devin-ccswitch-import"]').exists()).toBe(false)
+      wrapper.unmount()
+    }
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
     saveAsMock.mockClear()

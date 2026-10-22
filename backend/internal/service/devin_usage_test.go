@@ -87,7 +87,7 @@ func TestDevinUsageRecoversAPIKeySession(t *testing.T) {
 		if probes.Add(1) == 1 {
 			return devinReply(401, []byte(`{"code":"unauthenticated"}`)), nil
 		}
-		assert.Equal(t, "Bearer devin-session-token$token2", req.Header.Get("Authorization"))
+		assert.Equal(t, "Bearer token2", req.Header.Get("Authorization"))
 		return devinReply(200, []byte(`{"userStatus":{"planStatus":{"dailyQuotaRemainingPercent":null,"weeklyQuotaRemainingPercent":50}}}`)), nil
 	}}
 	d := NewDevinService(nil, nil, upstream, &config.Config{}, nil)

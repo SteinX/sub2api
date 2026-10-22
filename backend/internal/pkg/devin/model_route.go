@@ -123,7 +123,7 @@ func PlanModel(m *pb.ClientModelConfig) ModelRoutePlan {
 		return p
 	}
 	// A special identity must not be hidden in one of the alternate UID fields.
-	for _, uid := range []string{info.GetModelUid(), m.GetModelOrAlias().GetModel()} {
+	for _, uid := range []string{info.GetModelUid(), m.GetModelOrAlias().GetModelUid()} {
 		if alternate := PlanModelUID(uid); uid != "" && alternate.Mode == RouteBlocked {
 			p.CatalogKind, p.Mode, p.DecisionCode, p.MechanismStatus = alternate.CatalogKind, RouteBlocked, alternate.DecisionCode, "unverified"
 		}

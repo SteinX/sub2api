@@ -19,10 +19,10 @@ func TestUsageUsesSeatBearerProtocol(t *testing.T) {
 		require.Equal(t, http.MethodPost, req.Method)
 		require.Equal(t, "application/json", req.Header.Get("Content-Type"))
 		require.Equal(t, "1", req.Header.Get("Connect-Protocol-Version"))
-		require.Equal(t, "Bearer devin-session-token$test", req.Header.Get("Authorization"))
+		require.Equal(t, "Bearer test", req.Header.Get("Authorization"))
 		var body struct{ Metadata map[string]any }
 		require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
-		require.Equal(t, "devin-session-token$test", body.Metadata["api_key"])
+		require.Equal(t, "test", body.Metadata["api_key"])
 		require.Equal(t, "2.0.0", body.Metadata["ide_version"], "usage honors the pinned JSON identity profile")
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{
 			"userStatus":{"planStatus":{"dailyQuotaRemainingPercent":75,"weeklyQuotaRemainingPercent":"0",

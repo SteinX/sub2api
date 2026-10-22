@@ -247,8 +247,11 @@ message GetChatMessageResponse {
 // exa.codeium_common_pb.ModelOrAlias
 message ModelOrAlias {
   oneof choice {
-    string model = 1;
-    string alias = 2;
+    // Upstream Model/ModelAlias enums. Retain their numeric wire values without
+    // vendoring the entire legacy enum catalog.
+    int32 model = 1;
+    int32 alias = 2;
+    string model_uid = 3;
   }
 }
 

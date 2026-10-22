@@ -104,7 +104,7 @@ func (s *OpenAIGatewayService) openAIWSHTTPBridgeThresholdBytes() int64 {
 }
 
 func (s *OpenAIGatewayService) shouldBridgeOpenAIWSHTTP(account *Account, payloadBytes int, previousResponseID string) bool {
-	if account != nil && account.Platform == PlatformGrok {
+	if account != nil && (account.Platform == PlatformGrok || account.Platform == PlatformDevin) {
 		return true
 	}
 	if !s.openAIWSHTTPBridgeEnabled() {
@@ -118,7 +118,7 @@ func (s *OpenAIGatewayService) shouldBridgeOpenAIWSHTTP(account *Account, payloa
 }
 
 func (s *OpenAIGatewayService) shouldBridgeOpenAIWSPassthroughFirstMessage(account *Account, payload []byte) bool {
-	if account != nil && account.Platform == PlatformGrok {
+	if account != nil && (account.Platform == PlatformGrok || account.Platform == PlatformDevin) {
 		return true
 	}
 	if !s.openAIWSHTTPBridgeEnabled() || int64(len(payload)) < s.openAIWSHTTPBridgeThresholdBytes() {
@@ -433,6 +433,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 ) (*OpenAIForwardResult, error) {
 	if s == nil {
 		return nil, errors.New("service is nil")
+	}
+	if account != nil && account.Platform == PlatformDevin {
+		return s.proxyDevinWSBridgeTurn(ctx, c, account, payload, writeClientMessage)
 	}
 	if s.httpUpstream == nil {
 		return nil, errors.New("openai http upstream is nil")

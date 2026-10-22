@@ -60,12 +60,14 @@ func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, a *Accou
 		prompt = "Reply with OK."
 	}
 	raw, _ := json.Marshal(prompt)
-	limit := 128
-	q, err := devin.BuildRequest(&apicompat.ResponsesRequest{Model: model, Input: raw, MaxOutputTokens: &limit}, fmt.Sprintf("account-test:%d", a.ID))
+	// Use the same native defaults and discovered model limits as real traffic.
+	// A fixed tiny output budget can be invalid for reasoning-enabled models.
+	request := &apicompat.ResponsesRequest{Model: model, Input: raw}
+	q, err := devin.BuildRequest(request, fmt.Sprintf("account-test:%d", a.ID))
 	if err != nil {
 		return s.sendErrorAndEnd(c, err.Error())
 	}
-	if err = devin.ValidateModelCapabilities(q, selected, &limit); err != nil {
+	if err = devin.ApplyModelConfig(q, selected, request); err != nil {
 		return s.sendErrorAndEnd(c, err.Error())
 	}
 	client, err := d.Client(ctx, a)
@@ -77,7 +79,7 @@ func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, a *Accou
 		return s.sendErrorAndEnd(c, err.Error())
 	}
 	c.Header("Content-Type", "text/event-stream")
-	s.sendEvent(c, TestEvent{Type: "test_start", Model: model})
+	announced := false
 	decoder := devin.NewEventDecoder(model, func(apicompat.ResponsesStreamEvent) error { return nil })
 	for attempt := 0; attempt < 2; attempt++ {
 		q.ChatModelUid = model
@@ -85,9 +87,13 @@ func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, a *Accou
 		var prepared *devin.PrepareResult
 		prepared, err = client.Prepare(ctx, token, q, plan, models)
 		if err == nil {
-			err = devin.ValidateModelCapabilities(q, devin.FindModel(models, prepared.FinalModelUID), &limit)
+			err = devin.ApplyModelConfig(q, devin.FindModel(models, prepared.FinalModelUID), request)
 		}
 		if err == nil {
+			if !announced {
+				s.sendEvent(c, TestEvent{Type: "test_start", Model: model})
+				announced = true
+			}
 			err = client.Chat(ctx, prepared.BaseURL, token, q, func(m *pb.GetChatMessageResponse) error {
 				if m.DeltaText != "" {
 					s.sendEvent(c, TestEvent{Type: "content", Text: m.DeltaText})

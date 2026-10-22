@@ -10,7 +10,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/proto"
 )
 
 const signaturePrefix = "devin_v1:"
@@ -48,7 +47,7 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 		}
 		maxTokens = uint64(*r.MaxOutputTokens)
 	}
-	temp := 0.4
+	temp := 1.0
 	if r.Temperature != nil {
 		temp = *r.Temperature
 	}
@@ -58,14 +57,27 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 	if temp == 0 {
 		temp = 0.0001
 	}
-	q := &pb.GetChatMessageRequest{Prompt: r.Instructions, ChatModelUid: r.Model, CascadeId: cascade, ExecutionId: uuid.NewString(), RequestType: pb.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE, PlannerMode: pb.ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT, SystemPromptCacheOptions: &pb.PromptCacheOptions{Type: pb.CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL}, Configuration: &pb.CompletionConfiguration{NumCompletions: 1, MaxTokens: maxTokens, Temperature: temp, TopP: 1, StopPatterns: []string{"<|user|>", "<|bot|>", "<|context_request|>", "<|endoftext|>", "<|end_of_turn|>"}}}
+	q := &pb.GetChatMessageRequest{
+		Prompt: r.Instructions, ChatModelUid: r.Model, CascadeId: cascade, ExecutionId: uuid.NewString(),
+		RequestType:              pb.ChatMessageRequestType_CHAT_MESSAGE_REQUEST_TYPE_CASCADE,
+		PlannerMode:              pb.ConversationalPlannerMode_CONVERSATIONAL_PLANNER_MODE_DEFAULT,
+		SystemPromptCacheOptions: &pb.PromptCacheOptions{Type: pb.CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL},
+		Configuration: &pb.CompletionConfiguration{
+			NumCompletions: 1, MaxTokens: maxTokens, MaxNewlines: 400,
+			Temperature: temp, TopK: 40, TopP: float64(float32(0.95)),
+		},
+	}
 	if r.TopP != nil {
-		q.Configuration.TopP = *r.TopP
+		if *r.TopP < 0 || *r.TopP > 1 {
+			return nil, fmt.Errorf("top_p must be between 0 and 1")
+		}
+		q.Configuration.TopP = float64(float32(*r.TopP))
 	}
 	if r.ParallelToolCalls != nil {
 		q.DisableParallelToolCalls = !*r.ParallelToolCalls
 	}
 	var input []apicompat.ResponsesInputItem
+	replayPrompts := make(map[string]*pb.ChatMessagePrompt)
 	var plain string
 	if json.Unmarshal(r.Input, &plain) == nil {
 		raw, _ := json.Marshal(plain)
@@ -74,6 +86,7 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 		return nil, fmt.Errorf("input must be text or an item array")
 	}
 	for i, item := range input {
+		replayID := ""
 		id := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("%s:%d", cascade, i))).String()
 		p := &pb.ChatMessagePrompt{MessageId: id, PromptCacheOptions: &pb.PromptCacheOptions{Type: pb.CacheControlType_CACHE_CONTROL_TYPE_EPHEMERAL}}
 		switch item.Type {
@@ -103,7 +116,13 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 			p.Thinking = rr.Thinking
 			p.Signature = rr.Signature
 			if rr.MessageID != "" {
+				if previous := replayPrompts[rr.MessageID]; previous != nil {
+					previous.Thinking = rr.Thinking
+					previous.Signature = rr.Signature
+					continue
+				}
 				p.MessageId = rr.MessageID
+				replayID = rr.MessageID
 			}
 		case "", "message":
 			text, images, err := inputContent(item.Content)
@@ -126,14 +145,37 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 		default:
 			return nil, fmt.Errorf("unsupported Devin input item %q", item.Type)
 		}
-		q.ChatMessagePrompts = append(q.ChatMessagePrompts, p)
+		// Responses splits one assistant turn into reasoning, text and tool
+		// items. Cascade expects one prompt with all of those fields, as in the
+		// native CLI; signed thinking must remain with its assistant output.
+		if n := len(q.ChatMessagePrompts); n > 0 && p.Source == pb.ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM && q.ChatMessagePrompts[n-1].Source == p.Source {
+			previous := q.ChatMessagePrompts[n-1]
+			previous.Prompt += p.Prompt
+			previous.ToolCalls = append(previous.ToolCalls, p.ToolCalls...)
+			previous.Images = append(previous.Images, p.Images...)
+			if item.Type == "reasoning" {
+				previous.Thinking, previous.Signature = p.Thinking, p.Signature
+				if replayID != "" {
+					previous.MessageId = replayID
+				}
+			}
+			p = previous
+		} else {
+			q.ChatMessagePrompts = append(q.ChatMessagePrompts, p)
+		}
+		if replayID != "" {
+			replayPrompts[replayID] = p
+		}
 	}
-	// Cascade pairs calls/results in order. Keep each call immediately before its result.
+	// Validate call/result pairs and retain each assistant turn as one block.
 	paired, err := pairTools(q.ChatMessagePrompts)
 	if err != nil {
 		return nil, err
 	}
 	q.ChatMessagePrompts = paired
+	if err := normalizeToolHistoryIDs(q.ChatMessagePrompts); err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
 	for _, t := range r.Tools {
 		if t.Type != "function" {
@@ -150,7 +192,11 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 		if !json.Valid(schema) {
 			return nil, fmt.Errorf("invalid tool schema")
 		}
-		q.Tools = append(q.Tools, &pb.ChatToolDefinition{Name: t.Name, Description: t.Description, JsonSchemaString: string(schema)})
+		tool := &pb.ChatToolDefinition{Name: t.Name, Description: t.Description, JsonSchemaString: string(schema)}
+		if t.Strict != nil {
+			tool.Strict = *t.Strict
+		}
+		q.Tools = append(q.Tools, tool)
 	}
 	q.ToolChoice = &pb.ChatToolChoice{Choice: &pb.ChatToolChoice_OptionName{OptionName: "auto"}}
 	if len(r.ToolChoice) > 0 {
@@ -169,6 +215,49 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 		}
 	}
 	return q, nil
+}
+
+// Devin can route to an OpenAI backend, whose call IDs accept at most 40 ASCII
+// letters, digits, underscores and hyphens. Rewrite each call/result pair with
+// a deterministic ID so full-history replay works across all model families.
+func normalizeToolHistoryIDs(prompts []*pb.ChatMessagePrompt) error {
+	seen := make(map[string]string)
+	normalize := func(id string) (string, error) {
+		valid := len(id) > 0 && len(id) <= 40
+		for _, c := range id {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+				valid = false
+				break
+			}
+		}
+		wireID := id
+		if !valid {
+			digest := sha256.Sum256([]byte(id))
+			wireID = fmt.Sprintf("call_%x", digest[:16])
+		}
+		if original, exists := seen[wireID]; exists && original != id {
+			return "", fmt.Errorf("tool call IDs collide after normalization")
+		}
+		seen[wireID] = id
+		return wireID, nil
+	}
+	for _, p := range prompts {
+		for _, call := range p.ToolCalls {
+			id, err := normalize(call.Id)
+			if err != nil {
+				return err
+			}
+			call.Id = id
+		}
+		if p.ToolCallId != "" {
+			id, err := normalize(p.ToolCallId)
+			if err != nil {
+				return err
+			}
+			p.ToolCallId = id
+		}
+	}
+	return nil
 }
 
 func inputContent(raw json.RawMessage) (string, []*pb.ImageData, error) {
@@ -237,13 +326,8 @@ func pairTools(in []*pb.ChatMessagePrompt) ([]*pb.ChatMessagePrompt, error) {
 			out = append(out, p)
 			continue
 		}
+		out = append(out, p)
 		for _, call := range p.ToolCalls {
-			cp, ok := proto.Clone(p).(*pb.ChatMessagePrompt)
-			if !ok {
-				return nil, fmt.Errorf("could not copy Devin tool history")
-			}
-			cp.ToolCalls = []*pb.ChatToolCall{call}
-			out = append(out, cp)
 			if result, ok := results[call.Id]; ok {
 				out = append(out, result)
 			}
