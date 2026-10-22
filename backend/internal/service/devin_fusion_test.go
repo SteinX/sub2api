@@ -31,6 +31,7 @@ type fusionAccountRepo struct {
 	AccountRepository
 	account            *Account
 	hideFromScheduling bool
+	lookupErr          error
 }
 
 func (r *fusionAccountRepo) ListSchedulable(context.Context) ([]Account, error) {
@@ -45,7 +46,9 @@ func (r *fusionAccountRepo) ListSchedulableByGroupID(context.Context, int64) ([]
 	}
 	return []Account{*r.account}, nil
 }
-func (r *fusionAccountRepo) GetByID(context.Context, int64) (*Account, error) { return r.account, nil }
+func (r *fusionAccountRepo) GetByID(context.Context, int64) (*Account, error) {
+	return r.account, r.lookupErr
+}
 
 type fusionTestBillingCache struct{ *memInflightCache }
 
@@ -60,9 +63,13 @@ type fusionBillingRepo struct {
 	UsageBillingRepository
 	commands []*UsageBillingCommand
 	seen     map[string]bool
+	fail     bool
 }
 
 func (r *fusionBillingRepo) Apply(_ context.Context, c *UsageBillingCommand) (*UsageBillingApplyResult, error) {
+	if r.fail {
+		return nil, fmt.Errorf("billing temporarily unavailable")
+	}
 	if r.seen == nil {
 		r.seen = map[string]bool{}
 	}
@@ -409,6 +416,67 @@ func TestFusionAutomaticPairDiscoveryAndOptOut(t *testing.T) {
 	require.Error(t, ValidateDevinFusionExtra(PlatformDevin, a.Extra))
 }
 
+func TestFusionGlobalDisableAcceptsStaleMemberGrants(t *testing.T) {
+	p := fusionTestProfile()
+	for _, catalog := range []string{"missing catalog", "missing member", "disabled member"} {
+		t.Run(catalog, func(t *testing.T) {
+			extra := map[string]any{}
+			if catalog != "missing catalog" {
+				models := []*pb.ClientModelConfig{{ModelUid: p.LeadModel}}
+				if catalog == "disabled member" {
+					models = append(models, &pb.ClientModelConfig{ModelUid: p.SidekickModel, Disabled: true})
+				}
+				extra = devinCatalogExtra(models, "fixture")
+			}
+			extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+			extra[fusion.ExtraEnabled] = false
+			require.NoError(t, ValidateDevinFusionExtra(PlatformDevin, extra))
+			require.Nil(t, devinFusionProfile(&Account{Platform: PlatformDevin, Extra: extra}, p.PublicModel))
+			extra[fusion.ExtraEnabled] = true
+			require.Error(t, ValidateDevinFusionExtra(PlatformDevin, extra), "re-enabling still requires current member grants")
+		})
+	}
+}
+
+func TestFusionPublicModelListRespectsAccountPolicyOnCachedCatalog(t *testing.T) {
+	p := fusionTestProfile()
+	public := "fusion-" + p.LeadModel + "-sidekick-" + p.SidekickModel
+	models := []*pb.ClientModelConfig{{ModelUid: p.LeadModel}, {ModelUid: p.SidekickModel}, {ModelUid: public}}
+	account := &Account{ID: 7, Platform: PlatformDevin, Credentials: map[string]any{"access_token": "synthetic-token"}, Extra: devinCatalogExtra(models, "fixture")}
+	modelCalls := 0
+	upstream := &devinHTTP{handle: func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, devin.ModelsPath, r.URL.Path)
+		modelCalls++
+		b, err := proto.Marshal(&pb.GetCliModelConfigsResponse{ClientModelConfigs: models})
+		require.NoError(t, err)
+		return devinReply(200, b), nil
+	}}
+	svc := &OpenAIGatewayService{devin: NewDevinService(nil, nil, upstream, &config.Config{}, nil)}
+	first, err := svc.FetchOpenAIModelsList(context.Background(), account)
+	require.NoError(t, err)
+	require.Contains(t, string(first.Body), public)
+	disabled := fusion.DefaultProfile(public, p.LeadModel, p.SidekickModel)
+	disabled.Enabled = false
+	account.Extra[fusion.ExtraProfiles] = []fusion.Profile{disabled}
+	perPair, err := svc.FetchOpenAIModelsList(context.Background(), account)
+	require.NoError(t, err)
+	require.NotContains(t, string(perPair.Body), public)
+	require.Contains(t, string(perPair.Body), p.LeadModel)
+	require.NotEqual(t, first.ETag, perPair.ETag)
+	delete(account.Extra, fusion.ExtraProfiles)
+	account.Extra[fusion.ExtraEnabled] = false
+	global, err := svc.FetchOpenAIModelsList(context.Background(), account)
+	require.NoError(t, err)
+	require.NotContains(t, string(global.Body), public)
+	account.Extra[fusion.ExtraEnabled] = true
+	restored, err := svc.FetchOpenAIModelsList(context.Background(), account)
+	require.NoError(t, err)
+	require.Contains(t, string(restored.Body), public)
+	require.Equal(t, 1, modelCalls, "policy edits must be applied to the cached raw catalog")
+	_, err = DevinModelsBody(models, nil)
+	require.Error(t, err)
+}
+
 type fusionAuxCapacityCache struct {
 	ConcurrencyCache
 	accountLimit, userLimit       int
@@ -524,7 +592,7 @@ func TestFusionPendingSummaryReservationSurvivesHTTPAndReleasesOnRecovery(t *tes
 }
 
 func TestFusionIngressSettlesUsageWithoutExecutionAdmission(t *testing.T) {
-	for _, condition := range []string{"member removed", "member disabled", "account paused", "account rate limited", "profile disabled", "cancel control"} {
+	for _, condition := range []string{"member removed", "member disabled", "account paused", "account rate limited", "profile disabled", "cancel control", "cancel unknown usage", "cancel billing failed", "cancel account missing", "cancel busy"} {
 		for _, protocol := range []string{"responses", "chat", "anthropic"} {
 			t.Run(condition+"/"+protocol, func(t *testing.T) {
 				ctx := context.Background()
@@ -553,6 +621,10 @@ func TestFusionIngressSettlesUsageWithoutExecutionAdmission(t *testing.T) {
 				cfg.Billing.InflightReservation.Enabled = true
 				cache := &fusionTestBillingCache{newMemInflightCache(100)}
 				bills := &fusionBillingRepo{}
+				bills.fail = condition == "cancel billing failed"
+				if condition == "cancel account missing" {
+					repo.lookupErr = fmt.Errorf("account lookup temporarily unavailable")
+				}
 				svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{inserted: true}, bills, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
 				svc.cfg, svc.accountRepo = cfg, repo
 				svc.billingCacheService = NewBillingCacheService(cache, nil, nil, nil, nil, nil, cfg, nil)
@@ -571,6 +643,9 @@ func TestFusionIngressSettlesUsageWithoutExecutionAdmission(t *testing.T) {
 				session := &fusion.Session{ID: "settlement-session", Scope: fusion.Scope(key.UserID, key.ID), AccountID: a.ID, Profile: p, ProfileRevision: p.Revision(), PublicModel: p.PublicModel, Role: fusion.Sidekick, Turn: 1, State: fusion.Failed, ActiveRequest: -1, ExpiresAt: time.Now().Add(time.Hour), AuxReservedUSD: 1, Contexts: map[fusion.Role]*fusion.RoleContext{fusion.Sidekick: {Job: job}}, Sidekick: []apicompat.ResponsesInputItem{{Type: "message", Role: "user", Content: json.RawMessage(`"original task"`)}}}
 				aid := "summary-paid-before-admission-changed"
 				attempt := fusion.Attempt{ID: aid, Purpose: fusion.Compaction, Role: fusion.Sidekick, Turn: 1, Model: p.SidekickModel, BillingModel: p.SidekickModel, StartedAt: time.Now(), Status: "completed", EstimateUSD: 1, Response: &apicompat.ResponsesResponse{Model: p.SidekickModel, Status: "completed", Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 10}}}
+				if condition == "cancel unknown usage" {
+					attempt.Status, attempt.Response = "unknown", nil
+				}
 				journal, err := json.Marshal(map[string]any{"job": job, "attempt": attempt})
 				require.NoError(t, err)
 				require.NoError(t, store.Set(ctx, "devin:fusion:index:"+session.Scope+":compaction:"+fusion.Digest(session.ID+":"+job.ID), journal, time.Hour))
@@ -583,17 +658,36 @@ func TestFusionIngressSettlesUsageWithoutExecutionAdmission(t *testing.T) {
 				owner.reservations[aid] = reservation
 				owner.Close()
 				require.Equal(t, 1, cache.count())
+				var unlock func()
+				if condition == "cancel busy" {
+					var acquired bool
+					unlock, acquired, err = store.Acquire(ctx, "devin:fusion:session:"+session.Scope+":"+fusion.Digest(session.ID)+":lock", time.Minute)
+					require.NoError(t, err)
+					require.True(t, acquired)
+					defer func() {
+						if unlock != nil {
+							unlock()
+						}
+					}()
+				}
+				pendingCancel := strings.HasPrefix(condition, "cancel ") && condition != "cancel control"
 				for range 2 {
-					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					w := httptest.NewRecorder()
+					c, _ := gin.CreateTestContext(w)
 					c.Request = httptest.NewRequest(http.MethodPost, "/v1/"+protocol, nil)
 					c.Request.Header.Set(fusion.HeaderSession, session.ID)
-					if condition == "cancel control" {
+					if strings.HasPrefix(condition, "cancel ") {
 						c.Request.Header.Set(fusion.HeaderCancel, "true")
 					}
 					bound, bindErr := svc.BindDevinFusionRequest(c, key, p.PublicModel, fusionProtocolBody(protocol, false, ""), protocol, nil)
 					require.True(t, bound)
-					if condition == "cancel control" {
+					if strings.HasPrefix(condition, "cancel ") {
 						require.True(t, DevinFusionHandled(bindErr))
+						require.Equal(t, 200, w.Code)
+						require.Contains(t, w.Body.String(), `"status":"cancel_requested"`)
+						if pendingCancel {
+							require.Contains(t, w.Body.String(), `"usage_settlement":"pending"`)
+						}
 					} else {
 						var typed *fusion.Error
 						require.ErrorAs(t, bindErr, &typed)
@@ -602,6 +696,31 @@ func TestFusionIngressSettlesUsageWithoutExecutionAdmission(t *testing.T) {
 				}
 				stored, _, err := svc.devin.fusionEngine().Load(ctx, session.Scope, session.ID)
 				require.NoError(t, err)
+				if pendingCancel {
+					require.Equal(t, fusion.Cancelled, stored.State)
+					require.Equal(t, 1.0, stored.AuxReservedUSD)
+					require.Equal(t, 1, cache.count())
+					require.Empty(t, bills.commands)
+					require.Zero(t, providerCalls)
+					if condition == "cancel unknown usage" {
+						return
+					}
+					// Restore only billing availability; the task remains cancelled.
+					bills.fail, repo.lookupErr = false, nil
+					if unlock != nil {
+						unlock()
+						unlock = nil
+					}
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodPost, "/v1/"+protocol, nil)
+					c.Request.Header.Set(fusion.HeaderSession, session.ID)
+					_, bindErr := svc.BindDevinFusionRequest(c, key, p.PublicModel, fusionProtocolBody(protocol, false, ""), protocol, nil)
+					var typed *fusion.Error
+					require.ErrorAs(t, bindErr, &typed)
+					require.Equal(t, "devin_fusion_session_stopped", typed.Code)
+					stored, _, err = svc.devin.fusionEngine().Load(ctx, session.Scope, session.ID)
+					require.NoError(t, err)
+				}
 				require.Greater(t, stored.Maintenance.CompactionCostUSD, 0.0)
 				require.Zero(t, stored.AuxReservedUSD)
 				require.Zero(t, cache.count())

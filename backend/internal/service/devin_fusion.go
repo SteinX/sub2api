@@ -314,23 +314,29 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 			return true, err
 		}
 	}
+	settlementPending := false
 	if session != nil && session.NeedsUsageReconciliation() {
 		// Fees already incurred do not require a current model grant or an
 		// inference-schedulable account. This path cannot issue provider requests.
 		recovered, reconcileErr := s.reconcileDevinFusionUsage(c, key, session, updater)
 		if reconcileErr != nil {
-			var typed *fusion.Error
-			// An active worker observes the durable cancel flag itself. Do not
-			// delay acknowledgement just because it still owns the session lock.
-			if !cancelRequested || !errors.As(reconcileErr, &typed) || typed.Code != "devin_fusion_session_busy" {
+			// The cancel flag is already durable. Acknowledge that control action
+			// independently of billing, retaining all pending journals/reservations.
+			if !cancelRequested {
 				return true, reconcileErr
 			}
+			settlementPending = true
 		} else {
 			session = recovered
+			settlementPending = session.NeedsUsageReconciliation()
 		}
 	}
 	if cancelRequested {
-		c.JSON(200, gin.H{"object": "fusion.session", "id": id, "status": "cancel_requested"})
+		response := gin.H{"object": "fusion.session", "id": id, "status": "cancel_requested"}
+		if settlementPending {
+			response["usage_settlement"] = "pending"
+		}
+		c.JSON(200, response)
 		return true, errDevinFusionHandled
 	}
 	if session != nil && (session.State == fusion.Cancelled || session.State == fusion.Failed || session.State == fusion.BudgetExhausted || session.State == fusion.Uncertain) {
@@ -425,6 +431,9 @@ func ValidateDevinFusionExtra(platform string, extra map[string]any) error {
 	profiles, err := devinFusionProfiles(a)
 	if err != nil {
 		return infraerrors.BadRequest("INVALID_FUSION_PROFILE", err.Error())
+	}
+	if !devinFusionEnabled(a) {
+		return nil
 	}
 	for _, p := range profiles {
 		if !p.Enabled {

@@ -389,10 +389,9 @@ func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([
 	return devin.CloneModels(models), nil
 }
 
-func DevinModelsBody(models []*pb.ClientModelConfig, accounts ...*Account) ([]byte, error) {
-	var account *Account
-	if len(accounts) > 0 {
-		account = accounts[0]
+func DevinModelsBody(models []*pb.ClientModelConfig, account *Account) ([]byte, error) {
+	if account == nil {
+		return nil, errors.New("Devin model projection requires an account")
 	}
 	routes := devinEffectiveModelRoutes(models, account)
 	rows := make([]map[string]any, 0, len(models))

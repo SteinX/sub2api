@@ -22,7 +22,7 @@ func (s *OpenAIGatewayService) FetchOpenAIModelsList(ctx context.Context, accoun
 		if err != nil {
 			return nil, err
 		}
-		body, err := DevinModelsBody(models)
+		body, err := DevinModelsBody(models, account)
 		return &OpenAIModelsResponse{Body: body, ETag: codexModelsManifestBodyETag(body)}, err
 	}
 	if s == nil || account == nil {
