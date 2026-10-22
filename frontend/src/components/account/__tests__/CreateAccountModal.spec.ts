@@ -208,9 +208,15 @@ describe('CreateAccountModal Devin authorization', () => {
     expect(wrapper.text()).not.toContain('admin.accounts.oauth.title')
 
     await wrapper.get('form#create-account-form input[type="text"]').setValue('Devin account')
+    await wrapper.get('input[type="datetime-local"]').setValue('2028-10-22T12:00')
+    await wrapper.get('input[type="number"][min="1"][placeholder]').setValue('4')
     await wrapper.get('form#create-account-form').trigger('submit.prevent')
     expect(wrapper.text()).toContain('admin.accounts.devin.title')
     expect(wrapper.findComponent({ name: 'DevinConnectionFlow' }).exists()).toBe(true)
+    expect(wrapper.getComponent({ name: 'DevinConnectionFlow' }).props('settings')).toMatchObject({
+      name: 'Devin account', load_factor: 4, auto_pause_on_expired: true,
+      expires_at: Math.floor(new Date('2028-10-22T12:00').getTime() / 1000)
+    })
     expect(wrapper.findComponent(OAuthAuthorizationFlowStub).exists()).toBe(false)
     wrapper.unmount()
   })

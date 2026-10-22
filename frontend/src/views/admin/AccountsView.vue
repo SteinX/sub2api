@@ -738,6 +738,7 @@ const buildDefaultTodayStats = (): WindowStats => ({
 })
 
 const accountSupportsBatchUsage = (account: Account) => {
+  if (account.platform === 'devin') return true
   if (account.platform === 'anthropic') {
     return account.type === 'oauth' || account.type === 'setup-token'
   }

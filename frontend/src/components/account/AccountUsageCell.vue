@@ -436,6 +436,14 @@
       </div>
     </template>
 
+    <DevinUsageCell
+      v-else-if="account.platform === 'devin'"
+      :usage="usageInfo"
+      :loading="loading"
+      :error="error"
+      @refresh="loadUsage({ source: 'active', bypassCache: true })"
+    />
+
     <!-- Multi-protocol API-key providers (CN vendors, OpenCode, Command Code):
          coding-plan / subscription quota windows or balance -->
     <template v-else-if="isMultiProtocolApiKeyPlatform(account.platform)">
@@ -689,6 +697,7 @@ import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import ClaudeResetCreditsCell from './ClaudeResetCreditsCell.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
+import DevinUsageCell from './DevinUsageCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
 import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
 import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
@@ -768,6 +777,7 @@ const isGeminiVertex = computed(() => {
 
 // Show usage windows for OAuth and Setup Token accounts
 const showUsageWindows = computed(() => {
+  if (props.account.platform === 'devin') return true
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
   // 第三方上游 API Key 没有模拟配额，按普通 Key 账号展示今日统计与额度进度条。
   if (props.account.platform === 'gemini') return !isGeminiThirdPartyApiKey.value
@@ -780,6 +790,7 @@ const showUsageWindows = computed(() => {
 })
 
 const shouldFetchUsage = computed(() => {
+  if (props.account.platform === 'devin') return true
   if (props.account.platform === 'anthropic') {
     return props.account.type === 'oauth' || props.account.type === 'setup-token'
   }
@@ -1701,6 +1712,16 @@ watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
   _usageCache.delete(props.account.id)
   requestAutoLoad()
 })
+
+watch(
+  () => [props.account.id, props.account.extra?.devin_auth_session_id, props.account.proxy_id, props.account.credentials?.base_url] as const,
+  ([id, session, proxy, baseURL], [previousID, previousSession, previousProxy, previousBaseURL]) => {
+    if (props.account.platform !== 'devin' || id !== previousID) return
+    if (session === previousSession && proxy === previousProxy && baseURL === previousBaseURL) return
+    _usageCache.delete(id)
+    void loadUsage({ source: 'active', bypassCache: true })
+  }
+)
 
 watch(
   () => props.manualRefreshToken,

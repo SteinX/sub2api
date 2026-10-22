@@ -76,6 +76,7 @@ const ModelWhitelistSelectorStub = defineComponent({
   name: 'ModelWhitelistSelector',
   props: {
     modelMappings: { type: Array, default: () => [] },
+    availableModels: { type: Array, default: () => [] },
     modelValue: {
       type: Array,
       default: () => []
@@ -330,6 +331,45 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 }
 
 describe('EditAccountModal', () => {
+  it.each(['apikey', 'oauth'])('edits Devin %s endpoint and model restrictions using its authorized catalog', async (type) => {
+    const account = {
+      ...buildAccount(), platform: 'devin', type,
+      credentials: { model_mapping: { 'public-swe': 'swe-2-max', 'swe-2-high': 'swe-2-high' } },
+      credentials_status: { has_api_key: type === 'apikey' },
+      extra: { devin_models: ['swe-2-max', 'swe-2-high'] }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.find('[data-testid="devin-account-settings"]').exists()).toBe(true)
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.poolMode')
+    expect(wrapper.text()).not.toContain('admin.accounts.customErrorCodes')
+    const selector = wrapper.getComponent(ModelWhitelistSelectorStub)
+    expect(selector.props('availableModels')).toEqual(['swe-2-max', 'swe-2-high'])
+    expect(selector.props('modelMappings')).toEqual([{ from: 'public-swe', to: 'swe-2-max' }])
+    selector.vm.$emit('update:modelValue', ['swe-2-max'])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    const credentials = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(credentials.base_url).toBe('https://server.codeium.com')
+    expect(credentials.model_mapping).toEqual({ 'public-swe': 'swe-2-max', 'swe-2-max': 'swe-2-max' })
+    expect(credentials).not.toHaveProperty('api_key')
+    expect(credentials).not.toHaveProperty('access_token')
+    wrapper.unmount()
+  })
+
+  it('preserves a Devin session account custom endpoint and permits clearing restrictions', async () => {
+    const account = { ...buildAccount(), platform: 'devin', type: 'oauth', credentials: {
+      base_url: 'https://cascade.example', model_mapping: { 'swe-2-max': 'swe-2-max' }
+    } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('input[placeholder="https://server.codeium.com"]').element.value).toBe('https://cascade.example')
+    wrapper.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', [])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toEqual({ base_url: 'https://cascade.example' })
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     authIsSimpleMode.value = true
   })

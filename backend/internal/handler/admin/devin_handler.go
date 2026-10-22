@@ -140,12 +140,15 @@ func (h *DevinHandler) Commit(c *gin.Context) {
 		return
 	}
 	var in struct {
-		Name           string   `json:"name"`
-		Notes          *string  `json:"notes"`
-		GroupIDs       []int64  `json:"group_ids"`
-		Concurrency    int      `json:"concurrency"`
-		Priority       int      `json:"priority"`
-		RateMultiplier *float64 `json:"rate_multiplier"`
+		Name               string   `json:"name"`
+		Notes              *string  `json:"notes"`
+		GroupIDs           []int64  `json:"group_ids"`
+		Concurrency        int      `json:"concurrency"`
+		Priority           int      `json:"priority"`
+		RateMultiplier     *float64 `json:"rate_multiplier"`
+		LoadFactor         *int     `json:"load_factor"`
+		ExpiresAt          *int64   `json:"expires_at"`
+		AutoPauseOnExpired *bool    `json:"auto_pause_on_expired"`
 	}
 	if c.ShouldBindJSON(&in) != nil {
 		response.BadRequest(c, "Invalid account settings")
@@ -217,7 +220,7 @@ func (h *DevinHandler) Commit(c *gin.Context) {
 			account, err = h.admin.ClearAccountError(ctx, v.TargetAccountID)
 		}
 	} else {
-		account, err = h.admin.CreateAccount(ctx, &service.CreateAccountInput{Name: in.Name, Notes: in.Notes, Platform: service.PlatformDevin, Type: kind, Credentials: v.Credentials, Extra: extra, ProxyID: v.ProxyID, Concurrency: in.Concurrency, Priority: in.Priority, RateMultiplier: in.RateMultiplier, GroupIDs: in.GroupIDs})
+		account, err = h.admin.CreateAccount(ctx, &service.CreateAccountInput{Name: in.Name, Notes: in.Notes, Platform: service.PlatformDevin, Type: kind, Credentials: v.Credentials, Extra: extra, ProxyID: v.ProxyID, Concurrency: in.Concurrency, Priority: in.Priority, RateMultiplier: in.RateMultiplier, GroupIDs: in.GroupIDs, LoadFactor: in.LoadFactor, ExpiresAt: in.ExpiresAt, AutoPauseOnExpired: in.AutoPauseOnExpired})
 	}
 	if err != nil {
 		response.ErrorFrom(c, err)

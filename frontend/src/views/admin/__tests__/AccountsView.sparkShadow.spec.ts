@@ -13,6 +13,7 @@ const {
   listAccounts,
   listWithEtag,
   getBatchTodayStats,
+  getBatchUsage,
   getAllProxies,
   getAllGroups,
   duplicateAccount,
@@ -23,6 +24,7 @@ const {
   listAccounts: vi.fn(),
   listWithEtag: vi.fn(),
   getBatchTodayStats: vi.fn(),
+  getBatchUsage: vi.fn(),
   getAllProxies: vi.fn(),
   getAllGroups: vi.fn(),
   duplicateAccount: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock('@/api/admin', () => ({
       list: listAccounts,
       listWithEtag,
       getBatchTodayStats,
+      getBatchUsage,
       duplicate: duplicateAccount,
       getUpstreamBillingProbeSettings: vi.fn().mockResolvedValue({ enabled: true, interval_minutes: 30 }),
       createSparkShadow,
@@ -66,7 +69,7 @@ vi.mock('vue-i18n', async () => {
   }
 })
 
-const mountView = () =>
+const mountView = (showUsageRows = false) =>
   mount(AccountsView, {
     global: {
       stubs: {
@@ -74,7 +77,10 @@ const mountView = () =>
         TablePageLayout: {
           template: '<div><slot name="filters" /><slot name="table" /><slot name="pagination" /></div>'
         },
-        DataTable: true,
+        DataTable: showUsageRows ? {
+          props: ['data'],
+          template: '<div><slot v-for="row in data" name="cell-usage" :row="row" /></div>'
+        } : true,
         Pagination: true,
         ConfirmDialog: true,
         AccountTableActions: { template: '<div><slot name="beforeCreate" /><slot name="after" /></div>' },
@@ -150,6 +156,20 @@ describe('admin AccountsView — 外审 F2:spark 影子创建接线', () => {
     expect(listAccounts.mock.calls.length).toBeGreaterThan(before)
     expect(listAccounts.mock.calls.at(-1)?.[0]).toBe(2)
     expect(pagination.props('page')).toBe(2)
+    wrapper.unmount()
+  })
+
+  it('includes Devin API-key accounts in the desktop usage batch', async () => {
+    const account = { id: 9340, name: 'Devin', platform: 'devin', type: 'apikey', extra: {} }
+    listAccounts.mockResolvedValue({ items: [account], total: 1, page: 1, page_size: 20, pages: 1 })
+    getBatchUsage.mockResolvedValue({ usage: {}, errors: {} })
+    const wrapper = mountView(true)
+    await flushPromises()
+    const cell = wrapper.getComponent({ name: 'AccountUsageCell' })
+    cell.props('requestBatchedUsage')(account, { force: true })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await flushPromises()
+    expect(getBatchUsage).toHaveBeenCalledWith([account.id], true)
     wrapper.unmount()
   })
 

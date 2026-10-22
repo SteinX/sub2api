@@ -24,6 +24,8 @@ type devinRuntime struct {
 	token                   string
 	models                  []*pb.ClientModelConfig
 	tokenUntil, modelsUntil time.Time
+	usage                   *UsageInfo
+	usageUntil              time.Time
 }
 
 // DevinService owns credential-scoped runtime caches; account scheduling stays in the gateway.
@@ -257,7 +259,7 @@ func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key stri
 	defer s.mu.Unlock()
 	if len(s.runtime) > 2048 {
 		for k, v := range s.runtime {
-			if time.Now().After(v.tokenUntil) && time.Now().After(v.modelsUntil) {
+			if time.Now().After(v.tokenUntil) && time.Now().After(v.modelsUntil) && time.Now().After(v.usageUntil) {
 				delete(s.runtime, k)
 			}
 		}
@@ -274,7 +276,7 @@ func (s *DevinService) RecoverToken(ctx context.Context, a *Account, failed stri
 	return s.token(ctx, a, true, devin.NormalizeToken(failed))
 }
 
-func (s *DevinService) Models(ctx context.Context, a *Account) ([]*pb.ClientModelConfig, error) {
+func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([]*pb.ClientModelConfig, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -282,7 +284,7 @@ func (s *DevinService) Models(ctx context.Context, a *Account) ([]*pb.ClientMode
 	s.mu.Lock()
 	e := s.runtime[key]
 	s.mu.Unlock()
-	if e.models != nil && time.Now().Before(e.modelsUntil) {
+	if !(len(force) > 0 && force[0]) && e.models != nil && time.Now().Before(e.modelsUntil) {
 		return e.models, nil
 	}
 	pending := s.flights.DoChan("models:"+key, func() (any, error) {

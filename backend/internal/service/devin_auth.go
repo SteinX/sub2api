@@ -191,6 +191,22 @@ func (s *DevinService) StartAuth(ctx context.Context, owner int64, proxyID *int6
 func (s *DevinService) ValidateAuth(ctx context.Context, v *DevinAuthSession) error {
 	v.AutoRecover = v.Credentials["api_key"] != nil
 	a := &Account{ID: v.transportID(), Platform: PlatformDevin, Type: AccountTypeOAuth, Credentials: v.Credentials, ProxyID: v.ProxyID, Concurrency: 1}
+	if v.TargetAccountID != 0 {
+		if s.repo == nil {
+			return errors.New("devin account repository is unavailable")
+		}
+		target, err := s.repo.GetByID(ctx, v.TargetAccountID)
+		if err != nil {
+			return err
+		}
+		if target == nil || target.Platform != PlatformDevin {
+			return errors.New("target account is not a Devin account")
+		}
+		// Reauthorization retains the target's endpoint and proxy at commit time.
+		// Validate the new identity through that same configuration.
+		a.Credentials = MergeCredentials(v.Credentials, map[string]any{"base_url": target.GetCredential("base_url")})
+		a.ProxyID, a.Proxy = target.ProxyID, target.Proxy
+	}
 	models, err := s.Models(ctx, a)
 	if err != nil {
 		return err

@@ -1,6 +1,11 @@
 export default {
     accounts: {
       devin: {
+        credentialsEditHint: 'To change the API key or signed-in identity, use Reauthorize in the account menu to validate the credentials and available models again.',
+        dailyUsage: 'Daily', weeklyUsage: 'Weekly', quotaUnavailable: 'Not reported by upstream',
+        promptCredits: 'Prompt credits', flowCredits: 'Flow credits', flexCredits: 'Flex credits',
+        usageFailed: 'Usage query failed. Please retry.', usageForbidden: 'Usage is unavailable for this account or plan.',
+        usageRateLimited: 'Usage query rate limited. Please retry later.',
         title: 'Devin Account Authorization', account: 'Devin Account',
         recoverBadge: 'Automatic session recovery', manualBadge: 'Reconnect when expired',
         intro: 'Connect Devin to validate credentials, discover models and add the account to the pool.',
