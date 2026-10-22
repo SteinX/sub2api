@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { plan, publish, releaseTag } = require('./sync-upstream.cjs');
+const { plan, publish, publishOrWait, releaseTag } = require('./sync-upstream.cjs');
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -190,4 +190,14 @@ test('another repository cannot run the writer', async () => {
   await assert.rejects(plan(f), /restricted/);
   await assert.rejects(publish(f, request), /restricted/);
   assert.deepEqual(f.calls, []);
+});
+
+test('publication races wait for fresh validation without becoming repair failures', async () => {
+  const f = fixture({ head: OTHER });
+  await publishOrWait(f, request);
+  assert.equal(f.calls.some(call => call.name === 'tag' || call.name === 'dispatch'), false);
+  const moved = fixture({ prHead: OTHER });
+  await publishOrWait(moved, { ...request, sha: CANDIDATE, prNumber: 42, baseSha: SHA });
+  const mismatch = fixture({ wrongTree: true });
+  await assert.rejects(publishOrWait(mismatch, { ...request, sha: CANDIDATE, prNumber: 42, baseSha: SHA }), /differs/);
 });

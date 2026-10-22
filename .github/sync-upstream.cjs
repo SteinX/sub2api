@@ -153,4 +153,15 @@ async function publish({ github, context, core }, { sha, tag, upstreamTag, prNum
   core.info(`Dispatched Release ${tag}; follow the Release workflow for publication results`);
 }
 
-module.exports = { plan, publish, releaseTag };
+async function publishOrWait(dependencies, request) {
+  try { await publish(dependencies, request); }
+  catch (error) {
+    if (/^(main changed during PR validation; retry integration|main changed during validation; retry with the current source|Sync PR changed during validation)$/.test(error.message)) {
+      dependencies.core.info(`${error.message}; the next synchronization run will validate the new candidate.`);
+      return;
+    }
+    throw error;
+  }
+}
+
+module.exports = { plan, publish, publishOrWait, releaseTag };

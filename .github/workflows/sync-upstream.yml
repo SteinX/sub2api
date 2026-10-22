@@ -83,7 +83,7 @@ jobs:
           SYNC_BASE_SHA: ${{ steps.plan.outputs.base_sha }}
         with:
           script: |
-            await require(process.env.RUNNER_TEMP + '/sync-upstream.cjs').publish(
+            await require(process.env.RUNNER_TEMP + '/sync-upstream.cjs').publishOrWait(
               {github, context, core},
               {sha: process.env.SYNC_SHA, tag: process.env.SYNC_TAG, upstreamTag: process.env.UPSTREAM_TAG,
                prNumber: process.env.SYNC_PR, baseSha: process.env.SYNC_BASE_SHA}

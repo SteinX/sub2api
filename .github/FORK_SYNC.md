@@ -46,13 +46,22 @@ item for the agent to investigate and repair, not merely a notification to the
 user. It must inspect existing integration work and active runs before starting
 another attempt. It must never force-push main, move release tags or bypass tests.
 
-The existing scheduled ChatGPT agent is an exception monitor. It first checks
-managed sync PR mergeability and synchronization/release workflow results. Healthy
-runs and pending checks do not cause code analysis, repeated tests or notifications.
-Conflicts, failed checks and failed publication start active investigation and
-repair. The exposed ChatGPT Automations API only accepts schedules, so this is
-hourly exception polling rather than an instant GitHub webhook. No extra API key
-or GitHub-hosted Codex execution is configured.
+`Devin upstream repair` can hand current synchronization/publication failures to
+a cloud Devin session through the v3 Sessions API. It is disabled until the
+repository variable `DEVIN_UPSTREAM_REPAIR_ENABLED` is `true`. The trusted
+default-branch dispatcher uses a bot-authored tracking issue for reservations,
+deduplication and session reuse. Healthy/pending/stale/unrelated runs do not start
+Devin. A lightweight hourly monitor reads existing session state without starting
+agent work. Release assets and versioned GHCR images are independently checked
+before the tracking issue is closed. Configuration, permissions, limits and
+recovery are documented in [Devin setup](../docs/DEVIN_UPSTREAM_REPAIR.md).
+
+The existing scheduled ChatGPT exception monitor remains unchanged during the
+transition. Pause it after a complete Devin repair/publication has been verified,
+so two agents do not repair the same integration concurrently. While Devin is
+enabled and an open bot-authored `Devin upstream repair: vX.Y.Z` issue owns the
+integration, other maintenance agents must observe read-only and leave repairs
+to that session unless the user explicitly hands the work back.
 
 No personal access token is required. The workflow uses its repository-scoped
 `GITHUB_TOKEN` with `contents: write` and `actions: write`; the existing Release

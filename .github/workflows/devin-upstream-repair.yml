@@ -1,0 +1,63 @@
+name: Devin upstream repair
+
+on:
+  workflow_run:
+    workflows: [Sync upstream release, Release]
+    types: [completed]
+  schedule:
+    - cron: '43 * * * *'
+  push:
+    branches: [main]
+    paths:
+      - '.github/devin-upstream-repair.cjs'
+      - '.github/workflows/devin-upstream-repair.yml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Check credentials without starting Devin, or repair an existing run'
+        type: choice
+        options: [check, repair]
+        default: check
+      run_id:
+        description: 'Source Sync upstream release / Release run ID (repair only)'
+        type: string
+        required: false
+
+# Serialize state reservations and Devin API writes, including manual retries.
+concurrency:
+  group: devin-upstream-repair
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  dispatch:
+    if: >-
+      github.repository == 'SteinX/sub2api' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'push' || vars.DEVIN_UPSTREAM_REPAIR_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # workflow_run has secrets: execute only trusted default-branch tooling.
+      # Never checkout a source PR or consume its artifacts in this workflow.
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Test dispatcher
+        run: node --test .github/test-devin-upstream-repair.cjs
+      - name: Check configuration or dispatch repair
+        uses: actions/github-script@v8
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+          DEVIN_ORG_ID: ${{ vars.DEVIN_ORG_ID || secrets.DEVIN_ORG_ID }}
+          DEVIN_MAX_ACU: ${{ vars.DEVIN_MAX_ACU || '10' }}
+          DEVIN_PLAYBOOK_ID: ${{ vars.DEVIN_PLAYBOOK_ID }}
+          REPAIR_MODE: ${{ inputs.mode || (github.event_name == 'push' && 'check' || (github.event_name == 'schedule' && 'monitor' || 'repair')) }}
+          SOURCE_RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
+        with:
+          script: |
+            await require('./.github/devin-upstream-repair.cjs').run({github, context, core});
