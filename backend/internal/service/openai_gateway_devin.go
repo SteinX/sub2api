@@ -510,19 +510,26 @@ func consumeDevinChat(ctx context.Context, c *gin.Context, client *devin.Client,
 	}
 }
 
-func (s *OpenAIGatewayService) devinForwardFailure(c *gin.Context, a *Account, err error) error {
+// Classify and update account health without writing a client response. This
+// also runs during WS credential acquisition, after the HTTP upgrade.
+func (s *OpenAIGatewayService) devinAccountFailure(ctx context.Context, a *Account, err error) (*UpstreamFailoverError, *devin.Error) {
 	status := 502
 	var upstream *devin.Error
 	if errors.As(err, &upstream) {
 		status = upstream.HTTPStatus()
 	}
 	if status == 429 && s.accountRepo != nil {
-		_ = s.accountRepo.SetRateLimited(c.Request.Context(), a.ID, time.Now().Add(time.Minute))
+		_ = s.accountRepo.SetRateLimited(ctx, a.ID, time.Now().Add(time.Minute))
 	}
 	if status == 401 && s.accountRepo != nil {
-		_ = s.accountRepo.SetError(c.Request.Context(), a.ID, "Devin authorization expired; reconnect this account")
+		_ = s.accountRepo.SetError(ctx, a.ID, "Devin authorization expired; reconnect this account")
 	}
-	if status == 400 {
+	return &UpstreamFailoverError{StatusCode: status, ResponseBody: []byte(`{"error":{"message":"Devin upstream unavailable"}}`)}, upstream
+}
+
+func (s *OpenAIGatewayService) devinForwardFailure(c *gin.Context, a *Account, err error) error {
+	failure, upstream := s.devinAccountFailure(c.Request.Context(), a, err)
+	if failure.StatusCode == 400 {
 		message := "Devin rejected the request"
 		if upstream != nil {
 			message = upstream.Error()
@@ -530,5 +537,5 @@ func (s *OpenAIGatewayService) devinForwardFailure(c *gin.Context, a *Account, e
 		c.JSON(400, gin.H{"error": gin.H{"type": "invalid_request_error", "message": message}})
 		return err
 	}
-	return &UpstreamFailoverError{StatusCode: status, ResponseBody: []byte(`{"error":{"message":"Devin upstream unavailable"}}`)}
+	return failure
 }

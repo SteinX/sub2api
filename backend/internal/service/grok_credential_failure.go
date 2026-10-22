@@ -108,7 +108,14 @@ func (s *OpenAIGatewayService) getRequestCredential(ctx context.Context, c *gin.
 			return "", "", errors.New("devin service is unavailable")
 		}
 		token, err := s.devin.Token(ctx, account, false)
-		return token, "devin", err
+		if err == nil {
+			return token, "devin", nil
+		}
+		if ctx.Err() != nil {
+			return "", "", ctx.Err()
+		}
+		failure, _ := s.devinAccountFailure(ctx, account, err)
+		return "", "", failure
 	}
 	if !account.IsGrokOAuth() {
 		return s.GetAccessToken(ctx, account)
