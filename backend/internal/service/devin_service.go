@@ -308,6 +308,11 @@ func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([
 		if err != nil {
 			return nil, err
 		}
+		// Empty discovery must not poison the shared forwarding catalog after
+		// a manual sync. Callers still receive the empty result for validation.
+		if len(models) == 0 {
+			return models, nil
+		}
 		s.mu.Lock()
 		e := s.runtime[key]
 		e.models = models

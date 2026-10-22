@@ -108,18 +108,30 @@ func TestDevinManualModelSyncRefreshesTheSharedCatalog(t *testing.T) {
 
 func TestDevinManualModelSyncPreservesCatalogWithoutUsableModels(t *testing.T) {
 	for _, models := range [][]*pb.ClientModelConfig{nil, {{ModelUid: "swe-2-max", Disabled: true}}} {
+		var probes atomic.Int32
 		upstream := &devinHTTP{handle: func(*http.Request) (*http.Response, error) {
-			body, err := proto.Marshal(&pb.GetCliModelConfigsResponse{ClientModelConfigs: models})
+			catalog := models
+			if probes.Add(1) == 1 {
+				catalog = []*pb.ClientModelConfig{{ModelUid: "swe-2-max"}}
+			}
+			body, err := proto.Marshal(&pb.GetCliModelConfigsResponse{ClientModelConfigs: catalog})
 			assert.NoError(t, err)
 			return devinReply(200, body), nil
 		}}
 		account := &Account{ID: 1, Platform: PlatformDevin, Credentials: map[string]any{"access_token": "session"}, Extra: map[string]any{"devin_models": []string{"swe-2-max"}}}
 		repo := &devinFeatureRepo{}
 		s := &AccountTestService{accountRepo: repo, devin: NewDevinService(repo, nil, upstream, &config.Config{}, nil)}
-		_, err := s.SyncUpstreamModelCatalog(context.Background(), account)
+		_, err := s.devin.Models(context.Background(), account)
+		require.NoError(t, err)
+		_, err = s.SyncUpstreamModelCatalog(context.Background(), account)
 		require.ErrorContains(t, err, "no usable models")
 		require.Nil(t, repo.updates, "must not overwrite the last working scheduling catalog")
 		require.True(t, account.supportsDevinModel("swe-2-max"))
+		cached, err := s.devin.Models(context.Background(), account)
+		require.NoError(t, err)
+		require.Len(t, cached, 1, "forwarding must still see the previous shared runtime catalog")
+		require.Equal(t, "swe-2-max", devin.ModelID(cached[0]))
+		require.Equal(t, int32(2), probes.Load(), "the failed sync must not replace the good cache entry")
 	}
 }
 
