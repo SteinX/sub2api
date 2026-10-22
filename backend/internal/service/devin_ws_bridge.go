@@ -23,6 +23,23 @@ const devinWSReplayToolsKey = "devin_ws_replay_tools"
 // BindDevinFusionWebSocketRequest performs the same scoped binding as HTTP
 // before scheduling. Control replies must use WS frames after the upgrade.
 func (s *OpenAIGatewayService) BindDevinFusionWebSocketRequest(c *gin.Context, key *APIKey, model string, body []byte, updater APIKeyQuotaUpdater, write func([]byte) error) (bool, error) {
+	if gjson.GetBytes(body, "generate").Type == gjson.False {
+		input := gjson.GetBytes(body, "input")
+		if !input.Exists() || input.Type == gjson.Null || (input.IsArray() && len(input.Array()) == 0) {
+			// Resolve still verifies session/response/key lineage. An empty user
+			// item is only for that lookup; it never enters inference or history.
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(body, &fields); err != nil {
+				return false, err
+			}
+			fields["input"] = json.RawMessage(`""`)
+			var err error
+			body, err = json.Marshal(fields)
+			if err != nil {
+				return false, err
+			}
+		}
+	}
 	writer := &devinWSResponseWriter{header: make(http.Header), status: http.StatusOK, size: -1, captureOnly: true}
 	bridge := c.Copy()
 	bridge.Writer = writer

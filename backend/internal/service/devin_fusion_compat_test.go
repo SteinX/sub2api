@@ -93,6 +93,22 @@ func TestDevinFusionEntryPreservesClientToolDeclarations(t *testing.T) {
 				var err error
 				var result *OpenAIForwardResult
 				if transport == "WS" {
+					for _, input := range []string{"", `,"input":[]`, `,"input":null`} {
+						warmup := []byte(`{"model":"fusion-team","generate":false` + input + `}`)
+						bound, err = s.BindDevinFusionWebSocketRequest(c, key, profile.PublicModel, warmup, updater, func([]byte) error { return nil })
+						require.NoError(t, err)
+						require.True(t, bound)
+						var events []string
+						result, err = s.proxyDevinWSBridgeTurn(c.Request.Context(), c, account, warmup, func(message []byte) error {
+							events = append(events, gjson.GetBytes(message, "type").String())
+							return nil
+						})
+						require.NoError(t, err)
+						require.Equal(t, []string{"response.created", "response.completed"}, events)
+						require.Zero(t, result.Usage.InputTokens)
+						require.Empty(t, billing.commands)
+						require.Zero(t, turn, "binding and warming must not start inference")
+					}
 					bound, err = s.BindDevinFusionWebSocketRequest(c, key, profile.PublicModel, body, updater, func([]byte) error { return nil })
 				} else {
 					bound, err = s.BindDevinFusionRequest(c, key, profile.PublicModel, body, "responses", updater)
@@ -140,15 +156,21 @@ func TestDevinFusionEntryPreservesClientToolDeclarations(t *testing.T) {
 					reconnect, _ := gin.CreateTestContext(controlWriter)
 					reconnect.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
 					reconnect.Request.Header.Set(fusion.HeaderSession, binding.SessionID)
+					warmup, marshalErr := json.Marshal(map[string]any{"model": profile.PublicModel, "generate": false, "previous_response_id": result.ResponseID})
+					require.NoError(t, marshalErr)
 					write := func(message []byte) error {
 						require.Equal(t, "cancel_requested", gjson.GetBytes(message, "status").String())
 						require.Equal(t, "fusion.session", gjson.GetBytes(message, "type").String())
 						return nil
 					}
-					bound, err = s.BindDevinFusionWebSocketRequest(reconnect, key, profile.PublicModel, body, updater, write)
+					bound, err = s.BindDevinFusionWebSocketRequest(reconnect, key, profile.PublicModel, warmup, updater, write)
 					require.NoError(t, err)
 					require.True(t, bound)
 					require.Equal(t, account.ID, devinFusionBoundAccount(reconnect.Request.Context()), "reconnect must pin scheduling to the durable owner")
+					foreign := *key
+					foreign.ID++
+					_, err = s.BindDevinFusionWebSocketRequest(reconnect, &foreign, profile.PublicModel, warmup, updater, write)
+					require.ErrorContains(t, err, "response_unknown", "warmup must not bypass API-key lineage validation")
 					reconnect.Request.Header.Set(fusion.HeaderCancel, "true")
 					_, err = s.BindDevinFusionWebSocketRequest(reconnect, key, profile.PublicModel, body, updater, write)
 					require.True(t, DevinFusionHandled(err))
