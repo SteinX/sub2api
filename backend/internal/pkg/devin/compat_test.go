@@ -2,6 +2,7 @@ package devin
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -132,4 +133,59 @@ func TestGoogleToolSchemaNormalizationPreservesUnionAndPropertyNames(t *testing.
 	request.ChatModelUid = "swe-2-max"
 	require.NoError(t, NormalizeToolSchemas(request))
 	require.Equal(t, original, request.Tools[0].JsonSchemaString)
+}
+
+func TestGoogleToolSchemaNormalizationPreservesLargeIntegers(t *testing.T) {
+	request := &pb.GetChatMessageRequest{ChatModelUid: "gemini", Tools: []*pb.ChatToolDefinition{{Name: "run", JsonSchemaString: `{"type":"object","properties":{"id":{"type":["integer","null"],"const":9007199254740993,"minimum":9007199254740993}}}`}}}
+	require.NoError(t, NormalizeToolSchemas(request))
+	require.Contains(t, request.Tools[0].JsonSchemaString, `"enum":[9007199254740993]`)
+	require.Contains(t, request.Tools[0].JsonSchemaString, `"minimum":9007199254740993`)
+	request.Tools[0].JsonSchemaString = `{} {}`
+	require.Error(t, NormalizeToolSchemas(request))
+}
+
+func TestAssistantMessageBoundariesAndSignedOutputFragments(t *testing.T) {
+	replay, err := json.Marshal(reasoningReplay{Thinking: "plan", Signature: "signed", MessageID: "native-message"})
+	require.NoError(t, err)
+	input, err := json.Marshal([]apicompat.ResponsesInputItem{
+		{Role: "assistant", Content: json.RawMessage(`"Hello"`)},
+		{Type: "message", Role: "assistant", Content: json.RawMessage(`"world"`)},
+		{Role: "user", Content: json.RawMessage(`"use a tool"`)},
+		{Type: "reasoning", EncryptedContent: signaturePrefix + base64.RawStdEncoding.EncodeToString(replay)},
+		{Role: "assistant", Content: json.RawMessage(`"Running"`)},
+		{Type: "function_call", CallID: "call_run", Name: "run", Arguments: `{}`},
+		{Type: "function_call_output", CallID: "call_run", Output: "done"},
+	})
+	require.NoError(t, err)
+	request, err := BuildRequest(&apicompat.ResponsesRequest{Model: "swe", Input: input}, "tenant:session")
+	require.NoError(t, err)
+	require.Len(t, request.ChatMessagePrompts, 5)
+	require.Equal(t, "Hello", request.ChatMessagePrompts[0].Prompt)
+	require.Equal(t, "world", request.ChatMessagePrompts[1].Prompt)
+	assistant := request.ChatMessagePrompts[3]
+	require.Equal(t, "Running", assistant.Prompt)
+	require.Equal(t, "signed", assistant.Signature)
+	require.Equal(t, "native-message", assistant.MessageId)
+	require.Len(t, assistant.ToolCalls, 1)
+}
+
+func TestIndependentSignedAssistantTurnsKeepTheirOwnCapsules(t *testing.T) {
+	var items []apicompat.ResponsesInputItem
+	for _, id := range []string{"first", "second"} {
+		replay, err := json.Marshal(reasoningReplay{Thinking: id, Signature: "signed-" + id, MessageID: id})
+		require.NoError(t, err)
+		text, err := json.Marshal(id)
+		require.NoError(t, err)
+		items = append(items, apicompat.ResponsesInputItem{Type: "reasoning", EncryptedContent: signaturePrefix + base64.RawStdEncoding.EncodeToString(replay)}, apicompat.ResponsesInputItem{Type: "message", Role: "assistant", Content: text})
+	}
+	input, err := json.Marshal(items)
+	require.NoError(t, err)
+	request, err := BuildRequest(&apicompat.ResponsesRequest{Model: "swe", Input: input}, "tenant:session")
+	require.NoError(t, err)
+	require.Len(t, request.ChatMessagePrompts, 2)
+	for i, id := range []string{"first", "second"} {
+		require.Equal(t, id, request.ChatMessagePrompts[i].Prompt)
+		require.Equal(t, id, request.ChatMessagePrompts[i].MessageId)
+		require.Equal(t, "signed-"+id, request.ChatMessagePrompts[i].Signature)
+	}
 }

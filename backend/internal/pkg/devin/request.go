@@ -78,6 +78,7 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 	}
 	var input []apicompat.ResponsesInputItem
 	replayPrompts := make(map[string]*pb.ChatMessagePrompt)
+	assistantMessageInPrompt := false
 	var plain string
 	if json.Unmarshal(r.Input, &plain) == nil {
 		raw, _ := json.Marshal(plain)
@@ -148,7 +149,13 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 		// Responses splits one assistant turn into reasoning, text and tool
 		// items. Cascade expects one prompt with all of those fields, as in the
 		// native CLI; signed thinking must remain with its assistant output.
-		if n := len(q.ChatMessagePrompts); n > 0 && p.Source == pb.ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM && q.ChatMessagePrompts[n-1].Source == p.Source {
+		isAssistantMessage := p.Source == pb.ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM && (item.Type == "" || item.Type == "message")
+		newSignedTurn := false
+		if n := len(q.ChatMessagePrompts); n > 0 && replayID != "" {
+			previous := q.ChatMessagePrompts[n-1]
+			newSignedTurn = (previous.Thinking != "" || previous.Signature != "") && previous.MessageId != replayID
+		}
+		if n := len(q.ChatMessagePrompts); n > 0 && p.Source == pb.ChatMessageSource_CHAT_MESSAGE_SOURCE_SYSTEM && q.ChatMessagePrompts[n-1].Source == p.Source && !newSignedTurn && (!isAssistantMessage || !assistantMessageInPrompt) {
 			previous := q.ChatMessagePrompts[n-1]
 			previous.Prompt += p.Prompt
 			previous.ToolCalls = append(previous.ToolCalls, p.ToolCalls...)
@@ -162,7 +169,9 @@ func BuildRequest(r *apicompat.ResponsesRequest, scope string) (*pb.GetChatMessa
 			p = previous
 		} else {
 			q.ChatMessagePrompts = append(q.ChatMessagePrompts, p)
+			assistantMessageInPrompt = false
 		}
+		assistantMessageInPrompt = assistantMessageInPrompt || isAssistantMessage
 		if replayID != "" {
 			replayPrompts[replayID] = p
 		}
@@ -225,7 +234,7 @@ func normalizeToolHistoryIDs(prompts []*pb.ChatMessagePrompt) error {
 	normalize := func(id string) (string, error) {
 		valid := len(id) > 0 && len(id) <= 40
 		for _, c := range id {
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' && c != '-' {
 				valid = false
 				break
 			}

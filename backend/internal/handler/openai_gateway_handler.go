@@ -2655,6 +2655,22 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// 解析渠道级模型映射
 	channelMappingWS, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, wsRouteModel)
 	wsForwardModel := openAIChannelForwardModel(channelMappingWS, wsRouteModel)
+	if openAICompatibleRequestPlatform(ctx, apiKey) == service.PlatformDevin {
+		_, bindErr := h.gatewayService.BindDevinFusionWebSocketRequest(c, apiKey, wsForwardModel, firstMessage, h.apiKeyService, func(message []byte) error {
+			writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			return wsConn.Write(writeCtx, coderws.MessageText, message)
+		})
+		if bindErr != nil {
+			if service.DevinFusionHandled(bindErr) {
+				closeOpenAIClientWS(wsConn, coderws.StatusNormalClosure, "Fusion control request handled")
+			} else {
+				closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, bindErr.Error())
+			}
+			return
+		}
+		ctx = c.Request.Context()
+	}
 
 	var currentUserRelease func()
 	var currentAccountRelease func()
@@ -2709,10 +2725,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	if requestPlatform == service.PlatformGrok || requestPlatform == service.PlatformDevin {
 		requiredTransport = service.OpenAIUpstreamTransportHTTPSSE
 	}
-	if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
-		reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(err))
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
-		return
+	if !service.DevinFusionRequest(ctx) {
+		if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
+			reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(err))
+			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
+			return
+		}
 	}
 
 	// 余额模式在途预留（会话级）：按首帧估算一次，会话期间续期；每轮计费任务接管引用，
@@ -2731,6 +2749,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// Restrict this extra check to the opt-in mode so standard-mode RPM checks
 	// are not charged a second time for the same request.
 	checkSimpleModeTurnBilling := func() error {
+		if service.DevinFusionRequest(ctx) {
+			return nil // Fusion admits and settles each physical inference.
+		}
 		if h.cfg == nil || h.cfg.RunMode != config.RunModeSimple || !h.cfg.SimpleModeKeyRateLimitEnabled {
 			return nil
 		}
@@ -3069,6 +3090,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					routeModel = wsRouteModel
 				}
 				mapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(ctx, apiKey.GroupID, routeModel)
+				if turn > 1 && requestPlatform == service.PlatformDevin &&
+					(service.DevinFusionRequest(ctx) || h.gatewayService.HasDevinFusionProfile(ctx, apiKey.GroupID, openAIChannelForwardModel(mapping, routeModel))) &&
+					openAIChannelForwardModel(mapping, routeModel) != wsForwardModel {
+					return "", newOpenAIWSUnsupportedModelSwitchError(model)
+				}
 				mappedModelUnchanged := false
 				if previous := turnChannelMapping.Load(); previous != nil && previous.turn < turn {
 					mappedModelUnchanged = strings.TrimSpace(previous.mapping.MappedModel) == strings.TrimSpace(mapping.MappedModel)

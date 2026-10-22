@@ -25,7 +25,7 @@ Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以
 | `POST /v1/messages` | Anthropic Messages JSON / SSE，复用现有协议转换 |
 | WebSocket `/v1/responses` | 同一连接内保存完整历史与工具声明，支持工具结果续接和上一轮 `previous_response_id`；`generate:false` 只确认预热，不发起生成 |
 
-普通模型的 HTTP Responses 不保存服务端会话，需要发送完整历史，`store:true`、HTTP `previous_response_id` 和结构化输出格式会明确返回错误。WebSocket 的 `previous_response_id` 仅能引用当前连接的上一轮响应。图片输入要求内联 base64 data URL；图片能力、工具能力和输出限制来自账号模型目录，其他未实现的内置工具不会被当作已支持。原生路由模型先调用 `AssignModel` 获取具体模型与 assignment JWT，再按实际模型处理工具 schema；路由到 Gemini 时会转换 nullable 类型数组。Lead/Sidekick 组合的持久 Fusion 执行独立维护会话与计费，见 [Fusion 接入说明](DEVIN_FUSION.md)。
+普通模型的 HTTP Responses 不保存服务端会话，需要发送完整历史，`store:true`、HTTP `previous_response_id` 和结构化输出格式会明确返回错误。普通模型的 WebSocket `previous_response_id` 仅能引用当前连接的上一轮响应；持久 Fusion 可在首帧通过经过当前用户和 Key 验证的会话或响应关联恢复原账号，后续帧仍校验上一轮响应。涉及 Fusion 的模型切换需要新建连接。显式替换 `tools` 而省略 `tool_choice` 时恢复自动选择，避免残留已移除的指定工具。图片输入要求内联 base64 data URL；图片能力、工具能力和输出限制来自账号模型目录，其他未实现的内置工具不会被当作已支持。原生路由模型先调用 `AssignModel` 获取具体模型与 assignment JWT，再按实际模型处理工具 schema；路由到 Gemini 时会转换 nullable 类型数组。Lead/Sidekick 组合的持久 Fusion 执行独立维护会话与计费，见 [Fusion 接入说明](DEVIN_FUSION.md)。
 
 ## 连接测试与 `invalid_argument`
 

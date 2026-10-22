@@ -8,8 +8,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
 )
 
-// NormalizeToolSchemas runs after AssignModel so Fusion models routed to Google
-// receive the same scalar-type schema form as direct Gemini models. Other model
+// NormalizeToolSchemas runs after model assignment so routed Gemini requests
+// receive the same scalar-type schema form as direct requests. Other model
 // families retain their original JSON Schema.
 func NormalizeToolSchemas(request *pb.GetChatMessageRequest) error {
 	model := strings.ToLower(request.ChatModelUid)
@@ -18,7 +18,9 @@ func NormalizeToolSchemas(request *pb.GetChatMessageRequest) error {
 	}
 	for _, tool := range request.Tools {
 		var schema map[string]any
-		if err := json.Unmarshal([]byte(tool.JsonSchemaString), &schema); err != nil || schema == nil {
+		decoder := json.NewDecoder(strings.NewReader(tool.JsonSchemaString))
+		decoder.UseNumber()
+		if !json.Valid([]byte(tool.JsonSchemaString)) || decoder.Decode(&schema) != nil || schema == nil {
 			return fmt.Errorf("invalid schema for tool %q", tool.Name)
 		}
 		normalizeGoogleSchemaTypes(schema)
@@ -60,7 +62,7 @@ func normalizeGoogleSchemaTypes(schema map[string]any) {
 		delete(schema, "const")
 	}
 	if types, ok := schema["type"].([]any); ok {
-		var branches []any
+		var branches []map[string]any
 		for _, value := range types {
 			if value == "null" {
 				schema["nullable"] = true
@@ -70,12 +72,11 @@ func normalizeGoogleSchemaTypes(schema map[string]any) {
 		}
 		delete(schema, "type")
 		if len(branches) == 1 {
-			schema["type"] = branches[0].(map[string]any)["type"]
+			schema["type"] = branches[0]["type"]
 		} else if len(branches) > 1 {
 			// Move type-specific constraints into the applicable branch rather
 			// than leaving e.g. items beside a string branch.
-			for _, value := range branches {
-				branch := value.(map[string]any)
+			for _, branch := range branches {
 				var keys []string
 				switch branch["type"] {
 				case "object":

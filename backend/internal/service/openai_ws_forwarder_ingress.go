@@ -588,7 +588,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		bridgeAccountFailoverInputExists := false
 		devinPreviousResponseID := ""
 		for turn := 1; ; turn++ {
-			if account.Platform == PlatformDevin && currentBridgePayload.previousResponseID != "" && currentBridgePayload.previousResponseID != devinPreviousResponseID {
+			if account.Platform == PlatformDevin && (turn > 1 || !DevinFusionRequest(ctx)) && currentBridgePayload.previousResponseID != "" && currentBridgePayload.previousResponseID != devinPreviousResponseID {
 				return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "previous_response_id must identify the previous response on this connection", nil)
 			}
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {

@@ -28,7 +28,7 @@ func applyDevinGenerationOptions(wire *pb.GetChatMessageRequest, body []byte, pr
 		return err
 	}
 	if options.N != nil && *options.N != 1 {
-		return fmt.Errorf("Devin supports only n=1")
+		return fmt.Errorf("devin supports only n=1")
 	}
 	if options.TopK != nil {
 		wire.Configuration.TopK = *options.TopK

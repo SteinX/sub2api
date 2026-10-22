@@ -30,6 +30,15 @@ func TestDevinWebSocketToolContinuationUsesConnectionHistory(t *testing.T) {
 		} else {
 			assert.Equal(t, cascadeID, request.CascadeId, "one websocket must retain its native conversation scope")
 		}
+		if turn >= 3 {
+			assert.Equal(t, "auto", request.ToolChoice.GetOptionName())
+			if turn == 3 {
+				assert.Empty(t, request.Tools)
+			} else if assert.Len(t, request.Tools, 1) {
+				assert.Equal(t, "lookup", request.Tools[0].Name)
+			}
+			return []*pb.GetChatMessageResponse{{DeltaText: "done", StopReason: pb.StopReason_STOP_REASON_STOP_PATTERN}}
+		}
 		if !assert.Len(t, request.Tools, 1) {
 			return nil
 		}
@@ -85,7 +94,7 @@ func TestDevinWebSocketToolContinuationUsesConnectionHistory(t *testing.T) {
 	conn, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 	require.NoError(t, err)
 	defer conn.CloseNow()
-	require.NoError(t, conn.Write(ctx, coderws.MessageText, []byte(`{"type":"response.create","model":"swe-2-max","input":"fix it","tools":[{"type":"custom","name":"apply_patch"}]} `)))
+	require.NoError(t, conn.Write(ctx, coderws.MessageText, []byte(`{"type":"response.create","model":"swe-2-max","input":"fix it","tools":[{"type":"custom","name":"apply_patch"}],"tool_choice":{"type":"custom","name":"apply_patch"}}`)))
 	readCompleted := func() gjson.Result {
 		t.Helper()
 		for {
@@ -123,6 +132,13 @@ func TestDevinWebSocketToolContinuationUsesConnectionHistory(t *testing.T) {
 	require.NoError(t, conn.Write(ctx, coderws.MessageText, followup))
 	second := readCompleted()
 	require.Equal(t, "done", second.Get("output.0.content.0.text").String())
+	// Explicit replacement declarations must not inherit a stale named choice.
+	for _, tools := range []json.RawMessage{json.RawMessage(`[]`), json.RawMessage(`[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{}}}]`)} {
+		replacement, err := json.Marshal(map[string]any{"type": "response.create", "previous_response_id": second.Get("id").String(), "input": "continue", "tools": tools})
+		require.NoError(t, err)
+		require.NoError(t, conn.Write(ctx, coderws.MessageText, replacement))
+		second = readCompleted()
+	}
 	require.NoError(t, conn.Close(coderws.StatusNormalClosure, "done"))
 	select {
 	case failure := <-serverDone:
@@ -130,7 +146,7 @@ func TestDevinWebSocketToolContinuationUsesConnectionHistory(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("websocket bridge did not release the session")
 	}
-	require.Equal(t, 2, turn)
+	require.Equal(t, 4, turn)
 }
 
 func TestDevinWebSocketWriterPreservesPartialFramesAndIgnoresKeepalives(t *testing.T) {
@@ -174,4 +190,22 @@ func TestDevinWebSocketWarmupNeverStartsGeneration(t *testing.T) {
 	require.NotEmpty(t, c.GetString(devinWSCascadeScopeKey))
 	state, _ := c.Get(devinWSRequestStateKey)
 	require.Contains(t, string(state.(map[string]json.RawMessage)["tools"]), "apply_patch")
+}
+
+func TestDevinWebSocketReplayPreservesActiveToolSearchDiscovery(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	fields := map[string]json.RawMessage{
+		"tools": json.RawMessage(`[{"type":"tool_search"}]`),
+		"input": json.RawMessage(`[{"type":"tool_search_output","call_id":"search","tools":[{"type":"namespace","name":"files","tools":[{"type":"function","name":"read","parameters":{"type":"object","properties":{}}}]}]}]`),
+	}
+	mapping, err := prepareDevinWSReplayTools(c, fields)
+	require.NoError(t, err)
+	require.Equal(t, "tool_search_output", gjson.GetBytes(fields["input"], "0.type").String(), "the main adapter must still promote active discoveries")
+	require.Contains(t, mapping.NamespaceTools, "files__read")
+	c.Set(devinWSReplayToolsKey, mapping)
+	fields["tools"] = json.RawMessage(`[]`)
+	_, err = prepareDevinWSReplayTools(c, fields)
+	require.NoError(t, err)
+	require.Equal(t, "function_call_output", gjson.GetBytes(fields["input"], "0.type").String())
+	require.JSONEq(t, `[]`, string(fields["tools"]), "retired discoveries must not re-enable tools")
 }
