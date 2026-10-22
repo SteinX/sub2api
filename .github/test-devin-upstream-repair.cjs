@@ -140,8 +140,10 @@ test('definite API rejection releases the reservation so corrected configuration
   assert.equal(readState(f.issue).phase, 'active');
 });
 
-test('quota, terminal and archived sessions stop rather than creating a new budget', async () => {
-  for (const session of [{ status: 'error' }, { status: 'exit' }, { status: 'suspended', status_detail: 'usage_limit_exceeded' }, { is_archived: true }]) {
+test('sessions requiring attention receive no automatic follow-up or replacement budget', async () => {
+  for (const session of [{ status: 'error' }, { status: 'exit' }, { status: 'suspended', status_detail: 'usage_limit_exceeded' },
+    { status: 'running', status_detail: 'finished' }, { status_detail: 'waiting_for_user' },
+    { status_detail: 'waiting_for_approval' }, { status: 'suspended', status_detail: 'user_request' }, { is_archived: true }]) {
     const f = fixture({ session });
     await execute(f);
     const work = await sourceWork(f, '100', f.imageCheck);

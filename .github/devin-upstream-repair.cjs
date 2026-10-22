@@ -16,6 +16,12 @@ const MAX_DISPATCHES = 5;
 const TERMINAL = new Set(['exit', 'error']);
 const QUOTA = /limit|quota|credits|payment|contract/;
 
+function needsAttention(session) {
+  return session.is_archived || TERMINAL.has(session.status) || QUOTA.test(session.status_detail || '')
+    || ['finished', 'waiting_for_user', 'waiting_for_approval'].includes(session.status_detail)
+    || (session.status === 'suspended' && session.status_detail !== 'inactivity');
+}
+
 async function optional(request) {
   try { return (await request()).data; }
   catch (error) { if (error.status === 404) return null; throw error; }
@@ -206,8 +212,7 @@ async function dispatch({ github, core }, work, settings, api) {
   let existing;
   if (state.sessionId) {
     existing = await api('GET', `sessions/${sessionId(state.sessionId)}`);
-    if (existing.is_archived || TERMINAL.has(existing.status) || QUOTA.test(existing.status_detail || '')
-        || (existing.status === 'suspended' && existing.status_detail !== 'inactivity')) {
+    if (needsAttention(existing)) {
       throw new Error(`Existing Devin session needs attention (${existing.status}/${existing.status_detail || 'unknown'}); tracking issue #${issue.number}. No replacement session was started.`);
     }
   }
@@ -257,8 +262,7 @@ async function monitor({ github, core }, api, imageCheck) {
     if (!state.sessionId || state.phase !== 'active') continue;
     const session = await api('GET', `sessions/${sessionId(state.sessionId)}`);
     const status = `${session.status}/${session.status_detail || 'unknown'}`;
-    const attention = session.is_archived || TERMINAL.has(session.status) || QUOTA.test(session.status_detail || '')
-      || ['finished', 'waiting_for_user', 'waiting_for_approval'].includes(session.status_detail);
+    const attention = needsAttention(session);
     if (attention && state.lastAttention !== status) {
       state.lastAttention = status;
       await saveState(github, issue, upstreamTag, state,

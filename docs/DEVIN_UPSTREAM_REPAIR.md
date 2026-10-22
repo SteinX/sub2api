@@ -110,8 +110,10 @@ repair the same branch. Neither this change nor preflight disables that task.
   A fingerprint based on version, source heads and failing jobs deduplicates
   repeated hourly failures. New failing code is sent to the same active session,
   sharing its original ACU cap. At most five writes are allowed per version.
-- No second session is started automatically if the first is terminal, archived,
-  blocked by quota or stopped intentionally. A timeout, canceled runner or lost
+- No follow-up prompt or replacement session is sent automatically if the first
+  is finished, waiting for user input/approval, terminal, archived, blocked by
+  quota or stopped intentionally. Dispatch and monitoring use the same attention
+  predicate. A timeout, canceled runner or lost
   state-save leaves a `reserved` state: inspect Devin before retrying. There is
   no documented client idempotency key used by this v3 integration, so ambiguous
   writes are never blindly retried.
