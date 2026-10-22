@@ -491,7 +491,7 @@ export default {
         sources: { builtin: '内置', remote: '远程同步', manual: '手动固定' },
         sourceURL: '独立配置包 URL（公共 HTTPS JSON）',
         autoSync: '自动同步远程配置',
-        syncHint: '有请求时每分钟检查一次远程配置；失败保留最近一次有效配置。请使用你维护的配置发布地址。',
+        syncHint: '有请求时每分钟在后台检查一次远程配置，请求继续使用当前有效配置；失败保留旧配置。请使用你维护的配置发布地址。',
         manual: '手动固定客户端信息（优先于远程配置）',
         profile: '客户端配置 JSON',
         manualHint: '可分别调整名称、版本、系统和语言。关闭手动固定后恢复远程配置；清空发布地址后恢复内置配置。',

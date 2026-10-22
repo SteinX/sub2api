@@ -167,7 +167,7 @@ func (c *Client) Models(ctx context.Context, token string) ([]*pb.ClientModelCon
 	out := &pb.GetCliModelConfigsResponse{}
 	err := c.unary(ctx, c.BaseURL, ModelsPath, token, &pb.GetCliModelConfigsRequest{Metadata: c.discoveryMetadata(token)}, out)
 	if err != nil {
-		return nil, fmt.Errorf("Devin CLI model discovery (GetCliModelConfigs) failed: %w", err)
+		return nil, fmt.Errorf("devin CLI model discovery (GetCliModelConfigs) failed: %w", err)
 	}
 	models := make([]*pb.ClientModelConfig, 0, len(out.ClientModelConfigs))
 	seen := map[string]bool{}

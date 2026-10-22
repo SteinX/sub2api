@@ -134,7 +134,10 @@ type SettingService struct {
 	claudeCodeVersionCache      atomic.Value // *cachedClaudeCodeClientVersion
 	claudeCodeVersionSF         singleflight.Group
 	devinIdentityMu             sync.Mutex
-	devinIdentityCache          *cachedDevinClientIdentity
+	devinIdentityCache          atomic.Pointer[cachedDevinClientIdentity]
+	devinIdentityRefreshing     atomic.Bool
+	devinIdentitySyncing        atomic.Bool
+	devinIdentitySyncSF         singleflight.Group
 	devinIdentityFetch          func(context.Context, string) (devin.ClientIdentity, error)
 	codexRestrictionPolicyCache atomic.Value // *cachedCodexRestrictionPolicy
 	codexRestrictionPolicySF    singleflight.Group

@@ -72,7 +72,7 @@ func (v ClientIdentity) Validate() error {
 func ParseClientIdentity(data []byte) (ClientIdentity, error) {
 	var v ClientIdentity
 	if len(data) > MaxClientIdentitySize {
-		return v, errors.New("Devin client identity document exceeds 32 KB")
+		return v, errors.New("devin client identity document exceeds 32 KB")
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
@@ -80,7 +80,7 @@ func ParseClientIdentity(data []byte) (ClientIdentity, error) {
 		return v, fmt.Errorf("invalid Devin client identity JSON: %w", err)
 	}
 	if err := d.Decode(new(any)); err != io.EOF {
-		return v, errors.New("Devin client identity must contain one JSON object")
+		return v, errors.New("devin client identity must contain one JSON object")
 	}
 	return v, v.Validate()
 }

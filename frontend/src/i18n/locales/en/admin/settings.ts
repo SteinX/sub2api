@@ -498,7 +498,7 @@ export default {
         sources: { builtin: 'Built-in', remote: 'Remote', manual: 'Manual pin' },
         sourceURL: 'Independent profile URL (public HTTPS JSON)',
         autoSync: 'Automatically sync the remote profile',
-        syncHint: 'Checks the remote profile once a minute when requests arrive. Failed updates retain the last valid profile. Use a profile release URL you maintain.',
+        syncHint: 'Checks the remote profile in the background once a minute when requests arrive. Requests keep using the current valid profile. Failed updates retain it. Use a profile release URL you maintain.',
         manual: 'Pin client identity manually (overrides remote updates)',
         profile: 'Client profile JSON',
         manualHint: 'Edit names, versions, OS and locale independently. Disable the manual pin to use the remote profile; clear the URL to use the built-in profile.',

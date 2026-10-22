@@ -78,22 +78,43 @@ func (s *SettingService) GetDevinClientIdentity(ctx context.Context) devin.Clien
 	if s == nil || s.settingRepo == nil {
 		return devin.DefaultClientIdentity()
 	}
-	s.devinIdentityMu.Lock()
-	defer s.devinIdentityMu.Unlock()
-	view, err := s.readDevinClientIdentityLocked(ctx, false)
+	if cached := s.devinIdentityCache.Load(); cached != nil {
+		if time.Now().After(cached.expiresAt) && s.devinIdentityRefreshing.CompareAndSwap(false, true) {
+			go func() {
+				defer s.devinIdentityRefreshing.Store(false)
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+				defer cancel()
+				s.devinIdentityMu.Lock()
+				_, _ = s.readDevinClientIdentityLocked(refreshCtx, true)
+				s.devinIdentityMu.Unlock()
+				s.startDevinIdentitySync()
+			}()
+		}
+		s.startDevinIdentitySync()
+		return cached.view.Effective
+	}
+	view, err := s.GetDevinClientIdentitySettings(ctx, false)
 	if err == nil {
 		return view.Effective
-	}
-	if s.devinIdentityCache != nil {
-		return s.devinIdentityCache.view.Effective
 	}
 	return devin.DefaultClientIdentity()
 }
 
 func (s *SettingService) GetDevinClientIdentitySettings(ctx context.Context, syncNow bool) (DevinClientIdentityView, error) {
 	s.devinIdentityMu.Lock()
-	defer s.devinIdentityMu.Unlock()
-	return s.readDevinClientIdentityLocked(ctx, syncNow)
+	view, err := s.readDevinClientIdentityLocked(ctx, syncNow)
+	s.devinIdentityMu.Unlock()
+	if err != nil {
+		return view, err
+	}
+	if syncNow {
+		if view.SourceURL == "" {
+			return view, infraerrors.BadRequest("INVALID_DEVIN_IDENTITY_SOURCE", "Configure and save a source URL before syncing")
+		}
+		return s.syncDevinClientIdentity(ctx, view.DevinClientIdentitySettings)
+	}
+	s.startDevinIdentitySync()
+	return view, nil
 }
 
 func (s *SettingService) UpdateDevinClientIdentitySettings(ctx context.Context, settings DevinClientIdentitySettings) (DevinClientIdentityView, error) {
@@ -112,18 +133,24 @@ func (s *SettingService) UpdateDevinClientIdentitySettings(ctx context.Context, 
 	}
 	b, _ := json.Marshal(settings)
 	s.devinIdentityMu.Lock()
-	defer s.devinIdentityMu.Unlock()
 	if err := s.settingRepo.SetMultiple(ctx, map[string]string{SettingKeyDevinClientIdentity: string(b)}); err != nil {
+		s.devinIdentityMu.Unlock()
 		return DevinClientIdentityView{}, err
 	}
-	s.devinIdentityCache = nil
-	return s.readDevinClientIdentityLocked(ctx, false)
+	view, err := s.readDevinClientIdentityLocked(ctx, true)
+	s.devinIdentityMu.Unlock()
+	if err == nil {
+		s.startDevinIdentitySync()
+	}
+	return view, err
 }
 
-func (s *SettingService) readDevinClientIdentityLocked(ctx context.Context, syncNow bool) (DevinClientIdentityView, error) {
+// This method only reads settings and publishes a snapshot. Remote I/O must
+// never run under devinIdentityMu or on a warm request's identity read path.
+func (s *SettingService) readDevinClientIdentityLocked(ctx context.Context, reload bool) (DevinClientIdentityView, error) {
 	now := time.Now()
-	previous := s.devinIdentityCache
-	if !syncNow && previous != nil && now.Before(previous.expiresAt) {
+	previous := s.devinIdentityCache.Load()
+	if !reload && previous != nil && now.Before(previous.expiresAt) {
 		return previous.view, nil
 	}
 	if ctx == nil {
@@ -162,23 +189,58 @@ func (s *SettingService) readDevinClientIdentityLocked(ctx context.Context, sync
 		}
 		view.SyncError = previous.view.SyncError
 	}
-	if syncNow && view.SourceURL == "" {
-		return view, infraerrors.BadRequest("INVALID_DEVIN_IDENTITY_SOURCE", "Configure and save a source URL before syncing")
+	s.devinIdentityCache.Store(&cachedDevinClientIdentity{view, now.Add(devinIdentityCacheTTL), nextSync})
+	return view, nil
+}
+
+func (s *SettingService) startDevinIdentitySync() {
+	cached := s.devinIdentityCache.Load()
+	if cached == nil || !cached.view.AutoSync || cached.view.Manual != nil || cached.view.SourceURL == "" ||
+		time.Now().Before(cached.nextSyncAt) || !s.devinIdentitySyncing.CompareAndSwap(false, true) {
+		return
 	}
-	if syncNow || view.AutoSync && view.Manual == nil && view.SourceURL != "" && !now.Before(nextSync) {
-		nextSync = now.Add(devinIdentitySyncInterval)
+	go func() {
+		defer s.devinIdentitySyncing.Store(false)
+		_, _ = s.syncDevinClientIdentity(context.Background(), cached.view.DevinClientIdentitySettings)
+	}()
+}
+
+func sameDevinIdentitySettings(a, b DevinClientIdentitySettings) bool {
+	if a.SourceURL != b.SourceURL || a.AutoSync != b.AutoSync || (a.Manual == nil) != (b.Manual == nil) {
+		return false
+	}
+	return a.Manual == nil || *a.Manual == *b.Manual
+}
+
+func (s *SettingService) syncDevinClientIdentity(ctx context.Context, expected DevinClientIdentitySettings) (DevinClientIdentityView, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	b, _ := json.Marshal(expected)
+	result := s.devinIdentitySyncSF.DoChan(devin.CredentialFingerprint(string(b)), func() (any, error) {
+		syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
+		defer cancel()
+		nextSync := time.Now().Add(devinIdentitySyncInterval)
 		fetch := s.devinIdentityFetch
 		if fetch == nil {
 			fetch = s.fetchDevinClientIdentity
 		}
-		identity, fetchErr := fetch(ctx, view.SourceURL)
+		identity, fetchErr := fetch(syncCtx, expected.SourceURL)
 		if fetchErr == nil {
 			fetchErr = identity.Validate()
 		}
+		// A rollback, opt-out, or source change can complete during the fetch.
+		// Re-read persisted configuration before publishing any result.
+		s.devinIdentityMu.Lock()
+		defer s.devinIdentityMu.Unlock()
+		view, err := s.readDevinClientIdentityLocked(syncCtx, true)
+		if err != nil || !sameDevinIdentitySettings(view.DevinClientIdentitySettings, expected) {
+			return view, err
+		}
 		if fetchErr == nil {
-			state := syncedDevinClientIdentity{view.SourceURL, identity, time.Now().UTC()}
+			state := syncedDevinClientIdentity{expected.SourceURL, identity, time.Now().UTC()}
 			b, _ := json.Marshal(state)
-			fetchErr = s.settingRepo.SetMultiple(ctx, map[string]string{SettingKeyDevinClientIdentitySynced: string(b)})
+			fetchErr = s.settingRepo.SetMultiple(syncCtx, map[string]string{SettingKeyDevinClientIdentitySynced: string(b)})
 			if fetchErr == nil {
 				view.SyncedAt, view.SyncError = &state.SyncedAt, ""
 				if view.Manual == nil {
@@ -189,9 +251,22 @@ func (s *SettingService) readDevinClientIdentityLocked(ctx context.Context, sync
 		if fetchErr != nil {
 			view.SyncError = "Devin identity sync failed; the last valid profile remains active"
 		}
+		s.devinIdentityCache.Store(&cachedDevinClientIdentity{view, time.Now().Add(devinIdentityCacheTTL), nextSync})
+		return view, nil
+	})
+	select {
+	case <-ctx.Done():
+		return DevinClientIdentityView{}, ctx.Err()
+	case r := <-result:
+		if r.Err != nil {
+			return DevinClientIdentityView{}, r.Err
+		}
+		view, ok := r.Val.(DevinClientIdentityView)
+		if !ok {
+			return DevinClientIdentityView{}, errors.New("invalid Devin identity sync result")
+		}
+		return view, nil
 	}
-	s.devinIdentityCache = &cachedDevinClientIdentity{view, now.Add(devinIdentityCacheTTL), nextSync}
-	return view, nil
 }
 
 func (s *SettingService) fetchDevinClientIdentity(ctx context.Context, source string) (devin.ClientIdentity, error) {
