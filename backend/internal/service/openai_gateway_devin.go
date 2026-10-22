@@ -29,6 +29,15 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	}
 	var req *apicompat.ResponsesRequest
 	var err error
+	originalBody := body
+	var toolMapping apicompat.ResponsesClientToolMapping
+	if protocol != "anthropic" && protocol != "chat" {
+		body, toolMapping, err = adaptDevinResponsesClientTools(body)
+		if err != nil {
+			c.JSON(400, gin.H{"error": gin.H{"type": "invalid_request_error", "message": err.Error()}})
+			return nil, err
+		}
+	}
 	switch protocol {
 	case "anthropic":
 		var r apicompat.AnthropicRequest
@@ -57,14 +66,19 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	}
 	// Shared converters force streaming for HTTP upstreams; preserve the client's choice here.
 	var inbound struct {
-		Stream bool `json:"stream"`
+		Stream        bool `json:"stream"`
+		StreamOptions *struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
 	}
 	_ = json.Unmarshal(body, &inbound)
 	req.Stream = inbound.Stream
 	original := req.Model
 	req.Model = resolveOpenAIForwardModel(a, req.Model, mapped)
 	if profile := devinFusionProfile(a, req.Model); profile != nil {
-		return s.forwardDevinFusion(ctx, c, a, body, protocol, original, *profile)
+		// Fusion owns its reversible tool mapping and durable history. Give it
+		// the original declaration so custom/namespace output can be restored.
+		return s.forwardDevinFusion(ctx, c, a, originalBody, protocol, original, *profile)
 	}
 	if DevinFusionRequest(ctx) {
 		err := fusion.E("account_bound", "the bound Fusion account or profile is unavailable", 409)
@@ -135,6 +149,10 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		writeError(400, err.Error())
 		return nil, err
 	}
+	if err = applyDevinGenerationOptions(wire, body, protocol); err != nil {
+		writeError(400, err.Error())
+		return nil, err
+	}
 	models, err := s.devin.Models(ctx, a)
 	if err != nil {
 		return nil, s.devinForwardFailure(c, a, err)
@@ -154,7 +172,7 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	if err = plan.Validate(); err != nil {
 		return nil, rejectRoute(err)
 	}
-	if err = devin.ValidateModelCapabilities(wire, selected, req.MaxOutputTokens); err != nil {
+	if err = devin.ApplyModelConfig(wire, selected, req); err != nil {
 		return nil, rejectRoute(err)
 	}
 	client, err := s.devin.Client(ctx, a)
@@ -167,10 +185,11 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	}
 	anthState := apicompat.NewResponsesEventToAnthropicState()
 	chatState := apicompat.NewResponsesEventToChatState()
+	chatState.IncludeUsage = inbound.StreamOptions != nil && inbound.StreamOptions.IncludeUsage
 	var firstToken *int
 	clientDisconnected := false
 	seq := 0
-	emit := func(e apicompat.ResponsesStreamEvent) error {
+	emitProtocol := func(e apicompat.ResponsesStreamEvent) error {
 		if !req.Stream || clientDisconnected {
 			return nil
 		}
@@ -212,6 +231,21 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 				}
 			}
 		case "chat":
+			if e.Response != nil && (e.Type == "response.completed" || e.Type == "response.incomplete") {
+				if signature := devinChatReasoningSignature(e.Response); signature != "" {
+					chunk := apicompat.ChatCompletionsChunk{
+						ID: chatState.ID, Object: "chat.completion.chunk", Created: chatState.Created, Model: original,
+						Choices: []apicompat.ChatChunkChoice{{Index: 0, Delta: apicompat.ChatDelta{ReasoningSignature: &signature}}},
+					}
+					data, marshalErr := json.Marshal(chunk)
+					if marshalErr != nil {
+						return marshalErr
+					}
+					if err := write("data: " + string(data) + "\n\n"); err != nil {
+						return err
+					}
+				}
+			}
 			for _, evt := range apicompat.ResponsesEventToChatChunks(&e, chatState) {
 				text, err := apicompat.ChatChunkToSSE(evt)
 				if err != nil {
@@ -229,6 +263,28 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			return write("event: " + e.Type + "\ndata: " + string(b) + "\n\n")
 		}
 		return nil
+	}
+	emit := emitProtocol
+	if hasResponsesClientToolMapping(toolMapping) {
+		restorer := apicompat.NewResponsesClientToolStreamRestorer(toolMapping)
+		emit = func(event apicompat.ResponsesStreamEvent) error {
+			// Restoration changes tool items; keep the decoder's native state intact.
+			if event.Item != nil {
+				item := *event.Item
+				event.Item = &item
+			}
+			if event.Response != nil {
+				response := *event.Response
+				response.Output = append([]apicompat.ResponsesOutput(nil), response.Output...)
+				event.Response = &response
+			}
+			for _, restored := range restorer.Restore(event) {
+				if err := emitProtocol(restored); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 	}
 	decoder := devin.NewEventDecoder(original, emit)
 	drainInterval := 3 * time.Minute
@@ -251,7 +307,7 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 					trace.CapabilitySource = "assigned_catalog"
 				}
 			}
-			err = devin.ValidateModelCapabilities(wire, finalModel, req.MaxOutputTokens)
+			err = devin.ApplyModelConfig(wire, finalModel, req)
 		}
 		if err == nil {
 			attemptTrace.WireModel = devin.DiagnosticModelID(wire.ChatModelUid)
@@ -316,6 +372,10 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		if routeErr != nil {
 			code, message = routeErr.Code, routeErr.Error()
 		}
+		var upstream *devin.Error
+		if errors.As(err, &upstream) {
+			message = upstream.Error()
+		}
 		switch protocol {
 		case "anthropic":
 			b, _ := json.Marshal(gin.H{"type": "error", "error": gin.H{"type": "api_error", "message": message}})
@@ -334,9 +394,19 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		case "anthropic":
 			c.JSON(200, apicompat.ResponsesToAnthropic(&decoder.Response, original))
 		case "chat":
-			c.JSON(200, apicompat.ResponsesToChatCompletions(&decoder.Response, original))
+			response := apicompat.ResponsesToChatCompletions(&decoder.Response, original)
+			response.Choices[0].Message.ReasoningSignature = devinChatReasoningSignature(&decoder.Response)
+			c.JSON(200, response)
 		default:
-			c.JSON(200, decoder.Response)
+			payload, marshalErr := json.Marshal(decoder.Response)
+			if marshalErr != nil {
+				return result, marshalErr
+			}
+			payload, _, restoreErr := apicompat.RestoreResponsesClientToolPayload(payload, toolMapping)
+			if restoreErr != nil {
+				return result, restoreErr
+			}
+			c.Data(200, "application/json", payload)
 		}
 	} else if protocol == "chat" {
 		if _, writeErr := c.Writer.WriteString("data: [DONE]\n\n"); writeErr != nil {
@@ -440,21 +510,32 @@ func consumeDevinChat(ctx context.Context, c *gin.Context, client *devin.Client,
 	}
 }
 
-func (s *OpenAIGatewayService) devinForwardFailure(c *gin.Context, a *Account, err error) error {
+// Classify and update account health without writing a client response. This
+// also runs during WS credential acquisition, after the HTTP upgrade.
+func (s *OpenAIGatewayService) devinAccountFailure(ctx context.Context, a *Account, err error) (*UpstreamFailoverError, *devin.Error) {
 	status := 502
 	var upstream *devin.Error
 	if errors.As(err, &upstream) {
 		status = upstream.HTTPStatus()
 	}
 	if status == 429 && s.accountRepo != nil {
-		_ = s.accountRepo.SetRateLimited(c.Request.Context(), a.ID, time.Now().Add(time.Minute))
+		_ = s.accountRepo.SetRateLimited(ctx, a.ID, time.Now().Add(time.Minute))
 	}
 	if status == 401 && s.accountRepo != nil {
-		_ = s.accountRepo.SetError(c.Request.Context(), a.ID, "Devin authorization expired; reconnect this account")
+		_ = s.accountRepo.SetError(ctx, a.ID, "Devin authorization expired; reconnect this account")
 	}
-	if status == 400 {
-		c.JSON(400, gin.H{"error": gin.H{"type": "invalid_request_error", "message": "Devin rejected the request"}})
+	return &UpstreamFailoverError{StatusCode: status, ResponseBody: []byte(`{"error":{"message":"Devin upstream unavailable"}}`)}, upstream
+}
+
+func (s *OpenAIGatewayService) devinForwardFailure(c *gin.Context, a *Account, err error) error {
+	failure, upstream := s.devinAccountFailure(c.Request.Context(), a, err)
+	if failure.StatusCode == 400 {
+		message := "Devin rejected the request"
+		if upstream != nil {
+			message = upstream.Error()
+		}
+		c.JSON(400, gin.H{"error": gin.H{"type": "invalid_request_error", "message": message}})
 		return err
 	}
-	return &UpstreamFailoverError{StatusCode: status, ResponseBody: []byte(`{"error":{"message":"Devin upstream unavailable"}}`)}
+	return failure
 }

@@ -22,6 +22,12 @@ func devinFusionResponseEvents(response *apicompat.ResponsesResponse) []apicompa
 		initial.Content = nil
 		events = append(events, apicompat.ResponsesStreamEvent{Type: "response.output_item.added", OutputIndex: i, Item: &initial})
 		switch o.Type {
+		case "reasoning":
+			for _, summary := range o.Summary {
+				if summary.Text != "" {
+					events = append(events, apicompat.ResponsesStreamEvent{Type: "response.reasoning_summary_text.delta", OutputIndex: i, ItemID: o.ID, Delta: summary.Text})
+				}
+			}
 		case "function_call":
 			events = append(events, apicompat.ResponsesStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: i, ItemID: o.ID, CallID: o.CallID, Delta: o.Arguments}, apicompat.ResponsesStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: i, ItemID: o.ID, CallID: o.CallID, Name: o.Name, Arguments: o.Arguments})
 		case "message":
@@ -41,11 +47,13 @@ func devinFusionResponseEvents(response *apicompat.ResponsesResponse) []apicompa
 	}
 	return events
 }
-func writeDevinFusionResponse(c *gin.Context, r *apicompat.ResponsesResponse, protocol string, stream bool, mapping apicompat.ResponsesClientToolMapping) error {
+func writeDevinFusionResponse(c *gin.Context, r *apicompat.ResponsesResponse, protocol string, stream bool, mapping apicompat.ResponsesClientToolMapping, includeUsage ...bool) error {
 	if !stream {
 		switch protocol {
 		case "chat":
-			c.JSON(200, apicompat.ResponsesToChatCompletions(r, r.Model))
+			response := apicompat.ResponsesToChatCompletions(r, r.Model)
+			response.Choices[0].Message.ReasoningSignature = devinChatReasoningSignature(r)
+			c.JSON(200, response)
 		case "anthropic":
 			c.JSON(200, apicompat.ResponsesToAnthropic(r, r.Model))
 		default:
@@ -66,6 +74,7 @@ func writeDevinFusionResponse(c *gin.Context, r *apicompat.ResponsesResponse, pr
 	c.Header("X-Accel-Buffering", "no")
 	anth := apicompat.NewResponsesEventToAnthropicState()
 	chat := apicompat.NewResponsesEventToChatState()
+	chat.IncludeUsage = len(includeUsage) > 0 && includeUsage[0]
 	restorer := apicompat.NewResponsesClientToolStreamRestorer(mapping)
 	write := func(s string) error {
 		if c.Request.Context().Err() != nil {
@@ -80,6 +89,19 @@ func writeDevinFusionResponse(c *gin.Context, r *apicompat.ResponsesResponse, pr
 	for _, e := range devinFusionResponseEvents(r) {
 		switch protocol {
 		case "chat":
+			if e.Type == "response.completed" {
+				if signature := devinChatReasoningSignature(r); signature != "" {
+					chunk := apicompat.ChatCompletionsChunk{ID: chat.ID, Object: "chat.completion.chunk", Created: chat.Created, Model: r.Model,
+						Choices: []apicompat.ChatChunkChoice{{Index: 0, Delta: apicompat.ChatDelta{ReasoningSignature: &signature}}}}
+					data, err := apicompat.ChatChunkToSSE(chunk)
+					if err != nil {
+						return err
+					}
+					if err = write(data); err != nil {
+						return err
+					}
+				}
+			}
 			for _, chunk := range apicompat.ResponsesEventToChatChunks(&e, chat) {
 				data, err := apicompat.ChatChunkToSSE(chunk)
 				if err != nil {

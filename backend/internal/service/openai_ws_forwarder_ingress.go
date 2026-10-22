@@ -115,7 +115,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
-	forceHTTPBridge := account.Platform == PlatformGrok ||
+	forceHTTPBridge := account.Platform == PlatformGrok || account.Platform == PlatformDevin ||
 		(s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account))
 	modeRouterV2Enabled := s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled
 	ingressMode := OpenAIWSIngressModeCtxPool
@@ -172,6 +172,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	wsPath := "-"
 	if forceHTTPBridge {
 		wsHost = "xai-http-bridge"
+		if account.Platform == PlatformDevin {
+			wsHost = "devin-connect-bridge"
+		}
 		wsPath = "/v1/responses"
 	} else {
 		var err error
@@ -583,7 +586,11 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		bridgeReplayInputExists := false
 		var bridgeAccountFailoverInput []json.RawMessage
 		bridgeAccountFailoverInputExists := false
+		devinPreviousResponseID := ""
 		for turn := 1; ; turn++ {
+			if account.Platform == PlatformDevin && (turn > 1 || !DevinFusionRequest(ctx)) && currentBridgePayload.previousResponseID != "" && currentBridgePayload.previousResponseID != devinPreviousResponseID {
+				return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "previous_response_id must identify the previous response on this connection", nil)
+			}
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
 				if err := hooks.BeforeRequest(turn, currentBridgePayload.rawForHash, currentBridgePayload.originalModel); err != nil {
 					return err
@@ -718,6 +725,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			}
 			if result == nil {
 				return errors.New("websocket http bridge turn result is nil")
+			}
+			if account.Platform == PlatformDevin {
+				devinPreviousResponseID = result.ResponseID
 			}
 			// turnReplayInput/turnAccountFailoverInput 可能共享同一头数组（转移自
 			// bridgeCurrentItems），保存历史必须经 combine 新建头，禁止就地 append。

@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 	"go.uber.org/zap"
 )
 
@@ -187,7 +188,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 			return fusion.Outcome{KnownFailure: true, NotStarted: true}, fusion.E("context_limit", "role context exceeds the concrete model window", 413)
 		}
 	}
-	if err = devin.ValidateModelCapabilities(wire, selected, call.Request.MaxOutputTokens); err != nil {
+	if err = devin.ApplyModelConfig(wire, selected, call.Request); err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
 	token, err := s.devin.Token(ctx, x.account, false)
@@ -389,7 +390,8 @@ func (s *OpenAIGatewayService) forwardDevinFusion(ctx context.Context, c *gin.Co
 	if response == nil {
 		return fail(fusion.E("response_missing", "Fusion has no publishable response", 503))
 	}
-	if err = writeDevinFusionResponse(c, response, protocol, req.Stream, mapping); err == nil {
+	includeUsage := protocol == "chat" && gjson.GetBytes(body, "stream_options.include_usage").Bool()
+	if err = writeDevinFusionResponse(c, response, protocol, req.Stream, mapping, includeUsage); err == nil {
 		err = ctx.Err()
 	}
 	if err != nil {

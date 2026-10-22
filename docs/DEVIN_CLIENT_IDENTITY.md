@@ -21,9 +21,9 @@
   "chat": {
     "ide_name": "devin-cli",
     "ide_type": "chisel",
-    "ide_version": "3000.6.2",
+    "ide_version": "3000.11.3",
     "extension_name": "chisel",
-    "extension_version": "3000.6.2",
+    "extension_version": "3000.11.3",
     "os": "linux",
     "locale": "en"
   },

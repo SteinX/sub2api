@@ -28,7 +28,7 @@ func concreteMatches(fragment string, models []*pb.ClientModelConfig) []string {
 		if f := m.GetModelInfo().GetModelFeatures(); f != nil && !f.GetSupportsToolCalls() {
 			continue
 		}
-		for _, name := range []string{devin.ModelID(m), m.GetModelInfo().GetModelUid(), m.GetModelOrAlias().GetModel()} {
+		for _, name := range []string{devin.ModelID(m), m.GetModelInfo().GetModelUid(), m.GetModelOrAlias().GetModelUid()} {
 			if name == "" {
 				continue
 			}

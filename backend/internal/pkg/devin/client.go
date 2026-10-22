@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -34,11 +35,22 @@ const (
 
 // Error preserves protocol codes even when the HTTP response itself was 200.
 type Error struct {
-	Code   string
-	Status int
+	Code      string
+	Status    int
+	Operation string
+	TraceID   string
 }
 
-func (e *Error) Error() string { return "Devin upstream: " + e.Code }
+func (e *Error) Error() string {
+	message := "Devin upstream: " + e.Code
+	if e.Operation != "" {
+		message += " [" + e.Operation + "]"
+	}
+	if e.TraceID != "" {
+		message += " (trace ID: " + e.TraceID + ")"
+	}
+	return message
+}
 func IsUnauthenticated(err error) bool {
 	var e *Error
 	return errors.As(err, &e) && (e.Code == "unauthenticated" || e.Status == 401)
@@ -75,7 +87,14 @@ type Client struct {
 
 func NormalizeToken(token string) string {
 	token = strings.TrimSpace(token)
-	if token != "" && !strings.HasPrefix(token, "devin-session-token$") {
+	// Earlier imports also prefixed legacy Windsurf keys. Repair that known
+	// persisted form so upgrading does not require importing the account again.
+	if strings.HasPrefix(token, "devin-session-token$sk-ws-") {
+		token = strings.TrimPrefix(token, "devin-session-token$")
+	}
+	// Durable/legacy API keys must remain unchanged. Only bare JWT session
+	// tokens use the CLI prefix (the same distinction as the native client).
+	if token != "" && !strings.HasPrefix(token, "devin-session-token$") && len(strings.Split(token, ".")) == 3 {
 		token = "devin-session-token$" + token
 	}
 	return token
@@ -138,14 +157,17 @@ func (c *Client) unary(ctx context.Context, base, path, token string, in, out pr
 		return errors.New("devin unary response too large")
 	}
 	if r.StatusCode != 200 {
-		return responseError(r.StatusCode, b)
+		return rpcError(responseError(r.StatusCode, b), path)
 	}
 	return proto.Unmarshal(b, out)
 }
 
+var traceIDPattern = regexp.MustCompile(`(?i)trace[ _-]?id\s*[:=]\s*([a-f0-9-]{16,64})\b`)
+
 func responseError(status int, b []byte) error {
 	var v struct {
-		Code string `json:"code"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
 	}
 	_ = json.Unmarshal(b, &v)
 	if v.Code == "" {
@@ -160,7 +182,26 @@ func responseError(status int, b []byte) error {
 			v.Code = "unavailable"
 		}
 	}
-	return &Error{Code: v.Code, Status: status}
+	return &Error{Code: v.Code, Status: status, TraceID: extractTraceID(v.Message)}
+}
+
+// Keep actionable diagnostics without exposing arbitrary upstream payloads,
+// which can include proxy HTML, prompts or credentials.
+func extractTraceID(message string) string {
+	if match := traceIDPattern.FindStringSubmatch(message); len(match) == 2 {
+		return match[1]
+	}
+	return ""
+}
+
+func rpcError(err error, path string) error {
+	var upstream *Error
+	if errors.As(err, &upstream) {
+		copy := *upstream
+		copy.Operation = path[strings.LastIndex(path, "/")+1:]
+		return &copy
+	}
+	return err
 }
 
 func (c *Client) Models(ctx context.Context, token string) ([]*pb.ClientModelConfig, error) {
@@ -193,7 +234,7 @@ func ModelID(m *pb.ClientModelConfig) string {
 	if m.GetModelInfo().GetModelUid() != "" {
 		return m.ModelInfo.ModelUid
 	}
-	return m.GetModelOrAlias().GetModel()
+	return m.GetModelOrAlias().GetModelUid()
 }
 
 type PrepareResult struct {
@@ -263,6 +304,9 @@ func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessa
 		req.ModelAssignmentJwt = proto.String(a.Assignment.AssignmentJwt)
 	}
 	result.FinalModelUID = req.ChatModelUid
+	if err := NormalizeToolSchemas(req); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
@@ -326,7 +370,7 @@ func (c *Client) Chat(ctx context.Context, base, token string, in *pb.GetChatMes
 	defer func() { _ = r.Body.Close() }()
 	if r.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
-		return responseError(r.StatusCode, b)
+		return rpcError(responseError(r.StatusCode, b), ChatPath)
 	}
 	for {
 		flags, b, err := ReadFrame(r.Body)
@@ -339,14 +383,15 @@ func (c *Client) Chat(ctx context.Context, base, token string, in *pb.GetChatMes
 		if flags&2 != 0 {
 			var end struct {
 				Error *struct {
-					Code string `json:"code"`
+					Code    string `json:"code"`
+					Message string `json:"message"`
 				} `json:"error"`
 			}
 			if err = json.Unmarshal(b, &end); err != nil {
 				return errors.New("invalid Devin trailer")
 			}
 			if end.Error != nil {
-				return &Error{Code: end.Error.Code}
+				return &Error{Code: end.Error.Code, Operation: "GetChatMessage", TraceID: extractTraceID(end.Error.Message)}
 			}
 			return nil
 		}

@@ -23,7 +23,7 @@ func TestClientIdentityDocumentValidation(t *testing.T) {
 		{"unsupported schema", strings.Replace(string(defaultClientIdentityJSON), `"schema_version": 1`, `"schema_version": 2`, 1)},
 		{"trailing data", string(defaultClientIdentityJSON) + `{}`},
 		{"oversized", strings.Repeat(" ", MaxClientIdentitySize+1)},
-		{"malformed version", strings.Replace(string(defaultClientIdentityJSON), "3000.6.2", "latest", 1)},
+		{"malformed version", strings.Replace(string(defaultClientIdentityJSON), DefaultClientIdentity().Chat.IDEVersion, "latest", 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := ParseClientIdentity([]byte(tc.data)); err == nil {

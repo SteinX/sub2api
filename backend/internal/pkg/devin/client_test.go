@@ -107,10 +107,10 @@ func TestUserJWTAndRouterWireContract(t *testing.T) {
 		case UserJWTPath:
 			var q pb.GetUserJwtRequest
 			_ = proto.Unmarshal(b, &q)
-			if q.GetMetadata().GetApiKey() != "devin-session-token$test" {
+			if q.GetMetadata().GetApiKey() != "test" {
 				t.Error("missing CLI auth")
 			}
-			if m := q.GetMetadata(); m.GetIdeName() != "devin-cli" || m.GetIdeType() != "chisel" || m.GetIdeVersion() != "3000.6.2" || m.GetExtensionName() != "chisel" || m.GetExtensionVersion() != "3000.6.2" {
+			if m := q.GetMetadata(); m.GetIdeName() != "devin-cli" || m.GetIdeType() != "chisel" || m.GetIdeVersion() != "3000.11.3" || m.GetExtensionName() != "chisel" || m.GetExtensionVersion() != "3000.11.3" {
 				t.Error("missing released CLI identity")
 			}
 			out, _ := proto.Marshal(&pb.GetUserJwtResponse{UserJwt: "jwt"})
@@ -152,7 +152,7 @@ func TestModelDiscoveryWireContract(t *testing.T) {
 			t.Error(err)
 		}
 		m := q.GetMetadata()
-		if m.GetApiKey() != "devin-session-token$test" || m.GetIdeName() != "chisel" || m.GetIdeVersion() != "0.0.0-dev" || m.GetExtensionVersion() != "0.0.0-dev" {
+		if m.GetApiKey() != "test" || m.GetIdeName() != "chisel" || m.GetIdeVersion() != "0.0.0-dev" || m.GetExtensionVersion() != "0.0.0-dev" {
 			t.Error("missing discovery identity")
 		}
 		if !slices.Equal(m.GetSupportedModelDisplays(), []pb.DisplayOption{3, 4, 6, 7, 8}) {
@@ -190,10 +190,10 @@ func TestRequestHistoryAndTenantIsolation(t *testing.T) {
 	if q.ExecutionId == again.ExecutionId {
 		t.Fatal("execution id reused")
 	}
-	if q.Prompt != "\nsystem" || len(q.ChatMessagePrompts) != 5 {
+	if q.Prompt != "\nsystem" || len(q.ChatMessagePrompts) != 4 {
 		t.Fatal(q)
 	}
-	if q.ChatMessagePrompts[2].ToolCallId != "a" || q.ChatMessagePrompts[4].ToolCallId != "b" {
+	if len(q.ChatMessagePrompts[1].ToolCalls) != 2 || q.ChatMessagePrompts[2].ToolCallId != "a" || q.ChatMessagePrompts[3].ToolCallId != "b" {
 		t.Fatal("tool results were not paired")
 	}
 	r.PreviousResponseID = "resp_previous"

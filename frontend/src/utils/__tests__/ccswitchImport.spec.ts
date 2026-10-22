@@ -13,6 +13,23 @@ function paramsFromDeeplink(deeplink: string): URLSearchParams {
 }
 
 describe('ccswitchImport utils', () => {
+  it.each(['codex', 'claude'] as const)('imports Devin into %s with the selected model and one API root', clientType => {
+    const params = paramsFromDeeplink(buildCcSwitchImportDeeplink({
+      baseUrl: 'https://example.com/v1/', platform: 'devin', clientType,
+      providerName: 'Sub2API', apiKey: 'sk-test', usageScript: 'return true', model: 'fusion-test'
+    }))
+    expect(params.get('app')).toBe(clientType)
+    expect(params.get('endpoint')).toBe('https://example.com')
+    expect(params.get('model')).toBe('fusion-test')
+  })
+
+  it('requires an explicit Devin model before importing', () => {
+    expect(() => buildCcSwitchImportDeeplink({
+      baseUrl: 'https://example.com', platform: 'devin', clientType: 'codex',
+      providerName: 'Sub2API', apiKey: 'sk-test', usageScript: 'return true'
+    })).toThrow('Choose an available Devin model')
+  })
+
   it('defaults OpenAI CC Switch imports to the current Codex model', () => {
     expect(OPENAI_CC_SWITCH_CODEX_MODEL).toBe('gpt-5.5')
   })
