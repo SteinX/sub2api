@@ -194,6 +194,18 @@ test('unknown mergeability waits on planning failures but actual failed tests ar
   assert.equal(readState(tests.issue).phase, 'active');
 });
 
+test('runner startup failures dispatch even when GitHub never creates a job', async () => {
+  for (const options of [
+    { source: { conclusion: 'startup_failure' }, jobs: [] },
+    { jobs: [{ name: 'sync', conclusion: 'startup_failure', steps: [] }] },
+  ]) {
+    const f = fixture(options);
+    await execute(f);
+    assert.equal(readState(f.issue).phase, 'active');
+    assert.match(f.calls.find(call => call.name === 'api' && call.method === 'POST').body.prompt, /startup_failure/);
+  }
+});
+
 test('failed fork publication can be repaired without an open PR; other versions are excluded', async () => {
   const source = { name: 'Release', path: '.github/workflows/release.yml', display_title: `Release ${TAG}` };
   const f = fixture({ source, noPr: true });

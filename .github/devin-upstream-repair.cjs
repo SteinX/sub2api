@@ -13,6 +13,7 @@ const SOURCES = new Map([
 const BOT = 'github-actions[bot]';
 const STATE = /<!-- devin-upstream-state\n([^]*?)\n-->/;
 const MAX_DISPATCHES = 5;
+const FAILURES = new Set(['failure', 'timed_out', 'startup_failure']);
 const TERMINAL = new Set(['exit', 'error']);
 const QUOTA = /limit|quota|credits|payment|contract/;
 
@@ -110,7 +111,7 @@ async function sourceWork({ github, core, context }, id, imageCheck) {
   const runs = await github.paginate(github.rest.actions.listWorkflowRuns, { ...FORK, workflow_id: run.workflow_id, per_page: 100 });
   if (runs.some(other => other.id !== run.id && other.run_number > run.run_number
       && (!isRelease || other.display_title === run.display_title))) return null;
-  if (!['failure', 'timed_out', 'success'].includes(run.conclusion)) return null;
+  if (!FAILURES.has(run.conclusion) && run.conclusion !== 'success') return null;
   if (!isRelease && run.conclusion === 'success') return null;
 
   const result = await publication(github, tag, imageCheck);
@@ -149,9 +150,13 @@ async function sourceWork({ github, core, context }, id, imageCheck) {
   const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
     ...FORK, run_id: run.id, filter: 'latest', per_page: 100,
   });
-  const failures = jobs.filter(job => ['failure', 'timed_out'].includes(job.conclusion)).map(job => ({
-    job: job.name, steps: (job.steps || []).filter(step => ['failure', 'timed_out'].includes(step.conclusion)).map(step => step.name).sort(),
+  const failures = jobs.filter(job => FAILURES.has(job.conclusion)).map(job => ({
+    job: job.name, conclusion: job.conclusion,
+    steps: (job.steps || []).filter(step => FAILURES.has(step.conclusion)).map(step => step.name).sort(),
   })).sort((a, b) => a.job.localeCompare(b.job));
+  if (!failures.length && run.conclusion === 'startup_failure') {
+    failures.push({ job: 'Workflow startup', conclusion: 'startup_failure', steps: [] });
+  }
   if (run.conclusion !== 'success' && !failures.length) {
     core.info('No failed jobs in the latest attempt; wait for GitHub to settle.');
     return null;
