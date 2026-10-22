@@ -52,9 +52,10 @@ func TestDevinStatusDistinguishesExpiredSessionsFromStoreOutages(t *testing.T) {
 
 type devinAdminStub struct {
 	service.AdminService
-	account *service.Account
-	created int
-	update  *service.UpdateAccountInput
+	account     *service.Account
+	created     int
+	update      *service.UpdateAccountInput
+	createInput *service.CreateAccountInput
 }
 
 func (s *devinAdminStub) GetAccount(context.Context, int64) (*service.Account, error) {
@@ -62,6 +63,7 @@ func (s *devinAdminStub) GetAccount(context.Context, int64) (*service.Account, e
 }
 func (s *devinAdminStub) CreateAccount(_ context.Context, in *service.CreateAccountInput) (*service.Account, error) {
 	s.created++
+	s.createInput = in
 	s.account = &service.Account{ID: 12, Name: in.Name, Platform: in.Platform, Type: in.Type, Credentials: in.Credentials, Extra: in.Extra}
 	return s.account, nil
 }
@@ -97,7 +99,7 @@ func TestDevinCommitIsIdempotentAndReauthPreservesSettings(t *testing.T) {
 			for range 2 {
 				w := httptest.NewRecorder()
 				c, _ := gin.CreateTestContext(w)
-				c.Request = httptest.NewRequest("POST", "/commit", strings.NewReader(`{"name":"test","group_ids":[4],"concurrency":2}`))
+				c.Request = httptest.NewRequest("POST", "/commit", strings.NewReader(`{"name":"test","group_ids":[4],"concurrency":2,"load_factor":4,"expires_at":1900000000,"auto_pause_on_expired":false}`))
 				c.Request.Header.Set("Content-Type", "application/json")
 				c.Params = gin.Params{{Key: "id", Value: "session"}}
 				c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 7})
@@ -119,12 +121,27 @@ func TestDevinCommitIsIdempotentAndReauthPreservesSettings(t *testing.T) {
 				if a.update.GroupIDs != nil || a.update.Priority != nil || a.update.RateMultiplier != nil {
 					t.Fatal("reauth changed account settings")
 				}
+				if a.update.LoadFactor != nil || a.update.ExpiresAt != nil || a.update.AutoPauseOnExpired != nil {
+					t.Fatal("reauth changed lifecycle settings")
+				}
 				if a.update.Credentials["api_key"] != "" {
 					t.Fatal("old key retained after switching identity")
 				}
 			} else if a.created != 1 {
 				t.Fatal("repeated commit created accounts", a.created)
+			} else if a.createInput.LoadFactor == nil || *a.createInput.LoadFactor != 4 || a.createInput.ExpiresAt == nil || *a.createInput.ExpiresAt != 1900000000 || a.createInput.AutoPauseOnExpired == nil || *a.createInput.AutoPauseOnExpired {
+				t.Fatal("create discarded lifecycle settings", a.createInput)
 			}
 		})
+	}
+}
+
+func TestDevinGenericRefreshRequiresNativeReauthorization(t *testing.T) {
+	h := &AccountHandler{}
+	for _, kind := range []string{service.AccountTypeOAuth, service.AccountTypeAPIKey} {
+		_, _, err := h.refreshSingleAccount(context.Background(), &service.Account{Platform: service.PlatformDevin, Type: kind})
+		if err == nil || !strings.Contains(err.Error(), "DEVIN_REAUTH_REQUIRED") {
+			t.Fatalf("Devin %s reached another provider's refresh path: %v", kind, err)
+		}
 	}
 }

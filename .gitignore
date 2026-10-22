@@ -143,6 +143,7 @@ docs/*
 !docs/DEVIN_CLIENT_IDENTITY.md
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/codex-credits.md
+!docs/devin-usage.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/

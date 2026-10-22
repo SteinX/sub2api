@@ -496,6 +496,7 @@ export const commonErrorCodes = [
 // 按平台获取模型
 export function getModelsByPlatform(platform: string): string[] {
   switch (platform) {
+    case 'devin': return [] // The authorized account's live catalog is authoritative.
     case 'openai': return openaiModels
     case 'anthropic':
     case 'claude': return claudeModels
@@ -540,6 +541,7 @@ export function getModelsByPlatform(platform: string): string[] {
 
 // 按平台获取预设映射
 export function getPresetMappingsByPlatform(platform: string) {
+  if (platform === 'devin') return []
   if (platform === 'openai') return openaiPresetMappings
   if (platform === 'gemini') return geminiPresetMappings
   if (platform === 'grok' || platform === 'xai') return grokPresetMappings

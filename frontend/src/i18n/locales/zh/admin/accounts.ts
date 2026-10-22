@@ -1,6 +1,11 @@
 export default {
     accounts: {
       devin: {
+        credentialsEditHint: '如需更换 API Key 或登录身份，请在账号菜单中选择“重新授权”，系统会重新校验凭据和可用模型。',
+        dailyUsage: '日用量', weeklyUsage: '周用量', quotaUnavailable: '上游未提供数据',
+        promptCredits: 'Prompt 余额', flowCredits: 'Flow 余额', flexCredits: 'Flex 余额',
+        usageFailed: '用量查询失败，请重试', usageForbidden: '当前账号或套餐不支持查询用量',
+        usageRateLimited: '用量查询过于频繁，请稍后重试',
         title: 'Devin 账号授权', account: 'Devin 账号',
         recoverBadge: '自动恢复会话', manualBadge: '失效后需重新登录',
         intro: '连接 Devin 账号后，系统会校验凭据、同步模型并加入账号池。',

@@ -86,6 +86,36 @@ function findModelRow(wrapper: ReturnType<typeof mountSelector>, modelId: string
 }
 
 describe('ModelWhitelistSelector', () => {
+  it('discards an earlier Devin account sync after switching accounts', async () => {
+    let finish!: (result: { models: string[] }) => void
+    syncUpstreamModels.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mountSelector({ platform: 'devin', accountId: 44, availableModels: ['swe-old'] })
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.syncUpstreamModels')!.trigger('click')
+    await wrapper.setProps({ accountId: 45, availableModels: ['swe-new'] })
+    finish({ models: ['old-account-only'] })
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    await wrapper.get('.cursor-pointer').trigger('click')
+    expect(wrapper.findAll('[data-testid="model-option"]').map(row => row.text())).toEqual(['swe-new'])
+    wrapper.unmount()
+  })
+
+  it('offers the Devin account catalog and models discovered by a fresh sync', async () => {
+    const wrapper = mountSelector({ platform: 'devin', accountId: 44, availableModels: ['swe-2-max', 'swe-2-high'] })
+    await wrapper.get('.cursor-pointer').trigger('click')
+    expect(wrapper.findAll('[data-testid="model-option"]').map(row => row.text())).toEqual(['swe-2-max', 'swe-2-high'])
+    const fill = wrapper.findAll('button').find(button => button.text() === 'admin.accounts.fillRelatedModels')!
+    await fill.trigger('click')
+    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(['swe-2-max', 'swe-2-high'])
+    syncUpstreamModels.mockResolvedValue({ models: ['swe-new'], metadata: {} })
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.syncUpstreamModels')!.trigger('click')
+    await flushPromises()
+    expect(syncUpstreamModels).toHaveBeenCalledWith(44)
+    expect(findModelRow(wrapper, 'swe-new').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('claude-sonnet')
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     copyToClipboard.mockClear()
     showError.mockReset()
@@ -100,7 +130,7 @@ describe('ModelWhitelistSelector', () => {
     resetPlatformCatalog()
   })
 
-  it.each(['anthropic', 'openai', 'gemini', 'antigravity', 'grok', 'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go', 'command_code', 'cline'])(
+  it.each(['anthropic', 'openai', 'gemini', 'antigravity', 'grok', 'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go', 'command_code', 'cline', 'devin'])(
     'supports upstream sync for %s saved accounts and creation previews',
     (platform) => {
       const wrappers = [

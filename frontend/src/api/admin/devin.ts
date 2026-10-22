@@ -19,6 +19,9 @@ export interface DevinAccountSettings {
   concurrency?: number
   priority?: number
   rate_multiplier?: number
+  load_factor?: number | null
+  expires_at?: number | null
+  auto_pause_on_expired?: boolean
 }
 
 export interface DevinClientInfo {

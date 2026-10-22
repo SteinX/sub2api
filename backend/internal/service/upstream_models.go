@@ -16,6 +16,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 )
 
@@ -214,9 +215,16 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // untouched.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
 	if account != nil && account.Platform == PlatformDevin {
-		ids, _, err := s.fetchUpstreamModelList(ctx, account)
+		models, err := s.devinClientService().Models(ctx, account, true)
 		if err != nil {
 			return nil, err
+		}
+		if len(models) == 0 {
+			return nil, errors.New("devin returned no usable models; existing catalog was preserved")
+		}
+		ids := make([]string, 0, len(models))
+		for _, model := range models {
+			ids = append(ids, devin.ModelID(model))
 		}
 		if err = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{"devin_models": ids}); err != nil {
 			return nil, err
@@ -745,7 +753,7 @@ func normalizeModelRegistryBaseURL(raw string) string {
 
 func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account *Account) ([]string, []byte, error) {
 	if account != nil && account.Platform == PlatformDevin {
-		d := NewDevinService(s.accountRepo, nil, s.httpUpstream, s.cfg, nil)
+		d := s.devinClientService()
 		models, err := d.Models(ctx, account)
 		if err != nil {
 			return nil, nil, err

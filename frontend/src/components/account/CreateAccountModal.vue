@@ -3780,7 +3780,7 @@
       <DevinConnectionFlow
         v-if="form.platform === 'devin'"
         :proxy-id="form.proxy_id"
-        :settings="{ name: form.name, notes: form.notes, group_ids: form.group_ids, concurrency: form.concurrency, priority: form.priority, rate_multiplier: form.rate_multiplier }"
+        :settings="{ name: form.name, notes: form.notes, group_ids: form.group_ids, concurrency: form.concurrency, priority: form.priority, rate_multiplier: form.rate_multiplier, load_factor: form.load_factor, expires_at: form.expires_at, auto_pause_on_expired: autoPauseOnExpired }"
         @connected="emit('created'); handleClose()"
       />
       <OAuthAuthorizationFlow

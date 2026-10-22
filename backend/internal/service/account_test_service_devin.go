@@ -10,9 +10,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func (s *AccountTestService) devinClientService() *DevinService {
+	if s.devin != nil {
+		return s.devin
+	}
+	return NewDevinService(s.accountRepo, nil, s.httpUpstream, s.cfg, nil)
+}
+
 func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, a *Account, model, prompt string) error {
 	ctx := devin.WithClientIdentity(c.Request.Context())
-	d := NewDevinService(s.accountRepo, nil, s.httpUpstream, s.cfg, nil)
+	d := s.devinClientService()
 	models, err := d.Models(ctx, a)
 	if err != nil {
 		return s.sendErrorAndEnd(c, err.Error())
@@ -51,21 +58,32 @@ func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, a *Accou
 	if err != nil {
 		return s.sendErrorAndEnd(c, err.Error())
 	}
-	base, err := client.Prepare(ctx, token, q, selected.GetModelInfo().GetIsModelRouter())
-	if err != nil {
-		return s.sendErrorAndEnd(c, err.Error())
-	}
 	c.Header("Content-Type", "text/event-stream")
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: model})
 	decoder := devin.NewEventDecoder(model, func(apicompat.ResponsesStreamEvent) error { return nil })
-	err = client.Chat(ctx, base, token, q, func(m *pb.GetChatMessageResponse) error {
-		if m.DeltaText != "" {
-			s.sendEvent(c, TestEvent{Type: "content", Text: m.DeltaText})
+	for attempt := 0; attempt < 2; attempt++ {
+		q.ChatModelUid = model
+		q.ModelAssignmentJwt = nil
+		var base string
+		base, err = client.Prepare(ctx, token, q, selected.GetModelInfo().GetIsModelRouter())
+		if err == nil {
+			err = client.Chat(ctx, base, token, q, func(m *pb.GetChatMessageResponse) error {
+				if m.DeltaText != "" {
+					s.sendEvent(c, TestEvent{Type: "content", Text: m.DeltaText})
+				}
+				return decoder.Apply(m)
+			})
 		}
-		return decoder.Apply(m)
-	})
-	if err == nil {
-		err = decoder.Finish()
+		if err == nil {
+			err = decoder.Finish()
+		}
+		if ctx.Err() != nil || !devin.IsUnauthenticated(err) || decoder.Started || attempt > 0 || a.GetCredential("api_key") == "" {
+			break
+		}
+		token, err = d.RecoverToken(ctx, a, token)
+		if err != nil {
+			break
+		}
 	}
 	if err != nil {
 		return s.sendErrorAndEnd(c, err.Error())

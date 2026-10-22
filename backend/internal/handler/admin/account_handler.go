@@ -1403,6 +1403,9 @@ func (h *AccountHandler) PreviewFromCRS(c *gin.Context) {
 // refreshSingleAccount refreshes credentials for a single OAuth account.
 // Returns (updatedAccount, warning, error) where warning is used for Antigravity ProjectIDMissing scenario.
 func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *service.Account) (*service.Account, string, error) {
+	if account.Platform == service.PlatformDevin {
+		return nil, "", infraerrors.BadRequest("DEVIN_REAUTH_REQUIRED", "Devin API keys recover sessions automatically; reconnect session-only accounts through Devin reauthorization")
+	}
 	if !account.IsOAuth() {
 		return nil, "", infraerrors.BadRequest("NOT_OAUTH", "cannot refresh non-OAuth account")
 	}

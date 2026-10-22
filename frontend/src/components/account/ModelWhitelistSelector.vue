@@ -145,7 +145,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { accountsAPI } from '@/api/admin/accounts'
@@ -165,6 +165,7 @@ const props = defineProps<{
   platform?: string
   platforms?: string[]
   accountId?: number
+  availableModels?: string[]
   syncCredentials?: {
     platform: string
     type: string
@@ -186,6 +187,8 @@ const searchQuery = ref('')
 const customModel = ref('')
 const isComposing = ref(false)
 const isSyncingUpstream = ref(false)
+const syncedModels = ref<string[]>([])
+watch(() => [props.accountId, props.platform, props.platforms, props.availableModels], () => { syncedModels.value = [] })
 const normalizedPlatforms = computed(() => {
   const rawPlatforms =
     props.platforms && props.platforms.length > 0
@@ -215,10 +218,6 @@ const canSyncUpstream = computed(() => {
 })
 
 const availableOptions = computed(() => {
-  if (normalizedPlatforms.value.length === 0) {
-    return allModels
-  }
-
   const allowedModels = new Set<string>()
   for (const platform of normalizedPlatforms.value) {
     for (const model of getModelsByPlatform(platform)) {
@@ -226,7 +225,13 @@ const availableOptions = computed(() => {
     }
   }
 
-  return allModels.filter(model => allowedModels.has(model.value))
+  const builtins = normalizedPlatforms.value.length === 0 ? allModels : allModels.filter(model => allowedModels.has(model.value))
+  const options = new Map(builtins.map(model => [model.value, model]))
+  for (const raw of [...(props.availableModels ?? []), ...syncedModels.value]) {
+    const id = raw.trim()
+    if (id && !options.has(id)) options.set(id, { value: id, label: id })
+  }
+  return [...options.values()]
 })
 
 const filteredModels = computed(() => {
@@ -280,6 +285,13 @@ const handleEnter = () => {
 
 const fillRelated = () => {
   const newModels = [...props.modelValue]
+  if (props.availableModels !== undefined || syncedModels.value.length > 0) {
+    for (const model of availableOptions.value) {
+      if (!newModels.includes(model.value)) newModels.push(model.value)
+    }
+    emit('update:modelValue', newModels)
+    return
+  }
   for (const platform of normalizedPlatforms.value) {
     for (const model of getModelsByPlatform(platform)) {
       if (!newModels.includes(model)) {
@@ -293,6 +305,8 @@ const fillRelated = () => {
 const syncUpstreamModels = async () => {
   if (isSyncingUpstream.value || !canSyncUpstream.value) return
 
+  const accountID = props.accountId
+  const platform = props.platform
   isSyncingUpstream.value = true
   try {
     let result
@@ -304,7 +318,9 @@ const syncUpstreamModels = async () => {
       return
     }
 
+    if (props.accountId !== accountID || props.platform !== platform) return
     const upstreamModels = result.models.map(model => model.trim()).filter(Boolean)
+    syncedModels.value = upstreamModels
     if (upstreamModels.length === 0) {
       appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
       return
