@@ -491,6 +491,24 @@ export default {
         saved: 'OpenCode Go usage refresh settings saved',
         saveFailed: 'Failed to save OpenCode Go usage refresh settings'
       },
+      devinClientIdentity: {
+        title: 'Devin client identity',
+        description: 'Update chat, model discovery and token exchange identities without releasing or restarting the server.',
+        effective: 'Source: {source} · Revision: {revision} · Chat: {chat} · Discovery: {discovery} · Token exchange: {exchange}',
+        sources: { builtin: 'Built-in', remote: 'Remote', manual: 'Manual pin' },
+        sourceURL: 'Independent profile URL (public HTTPS JSON)',
+        autoSync: 'Automatically sync the remote profile',
+        syncHint: 'Checks the remote profile once a minute when requests arrive. Failed updates retain the last valid profile. Use a profile release URL you maintain.',
+        manual: 'Pin client identity manually (overrides remote updates)',
+        profile: 'Client profile JSON',
+        manualHint: 'Edit names, versions, OS and locale independently. Disable the manual pin to use the remote profile; clear the URL to use the built-in profile.',
+        save: 'Save Devin profile', syncNow: 'Sync now', refresh: 'Refresh current profile',
+        saveFirst: 'Save your changes before syncing or refreshing.',
+        syncedAt: 'Last successful sync: {time}',
+        saved: 'Devin profile saved. New requests use it immediately.', synced: 'Devin profile synced.',
+        syncFailed: 'Sync failed. The last valid profile remains active.',
+        invalidJSON: 'Enter a valid JSON profile object.', failed: 'Devin profile operation failed.'
+      },
       gatewayForwarding: {
         title: 'Request Forwarding',
         description: 'Control how requests are forwarded to upstream OAuth accounts',
