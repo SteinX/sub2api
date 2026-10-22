@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -64,6 +65,8 @@ func (e *Error) HTTPStatus() int {
 type Client struct {
 	BaseURL string
 	Do      func(*http.Request) (*http.Response, error)
+	// Identity is an immutable snapshot shared by all RPCs on this client.
+	Identity *ClientIdentity
 	// ValidateURL applies the host application's egress policy to account-specific hosts.
 	ValidateURL     func(string) (string, error)
 	PreEventTimeout time.Duration
@@ -78,29 +81,16 @@ func NormalizeToken(token string) string {
 	return token
 }
 
-func Metadata(token string) *pb.Metadata {
-	return &pb.Metadata{
-		ApiKey: NormalizeToken(token), IdeName: "devin-cli", IdeType: "chisel",
-		IdeVersion: "3000.6.2", ExtensionName: "chisel", ExtensionVersion: "3000.6.2",
-		Os: "linux", Locale: "en", DisableTelemetry: true,
+func (c *Client) discoveryMetadata(token string) *pb.Metadata {
+	m := c.identity().Discovery.metadata(token)
+	m.SupportedModelDisplays = []pb.DisplayOption{
+		pb.DisplayOption_DISPLAY_OPTION_MODEL_ROUTER,
+		pb.DisplayOption_DISPLAY_OPTION_QUICK_REVIEW,
+		pb.DisplayOption_DISPLAY_OPTION_INTERNAL_DEFAULT,
+		pb.DisplayOption_DISPLAY_OPTION_UNCLASSIFIED,
+		pb.DisplayOption_DISPLAY_OPTION_NORMAL,
 	}
-}
-
-// Discovery uses the CLI's dev-channel identity and requests all catalog slots.
-// Cascade gates model visibility on these fields, independently of chat identity.
-func discoveryMetadata(token string) *pb.Metadata {
-	return &pb.Metadata{
-		ApiKey: NormalizeToken(token), IdeName: "chisel", IdeVersion: "0.0.0-dev",
-		ExtensionName: "chisel", ExtensionVersion: "0.0.0-dev",
-		Os: "linux", Locale: "en", DisableTelemetry: true,
-		SupportedModelDisplays: []pb.DisplayOption{
-			pb.DisplayOption_DISPLAY_OPTION_MODEL_ROUTER,
-			pb.DisplayOption_DISPLAY_OPTION_QUICK_REVIEW,
-			pb.DisplayOption_DISPLAY_OPTION_INTERNAL_DEFAULT,
-			pb.DisplayOption_DISPLAY_OPTION_UNCLASSIFIED,
-			pb.DisplayOption_DISPLAY_OPTION_NORMAL,
-		},
-	}
+	return m
 }
 
 func (c *Client) request(ctx context.Context, base, path, contentType string, body []byte, token string) (*http.Response, error) {
@@ -175,9 +165,9 @@ func responseError(status int, b []byte) error {
 
 func (c *Client) Models(ctx context.Context, token string) ([]*pb.ClientModelConfig, error) {
 	out := &pb.GetCliModelConfigsResponse{}
-	err := c.unary(ctx, c.BaseURL, ModelsPath, token, &pb.GetCliModelConfigsRequest{Metadata: discoveryMetadata(token)}, out)
+	err := c.unary(ctx, c.BaseURL, ModelsPath, token, &pb.GetCliModelConfigsRequest{Metadata: c.discoveryMetadata(token)}, out)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("devin CLI model discovery (GetCliModelConfigs) failed: %w", err)
 	}
 	models := make([]*pb.ClientModelConfig, 0, len(out.ClientModelConfigs))
 	seen := map[string]bool{}
@@ -211,13 +201,13 @@ func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessa
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out := &pb.GetUserJwtResponse{}
-	if err := c.unary(ctx, c.BaseURL, UserJWTPath, token, &pb.GetUserJwtRequest{Metadata: Metadata(token)}, out); err != nil {
+	if err := c.unary(ctx, c.BaseURL, UserJWTPath, token, &pb.GetUserJwtRequest{Metadata: c.identity().Chat.metadata(token)}, out); err != nil {
 		return "", err
 	}
 	if out.UserJwt == "" {
 		return "", errors.New("devin returned no user JWT")
 	}
-	req.Metadata = Metadata(token)
+	req.Metadata = c.identity().Chat.metadata(token)
 	req.Metadata.UserJwt = out.UserJwt
 	base := c.BaseURL
 	if out.CustomApiServerUrl != "" {
@@ -381,7 +371,10 @@ func ReadFrame(r io.Reader) (byte, []byte, error) {
 }
 
 func (c *Client) Mint(ctx context.Context, key string) (string, error) {
-	b, _ := json.Marshal(map[string]any{"metadata": map[string]any{"api_key": key, "ide_name": "windsurf", "extension_name": "windsurf", "ide_version": "1.48.2", "extension_version": "1.48.2", "locale": "en", "os": "windows"}})
+	b, _ := json.Marshal(map[string]any{"metadata": struct {
+		ClientInfo
+		APIKey string `json:"api_key"`
+	}{c.identity().TokenExchange, key}})
 	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(c.BaseURL, "/")+MintPath, bytes.NewReader(b))
 	if err != nil {
 		return "", err

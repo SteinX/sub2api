@@ -29,7 +29,7 @@ func TestDevinTokenRecoveryExcludesRejectedTokenAcrossConcurrentRequests(t *test
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			a := &Account{ID: 1, Platform: PlatformDevin, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "cog_test"}}
-			key := d.runtimeKey(a)
+			key := d.runtimeKey(ctx, a)
 			d.runtime[key] = devinRuntime{token: tc.memory, tokenUntil: time.Now().Add(time.Minute)}
 			if err := d.store.Set(ctx, "devin:token:"+key, []byte(tc.shared), time.Minute); err != nil {
 				t.Fatal(err)
@@ -116,7 +116,7 @@ func TestDevinTokenMintRechecksSharedCacheAfterLockAcquisition(t *testing.T) {
 			const failed = "devin-session-token$rejected"
 			const recovered = "devin-session-token$minted"
 			if recovery {
-				if err := winner.store.Set(ctx, "devin:token:"+winner.runtimeKey(a), []byte(failed), time.Minute); err != nil {
+				if err := winner.store.Set(ctx, "devin:token:"+winner.runtimeKey(ctx, a), []byte(failed), time.Minute); err != nil {
 					t.Fatal(err)
 				}
 			}

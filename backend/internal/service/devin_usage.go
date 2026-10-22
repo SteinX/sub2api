@@ -11,10 +11,11 @@ import (
 // Usage shares credential/proxy-scoped caches and token recovery with chat and
 // model discovery. Failed probes are cached briefly without changing scheduling.
 func (s *DevinService) Usage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
+	ctx = devin.WithClientIdentity(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	key := s.runtimeKey(account)
+	key := s.runtimeKey(ctx, account)
 	cached := func() *UsageInfo {
 		s.mu.Lock()
 		defer s.mu.Unlock()

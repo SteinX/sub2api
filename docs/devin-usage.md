@@ -22,7 +22,7 @@ Devin 支持长期 API Key、浏览器登录和导入会话。添加时保存名
 
 后端通过 JSON Connect 调用 `/exa.seat_management_pb.SeatManagementService/GetUserStatus`，使用 Bearer 会话凭据和 `metadata.api_key`。支持 camelCase / snake_case 响应字段及字符串形式的数字。协议参考为 [devin2api 的 GetUserStatus 实现](https://github.com/WncFht/devin2api/blob/e8547b6d60cb09fddc6debe44bafdfa69867a963/internal/ccpanel/upstream.go)。
 
-查询复用 Devin 的账号代理、出站地址校验和会话恢复逻辑。长期 API Key 遇到 401 时恢复会话并重试一次；仅会话凭据的账号提示重新授权。403 提示账号或套餐不支持查询，429 提示稍后重试。查询错误不修改账号调度状态，也不向前端透出上游原始诊断。
+查询复用 Devin 的账号代理、出站地址校验和会话恢复逻辑；JSON 元数据沿用 `token_exchange` 客户端身份配置，同一次查询固定身份快照，身份配置更新会切换用量缓存。长期 API Key 遇到 401 时恢复会话并重试一次；仅会话凭据的账号提示重新授权。403 提示账号或套餐不支持查询，429 提示稍后重试。查询错误不修改账号调度状态，也不向前端透出上游原始诊断。
 
 前后端成功结果最多缓存三分钟（若配额先重置则提前过期），失败结果缓存一分钟；前端也保留后端观测时间，不延长已有快照寿命。同一凭据的并发查询合并，调用方取消不会中断共享查询。凭据、上游地址或代理 ID 改变会使用新的后端缓存；重新授权或切换代理也会触发前端刷新。模型同步返回空目录时保留原有模型，避免意外清空调度条件。
 

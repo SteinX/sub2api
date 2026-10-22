@@ -101,6 +101,30 @@ func TestDevinUsageRecoversAPIKeySession(t *testing.T) {
 	require.Equal(t, int32(2), probes.Load())
 }
 
+func TestDevinUsageCacheTracksClientIdentity(t *testing.T) {
+	identity := devin.DefaultClientIdentity()
+	devin.SetClientIdentityResolver(func(context.Context) devin.ClientIdentity { return identity })
+	t.Cleanup(func() { devin.SetClientIdentityResolver(nil) })
+	var probes atomic.Int32
+	upstream := &devinHTTP{handle: func(req *http.Request) (*http.Response, error) {
+		probes.Add(1)
+		return devinReply(200, []byte(`{"userStatus":{}}`)), nil
+	}}
+	d := NewDevinService(nil, nil, upstream, &config.Config{}, nil)
+	account := &Account{ID: 6, Credentials: map[string]any{"access_token": "session"}}
+	ctx := context.Background()
+	pinned := devin.WithClientIdentity(ctx)
+	_, err := d.Usage(ctx, account, false)
+	require.NoError(t, err)
+	identity.Revision += ".next"
+	_, err = d.Usage(pinned, account, false)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), probes.Load(), "in-flight snapshots retain their existing usage cache")
+	_, err = d.Usage(ctx, account, false)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), probes.Load(), "new identity revisions must not reuse the old usage cache")
+}
+
 func TestDevinUsageErrorsAreSafeCachedAndRetryable(t *testing.T) {
 	for _, tc := range []struct {
 		status int

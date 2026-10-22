@@ -45,10 +45,10 @@ func (c *Client) Usage(ctx context.Context, token string) (*UsageStatus, error) 
 		}
 	}
 	token = NormalizeToken(token)
-	body, err := json.Marshal(map[string]any{"metadata": map[string]any{
-		"api_key": token, "ide_name": "windsurf", "extension_name": "windsurf",
-		"ide_version": "1.48.2", "extension_version": "1.48.2", "locale": "en", "os": "windows",
-	}})
+	body, err := json.Marshal(map[string]any{"metadata": struct {
+		ClientInfo
+		APIKey string `json:"api_key"`
+	}{c.identity().TokenExchange, token}})
 	if err != nil {
 		return nil, err
 	}
