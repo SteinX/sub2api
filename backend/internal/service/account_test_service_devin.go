@@ -11,7 +11,7 @@ import (
 )
 
 func (s *AccountTestService) testDevinAccountConnection(c *gin.Context, a *Account, model, prompt string) error {
-	ctx := c.Request.Context()
+	ctx := devin.WithClientIdentity(c.Request.Context())
 	d := NewDevinService(s.accountRepo, nil, s.httpUpstream, s.cfg, nil)
 	models, err := d.Models(ctx, a)
 	if err != nil {

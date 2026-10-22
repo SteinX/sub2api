@@ -17,6 +17,7 @@ import (
 func (s *OpenAIGatewayService) SetDevinService(d *DevinService) { s.devin = d }
 
 func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context, a *Account, body []byte, protocol, cacheKey, mapped string) (*OpenAIForwardResult, error) {
+	ctx = devin.WithClientIdentity(ctx)
 	started := time.Now()
 	if s.devin == nil {
 		return nil, fmt.Errorf("devin service is unavailable")

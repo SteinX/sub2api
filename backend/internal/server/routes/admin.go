@@ -581,6 +581,9 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	{
 		adminSettings.GET("", h.Admin.Setting.GetSettings)
 		adminSettings.PUT("", h.Admin.Setting.UpdateSettings)
+		adminSettings.GET("/devin-client-identity", h.Admin.Setting.GetDevinClientIdentity)
+		adminSettings.PUT("/devin-client-identity", h.Admin.Setting.UpdateDevinClientIdentity)
+		adminSettings.POST("/devin-client-identity/sync", h.Admin.Setting.SyncDevinClientIdentity)
 		adminSettings.POST("/test-smtp", h.Admin.Setting.TestSMTPConnection)
 		adminSettings.POST("/send-test-email", h.Admin.Setting.SendTestEmail)
 		adminSettings.GET("/email-templates", h.Admin.Setting.ListEmailTemplates)
