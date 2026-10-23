@@ -7,6 +7,7 @@ const { run, sourceWork, publication, publicImage, dispatch, readState, config, 
 const SHA = 'a'.repeat(40);
 const HEAD = 'b'.repeat(40);
 const TAG = 'v0.2.17-stx.1';
+const SESSION = '1234567890abcdef1234567890abcdef';
 const env = { DEVIN_ORG_ID: 'org-test', DEVIN_API_KEY: 'cog_test', DEVIN_MAX_ACU: '10', REPAIR_MODE: 'repair', SOURCE_RUN_ID: '100' };
 const settings = config(env);
 const missing = () => Promise.reject(Object.assign(new Error('Not found'), { status: 404 }));
@@ -39,6 +40,7 @@ function fixture(options = {}) {
     listForRepo: async () => ({ data: issue ? [issue] : [] }),
     create: async args => {
       calls.push({ name: 'createIssue', args });
+      if (options.issuesDisabled) throw Object.assign(new Error('Issues has been disabled in this repository.'), { status: 410 });
       issue = { number: 9, user: { login: 'github-actions[bot]' }, body: args.body };
       return { data: issue };
     },
@@ -49,14 +51,16 @@ function fixture(options = {}) {
       return { data: issue };
     },
   };
-  const github = { rest: { actions: methods, repos: methods, pulls: methods, issues: methods, git: { getRef: missing } },
+  const github = { rest: { actions: methods, repos: { ...methods,
+    get: async () => ({ data: { has_issues: !options.issuesDisabled } }) },
+    pulls: methods, issues: methods, git: { getRef: missing } },
     paginate: async (method, args) => (await method(args)).data };
   const core = { info: message => calls.push({ name: 'info', message }), setSecret() {} };
   const context = { repo: { owner: 'SteinX', repo: 'sub2api' }, payload: options.payload || {} };
   const api = async (method, path, body) => {
     calls.push({ name: 'api', method, path, body });
     if (options.apiError && method === 'POST') throw options.apiError;
-    return { session_id: 'devin-test', status: 'running', status_detail: 'working', ...options.session };
+    return { session_id: SESSION, status: 'running', status_detail: 'working', ...options.session };
   };
   return { github, core, context, calls, api, source, imageCheck: async () => options.image !== false,
     get issue() { return issue; } };
@@ -71,6 +75,15 @@ test('credential check is read-only and never starts a billable session or track
   await execute(f, { REPAIR_MODE: 'check', SOURCE_RUN_ID: '' });
   assert.deepEqual(f.calls.filter(call => call.name === 'api').map(call => [call.method, call.path]), [['GET', 'sessions?first=1']]);
   assert.equal(f.issue, undefined);
+});
+
+test('disabled Issues fail preflight and repair with actionable guidance before any Devin write', async () => {
+  for (const mode of ['check', 'repair']) {
+    const f = fixture({ issuesDisabled: true });
+    await assert.rejects(execute(f, { REPAIR_MODE: mode }), /Enable Issues.*Settings/);
+    assert.equal(f.calls.some(call => call.name === 'api'), false);
+    assert.equal(f.issue, undefined);
+  }
 });
 
 test('only the fork can dispatch; configuration rejects missing credentials and unbounded budgets', async () => {
@@ -96,10 +109,33 @@ test('current conflicts reserve first and create one bounded cloud session with 
   assert.match(post.body.prompt, /Do not deploy servers/);
   assert.match(f.calls.find(call => call.name === 'updateIssue').args.body, /"phase":"reserved"/);
   assert.equal(readState(f.issue).phase, 'active');
-  assert.equal(readState(f.issue).sessionId, 'devin-test');
+  assert.equal(readState(f.issue).sessionId, SESSION);
   const posts = () => f.calls.filter(call => call.name === 'api' && call.method === 'POST');
   await execute(f);
   assert.equal(posts().length, 1);
+});
+
+test('opaque v3 and legacy prefixed session IDs can be restored and monitored', async () => {
+  for (const id of [SESSION, 'devin-test']) {
+    const f = fixture({ session: { session_id: id } });
+    await execute(f);
+    assert.equal(readState(f.issue).sessionId, id);
+    assert.ok(f.issue.body.includes(`https://app.devin.ai/sessions/${id}`));
+    f.calls.length = 0;
+    await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
+    assert.deepEqual(f.calls.filter(call => call.name === 'api').map(call => [call.method, call.path]),
+      [['GET', `sessions/${id}`]]);
+  }
+});
+
+test('malformed successful session responses preserve reservations and cannot trigger duplicate writes', async () => {
+  for (const id of [undefined, '', 123, '../other', 'id?query=x', 'id#fragment', 'id\nheader', 'a'.repeat(129)]) {
+    const f = fixture({ session: { session_id: id } });
+    await assert.rejects(execute(f), /Invalid Devin session ID/);
+    assert.equal(readState(f.issue).phase, 'reserved');
+    await assert.rejects(execute(f), /uncertain/);
+    assert.equal(f.calls.filter(call => call.name === 'api' && call.method === 'POST').length, 1);
+  }
 });
 
 test('a missing release tag still dispatches a planning failure before any PR exists', async () => {
@@ -166,7 +202,7 @@ test('new failing code is sent to the existing session, not a replacement', asyn
   f.github.rest.pulls.get = async () => ({ data: { number: 42, mergeable: true, head: { sha: 'c'.repeat(40), ref: 'sync/upstream-v0.2.17', repo: { full_name: 'SteinX/sub2api' } }, base: { ref: 'main' } } });
   await execute(f);
   const posts = f.calls.filter(call => call.name === 'api' && call.method === 'POST');
-  assert.deepEqual(posts.map(call => call.path), ['sessions', 'sessions/devin-test/messages']);
+  assert.deepEqual(posts.map(call => call.path), ['sessions', `sessions/${SESSION}/messages`]);
 });
 
 test('timeouts and a lost GitHub save keep the reservation and block duplicate sessions', async () => {
