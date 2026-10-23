@@ -80,8 +80,6 @@ jobs:
       - name: Tag tested commit and start fork release
         if: steps.plan.outputs.publish == 'true'
         uses: actions/github-script@v8
-        with:
-          github-token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
         env:
           SYNC_SHA: ${{ steps.plan.outputs.sha }}
           SYNC_TAG: ${{ steps.plan.outputs.tag }}
@@ -89,6 +87,7 @@ jobs:
           SYNC_PR: ${{ steps.plan.outputs.pr_number }}
           SYNC_BASE_SHA: ${{ steps.plan.outputs.base_sha }}
         with:
+          github-token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             await require(process.env.RUNNER_TEMP + '/sync-upstream.cjs').publishOrWait(
               {github, context, core},
