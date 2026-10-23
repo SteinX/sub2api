@@ -876,6 +876,42 @@ func TestAsyncSummaryPreservesAppendedTailAndBillsOnce(t *testing.T) {
 	require.Equal(t, 1, charges)
 	require.NoError(t, e.Close(context.Background()))
 }
+
+func TestBackgroundReservationSurvivesForegroundCompletion(t *testing.T) {
+	e := New(newMem())
+	x := &fakeExecutor{safe: 20000, allowAux: true, started: make(chan struct{}), finish: make(chan struct{})}
+	s, op := seedSummary(t, e)
+	id := launchSummary(t, e, op, x, false)
+	<-x.started
+	j, _, err := load[Job](context.Background(), e.Store, s.Scope, "job", id)
+	require.NoError(t, err)
+	require.Positive(t, j.AllocatedBytes)
+	require.Equal(t, j.AllocatedBytes, j.ReservedBytes)
+	a, _, err := load[Attempt](context.Background(), e.Store, s.Scope, "attempt", j.AttemptID)
+	require.NoError(t, err)
+	require.Equal(t, id, a.ReservationID)
+	ctx, l, release, err := e.lease(context.Background(), s.Scope, "session", s.ID)
+	require.NoError(t, err)
+	s, sr, err := e.LoadSession(ctx, s.Scope, s.ID)
+	require.NoError(t, err)
+	s.ReservedBytes, s.ReservationOperationID = 0, ""
+	require.NoError(t, e.save(ctx, sr, s, s.Status, &l, nil, &s.Policy))
+	release()
+	j, _, err = load[Job](context.Background(), e.Store, s.Scope, "job", id)
+	require.NoError(t, err)
+	require.Positive(t, j.ReservedBytes, "foreground publication cannot clear a background promise")
+	close(x.finish)
+	waitReady(t, e, id)
+	j, _, err = load[Job](context.Background(), e.Store, s.Scope, "job", id)
+	require.NoError(t, err)
+	require.Zero(t, j.ReservedBytes)
+	require.Positive(t, j.AllocatedBytes, "the immutable partition cannot be returned to the foreground")
+	a, _, err = load[Attempt](context.Background(), e.Store, s.Scope, "attempt", j.AttemptID)
+	require.NoError(t, err)
+	_, err = e.Store.Blob(context.Background(), s.Scope, a.ResponseRef)
+	require.NoError(t, err)
+	require.NoError(t, e.Close(context.Background()))
+}
 func TestCancelledLateSummaryIsSettledAndNeverApplied(t *testing.T) {
 	e := New(newMem())
 	x := &fakeExecutor{safe: 20000, allowAux: true, late: true, started: make(chan struct{}), finish: make(chan struct{})}

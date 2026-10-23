@@ -191,6 +191,65 @@ func TestContextStorePostgresRetainsUnsettledBodiesAndRecoveryWindow(t *testing.
 	require.ErrorIs(t, err, mc.ErrNotFound)
 }
 
+func TestContextStorePostgresBackgroundReservationOutlivesForeground(t *testing.T) {
+	for _, phase := range []string{"prepared", "dispatching"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx := context.Background()
+			db := contextTestDB(t)
+			s := NewContextSessionStore(db)
+			p := mc.DefaultPolicy()
+			p.MaxHistoryBytes, p.MaxUserHistoryBytes = 1<<20, 1500<<10
+			a := contextRecord("session", "a", 1, 2)
+			a.Data = json.RawMessage(`{"operation_id":"op-a","reservation_operation_id":"op-a","reserved_bytes":921600}`)
+			_, err := s.Create(ctx, a, &p)
+			require.NoError(t, err)
+			la, err := s.Acquire(ctx, a.Scope, a.Kind, a.ID, "owner-a", time.Minute)
+			require.NoError(t, err)
+			require.NoError(t, s.CAS(ctx, a, &la, nil, &p))
+			bg := contextRecord("attempt", "background", 1, 2)
+			bg.Status = phase
+			bgData := map[string]any{"operation_id": "op-a", "session_id": "a", "reservation_id": "bg-job", "deadline": time.Now().Add(time.Minute)}
+			bg.Data, _ = json.Marshal(bgData)
+			_, err = s.Create(ctx, bg, nil)
+			require.NoError(t, err)
+			job := contextRecord("job", "bg-job", 1, 2)
+			job.Data = json.RawMessage(`{"operation_id":"op-a","session_id":"a","attempt_id":"background","allocated_bytes":307200,"reserved_bytes":307200}`)
+			_, err = s.Create(ctx, job, nil)
+			require.NoError(t, err)
+			b := contextRecord("session", "b", 1, 3)
+			b.Data = json.RawMessage(`{"operation_id":"op-b","reserved_bytes":512000}`)
+			_, err = s.Create(ctx, b, &p)
+			require.NoError(t, err)
+			lb, err := s.Acquire(ctx, b.Scope, b.Kind, b.ID, "owner-b", time.Minute)
+			require.NoError(t, err)
+			require.NoError(t, s.CAS(ctx, b, &lb, nil, &p), "background allocation partitions capacity without double counting")
+			fg := contextRecord("attempt", "foreground", 1, 2)
+			fg.Data = json.RawMessage(`{"operation_id":"op-a","session_id":"a","response_ref":"foreground-result"}`)
+			_, err = s.Create(ctx, fg, nil)
+			require.NoError(t, err)
+			require.Error(t, s.CAS(ctx, fg, nil, []mc.Blob{contextBlob("foreground-result", "a", "private", bytes.Repeat([]byte("f"), 800<<10))}, &p), "foreground output cannot take the background share")
+			require.NoError(t, s.CAS(ctx, fg, nil, []mc.Blob{contextBlob("foreground-result", "a", "private", bytes.Repeat([]byte("f"), 500<<10))}, &p))
+			a.Data = json.RawMessage(`{"operation_id":"op-a","reservation_operation_id":"op-a","reserved_bytes":768000}`)
+			require.NoError(t, s.CAS(ctx, a, &la, []mc.Blob{contextBlob("summary-projection", "a", "private", bytes.Repeat([]byte("s"), 150<<10))}, &p), "logical projections consume the existing parent promise")
+			a.Data = json.RawMessage(`{"reserved_bytes":0}`)
+			require.NoError(t, s.CAS(ctx, a, &la, []mc.Blob{contextBlob("published", "a", "public", bytes.Repeat([]byte("p"), 50<<10))}, &p))
+			other := contextRecord("attempt", "other", 1, 3)
+			other.Data = json.RawMessage(`{"operation_id":"op-b","session_id":"b","response_ref":"other-result"}`)
+			_, err = s.Create(ctx, other, nil)
+			require.NoError(t, err)
+			require.Error(t, s.CAS(ctx, other, nil, []mc.Blob{contextBlob("other-result", "b", "private", bytes.Repeat([]byte("b"), 800<<10))}, &p), "a completed foreground cannot release the still-running background share")
+			require.NoError(t, s.CAS(ctx, other, nil, []mc.Blob{contextBlob("other-result", "b", "private", bytes.Repeat([]byte("b"), 300<<10))}, &p))
+			bg.Status = "terminal"
+			bgData["response_ref"] = "background-result"
+			bg.Data, _ = json.Marshal(bgData)
+			require.NoError(t, s.CAS(ctx, bg, nil, []mc.Blob{contextBlob("background-result", "a", "private", bytes.Repeat([]byte("g"), 300<<10))}, &p), "the paid background result uses only its own durable promise")
+			data, err := s.Blob(ctx, bg.Scope, "background-result")
+			require.NoError(t, err)
+			require.Len(t, data, 300<<10)
+		})
+	}
+}
+
 func TestContextStorePostgresRetiresInactiveReservationsAfterDrain(t *testing.T) {
 	for _, inactive := range []string{"cancelled", "expired"} {
 		for _, completion := range []string{"terminal", "drained", "not_started", "leased_preparation"} {

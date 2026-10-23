@@ -28,6 +28,27 @@ const contextReservationOperation = `CASE WHEN c.kind='operation' THEN c.id ELSE
  (SELECT j.data->>'operation_id' FROM context_records j WHERE j.scope=c.scope AND j.kind='job'
  AND j.id=COALESCE(NULLIF(c.data->>'job_id',''),c.data->>'applied_job_id')),'') END`
 
+// Background allocations are immutable even after their unused capacity retires,
+// so their share is never returned to a still-running foreground admission.
+const contextReservationAllocated = `CASE WHEN c.kind='job' THEN 0 ELSE
+ COALESCE((SELECT sum(COALESCE((j.data->>'allocated_bytes')::bigint,0))
+ FROM context_records j WHERE j.scope=c.scope AND j.kind='job'
+ AND j.data->>'operation_id'=` + contextReservationOperation + `),0) END`
+
+const contextReservationConsumed = `COALESCE((SELECT sum(h.size_bytes)
+ FROM context_records a JOIN context_history h ON h.scope=a.scope AND h.id=a.data->>'response_ref'
+ WHERE a.scope=c.scope AND a.kind='attempt' AND a.data->>'operation_id'=` + contextReservationOperation + `
+ AND (c.kind='job' AND a.data->>'reservation_id'=c.id
+ OR c.kind<>'job' AND NULLIF(a.data->>'reservation_id','') IS NULL)),0)`
+
+const contextReservationPending = `EXISTS(SELECT 1 FROM context_records a
+ WHERE a.scope=c.scope AND a.kind='attempt'
+ AND a.data->>'operation_id'=` + contextReservationOperation + `
+ AND (c.kind='job' AND a.data->>'reservation_id'=c.id
+ OR c.kind<>'job' AND NULLIF(a.data->>'reservation_id','') IS NULL)
+ AND a.status IN ('prepared','dispatching','unknown')
+ AND (a.data->>'deadline')::timestamptz+interval '120 seconds'>NOW())`
+
 func scanContext(row interface{ Scan(...any) error }) (*mc.Record, error) {
 	r := new(mc.Record)
 	err := row.Scan(&r.Scope, &r.Kind, &r.ID, &r.UserID, &r.KeyID, &r.AccountID, &r.Revision, &r.Status, &r.Data, &r.ExpiresAt, &r.Cancelled)
@@ -222,24 +243,17 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 	// still journal a call, or an attempt could still persist a late result:
 	// its execution deadline plus the 90s provider drain and 30s persistence.
 	rows, err := tx.QueryContext(ctx, `SELECT c.scope,c.kind,c.id,c.data,`+contextReservationOperation+`,
- COALESCE((SELECT sum(h.size_bytes) FROM context_records a JOIN context_history h
- ON h.scope=a.scope AND h.id=a.data->>'response_ref'
- WHERE a.scope=c.scope AND a.kind='attempt' AND a.data->>'operation_id'=
- `+contextReservationOperation+`),0)
- FROM context_records c WHERE c.user_id=$1 AND c.kind IN ('session','operation')
+ `+contextReservationConsumed+`,`+contextReservationAllocated+`
+ FROM context_records c WHERE c.user_id=$1 AND c.kind IN ('session','operation','job')
  AND (c.data->>'reserved_bytes')::bigint>0
- AND (NOT c.cancelled AND c.expires_at>NOW() AND c.status NOT IN ('failed','completed')
+ AND (c.kind<>'job' AND (NOT c.cancelled AND c.expires_at>NOW() AND c.status NOT IN ('failed','completed')
  AND NOT EXISTS(SELECT 1 FROM context_records finished_job
  WHERE finished_job.scope=c.scope AND finished_job.kind='job'
  AND (c.kind='operation' OR NULLIF(c.data->>'operation_id','') IS NULL)
  AND finished_job.id=COALESCE(NULLIF(c.data->>'job_id',''),c.data->>'applied_job_id')
  AND finished_job.data->>'operation_id'=`+contextReservationOperation+`
  AND finished_job.status IN ('failed','stale','applied','compacted','no_op'))
- OR c.lease_until>NOW() OR EXISTS(
- SELECT 1 FROM context_records a WHERE a.scope=c.scope AND a.kind='attempt'
- AND a.data->>'operation_id'=`+contextReservationOperation+`
- AND a.status IN ('prepared','dispatching','unknown')
- AND (a.data->>'deadline')::timestamptz+interval '120 seconds'>NOW()))
+ OR c.lease_until>NOW()) OR `+contextReservationPending+`)
  AND NOT(c.scope=$2 AND c.kind=$3 AND c.id=$4)`, v.UserID, v.Scope, v.Kind, v.ID)
 	if err != nil {
 		return err
@@ -249,11 +263,12 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 		operation       string
 		data            []byte
 		consumed        int64
+		allocated       int64
 	}
 	var admissions []reservation
 	for rows.Next() {
 		var admission reservation
-		if err = rows.Scan(&admission.scope, &admission.kind, &admission.id, &admission.data, &admission.operation, &admission.consumed); err != nil {
+		if err = rows.Scan(&admission.scope, &admission.kind, &admission.id, &admission.data, &admission.operation, &admission.consumed, &admission.allocated); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -266,23 +281,19 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 	if err = rows.Close(); err != nil {
 		return err
 	}
-	if v.Kind == "session" || v.Kind == "operation" {
-		var consumed int64
+	if v.Kind == "session" || v.Kind == "operation" || v.Kind == "job" {
+		var consumed, allocated int64
 		opID := ""
-		if err = tx.QueryRowContext(ctx, `SELECT `+contextReservationOperation+` FROM
- (SELECT $1::text AS scope,$2::text AS kind,$3::text AS id,$4::jsonb AS data) c`, v.Scope, v.Kind, v.ID, []byte(v.Data)).Scan(&opID); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT `+contextReservationOperation+`,`+contextReservationConsumed+`,`+contextReservationAllocated+` FROM
+ (SELECT $1::text AS scope,$2::text AS kind,$3::text AS id,$4::jsonb AS data) c`, v.Scope, v.Kind, v.ID, []byte(v.Data)).Scan(&opID, &consumed, &allocated); err != nil {
 			return err
 		}
-		if err = tx.QueryRowContext(ctx, `SELECT COALESCE(sum(h.size_bytes),0)
- FROM context_records a JOIN context_history h ON h.scope=a.scope AND h.id=a.data->>'response_ref'
- WHERE a.scope=$1 AND a.kind='attempt' AND a.data->>'operation_id'=$2`, v.Scope, opID).Scan(&consumed); err != nil {
-			return err
-		}
-		admissions = append(admissions, reservation{scope: v.Scope, kind: v.Kind, id: v.ID, operation: opID, data: v.Data, consumed: consumed})
+		admissions = append(admissions, reservation{scope: v.Scope, kind: v.Kind, id: v.ID, operation: opID, data: v.Data, consumed: consumed, allocated: allocated})
 	}
-	var attemptOperation string
+	var attemptOperation, attemptReservation string
 	if v.Kind == "attempt" {
 		_ = json.Unmarshal(metadata["operation_id"], &attemptOperation)
+		_ = json.Unmarshal(metadata["reservation_id"], &attemptReservation)
 	}
 	var sessionReserved int64
 	for _, admission := range admissions {
@@ -293,16 +304,17 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 		if err = jsonUnmarshalContext(admission.data, &data); err != nil {
 			return err
 		}
-		if data.Reserved < 0 {
+		if data.Reserved < 0 || admission.allocated < 0 {
 			return mc.E("policy_invalid", "invalid storage reservation", 503)
 		}
 		if admission.kind == "session" {
 			data.SessionID = admission.id
 		}
-		if attemptOperation != "" && admission.scope == v.Scope && admission.operation == attemptOperation {
+		if attemptOperation != "" && admission.scope == v.Scope && admission.operation == attemptOperation &&
+			(admission.kind == "job" && admission.id == attemptReservation || admission.kind != "job" && attemptReservation == "") {
 			admission.consumed += incoming
 		}
-		remaining := max(data.Reserved-admission.consumed, 0)
+		remaining := max(data.Reserved-admission.allocated-admission.consumed, 0)
 		reserved += remaining
 		if sessionID != "" && admission.scope == v.Scope && data.SessionID == sessionID {
 			sessionReserved += remaining

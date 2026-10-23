@@ -152,6 +152,8 @@ func (e *Engine) apply(ctx context.Context, s *Session, sr *Record, l *Lease, ba
 	s.AppliedJobAfter = budget.InputEstimate
 	s.LastBudget = &budget
 	s.HistoryBytes += int64(ref.Bytes)
+	// Logical summary output consumes its share before foreground publication.
+	s.ReservedBytes = max(s.ReservedBytes-int64(ref.Bytes), 0)
 	if j.Trigger == "manual" && s.ReservationOperationID == j.OperationID {
 		// Applying a manual summary and releasing its reservation are one
 		// session commit, so interruption cannot leave quota permanently held.
@@ -331,6 +333,13 @@ func (e *Engine) startSummary(ctx context.Context, s *Session, sr *Record, l *Le
 		return false, err
 	}
 	a.Deadline = j.Deadline
+	if background {
+		// This immutable allocation partitions the turn's existing promise;
+		// its physical result remains funded after the foreground completes.
+		j.AllocatedBytes = int64(summaryLimit(s.Policy, child) * 2 * 64)
+		j.ReservedBytes = j.AllocatedBytes
+		a.ReservationID = j.ID
+	}
 	if err = e.save(ctx, ar, a, a.State, nil, nil, nil); err != nil {
 		stop()
 		return false, err
@@ -376,6 +385,7 @@ func (e *Engine) startSummary(ctx context.Context, s *Session, sr *Record, l *Le
 		if callErr != nil {
 			j.Reason = typed(callErr).Code
 		}
+		j.ReservedBytes = 0
 		persist, cancel := context.WithTimeout(context.WithoutCancel(bounded), 10*time.Second)
 		defer cancel()
 		_ = e.save(persist, jr, j, j.State, nil, nil, nil)

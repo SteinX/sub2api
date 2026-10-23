@@ -147,25 +147,28 @@ type Attempt struct {
 	StartedAt      time.Time                 `json:"started_at"`
 	Deadline       time.Time                 `json:"deadline"`
 	Policy         Policy                    `json:"policy"`
+	ReservationID  string                    `json:"reservation_id,omitempty"`
 }
 type Job struct {
 	Model string                    `json:"model"`
 	Usage *apicompat.ResponsesUsage `json:"usage,omitempty"`
 	Owner
-	ID          string      `json:"id"`
-	OperationID string      `json:"operation_id"`
-	SessionID   string      `json:"session_id,omitempty"`
-	Snapshot    cc.Snapshot `json:"snapshot"`
-	State       string      `json:"state"`
-	Trigger     string      `json:"trigger"`
-	AttemptID   string      `json:"attempt_id"`
-	Summary     *cc.Summary `json:"summary,omitempty"`
-	Target      int         `json:"target"`
-	Before      int         `json:"before"`
-	After       int         `json:"after"`
-	Reason      string      `json:"reason,omitempty"`
-	Accounted   bool        `json:"accounted"`
-	Deadline    time.Time   `json:"deadline"`
+	ID             string      `json:"id"`
+	OperationID    string      `json:"operation_id"`
+	SessionID      string      `json:"session_id,omitempty"`
+	Snapshot       cc.Snapshot `json:"snapshot"`
+	State          string      `json:"state"`
+	Trigger        string      `json:"trigger"`
+	AttemptID      string      `json:"attempt_id"`
+	Summary        *cc.Summary `json:"summary,omitempty"`
+	Target         int         `json:"target"`
+	Before         int         `json:"before"`
+	After          int         `json:"after"`
+	Reason         string      `json:"reason,omitempty"`
+	Accounted      bool        `json:"accounted"`
+	Deadline       time.Time   `json:"deadline"`
+	ReservedBytes  int64       `json:"reserved_bytes,omitempty"`
+	AllocatedBytes int64       `json:"allocated_bytes,omitempty"`
 }
 type CompactResult struct {
 	Status     string                    `json:"status"`
