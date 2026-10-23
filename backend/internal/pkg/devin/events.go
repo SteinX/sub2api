@@ -30,11 +30,54 @@ type EventDecoder struct {
 	ActualModel     string
 	BillingModel    string
 	Evidence        ModelEvidence
+	emptyArguments  map[string]bool
 }
 
-func NewEventDecoder(model string, emit func(apicompat.ResponsesStreamEvent) error) *EventDecoder {
+func NewEventDecoder(model string, emit func(apicompat.ResponsesStreamEvent) error, tools ...*pb.ChatToolDefinition) *EventDecoder {
 	store := false
-	return &EventDecoder{Response: apicompat.ResponsesResponse{ID: "resp_" + uuid.NewString(), Object: "response", CreatedAt: time.Now().Unix(), Model: model, Status: "in_progress", Store: &store, Output: []apicompat.ResponsesOutput{}}, emit: emit, active: -1, calls: map[string]int{}}
+	d := &EventDecoder{Response: apicompat.ResponsesResponse{ID: "resp_" + uuid.NewString(), Object: "response", CreatedAt: time.Now().Unix(), Model: model, Status: "in_progress", Store: &store, Output: []apicompat.ResponsesOutput{}}, emit: emit, active: -1, calls: map[string]int{}, emptyArguments: map[string]bool{}}
+	for _, tool := range tools {
+		if tool != nil && acceptsEmptyToolArguments(tool.JsonSchemaString) {
+			d.emptyArguments[tool.Name] = true
+		}
+	}
+	return d
+}
+
+// Some native models omit arguments_json for a completed no-argument call.
+// Only simple declared object schemas with no required properties may become
+// {}. Unknown constraints and partial JSON must retain the incomplete error.
+func acceptsEmptyToolArguments(raw string) bool {
+	var schema map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &schema) != nil || schema == nil {
+		return false
+	}
+	var kind string
+	if json.Unmarshal(schema["type"], &kind) != nil || kind != "object" {
+		return false
+	}
+	for key, value := range schema {
+		switch key {
+		case "type", "title", "description", "$schema", "$comment", "examples":
+		case "properties":
+			var properties map[string]json.RawMessage
+			if json.Unmarshal(value, &properties) != nil || properties == nil {
+				return false
+			}
+		case "required":
+			var required []string
+			if json.Unmarshal(value, &required) != nil || required == nil || len(required) > 0 {
+				return false
+			}
+		case "additionalProperties":
+			if string(value) != "true" && string(value) != "false" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 func (d *EventDecoder) event(e apicompat.ResponsesStreamEvent) error {
 	e.SequenceNumber = d.seq
@@ -212,6 +255,12 @@ func (d *EventDecoder) Finish() error {
 		item := &d.Response.Output[i]
 		if item.Type != "function_call" {
 			continue
+		}
+		if strings.TrimSpace(item.Arguments) == "" && d.emptyArguments[item.Name] && (d.stop == pb.StopReason_STOP_REASON_FUNCTION_CALL || d.stop == pb.StopReason_STOP_REASON_STOP_PATTERN) {
+			item.Arguments = `{}`
+			if err := d.event(apicompat.ResponsesStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: i, ItemID: item.ID, CallID: item.CallID, Delta: `{}`}); err != nil {
+				return err
+			}
 		}
 		if !json.Valid([]byte(item.Arguments)) {
 			return fmt.Errorf("devin returned incomplete tool arguments")

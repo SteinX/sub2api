@@ -342,6 +342,7 @@ func provideCleanup(
 			{"OpenAIWSPool", func() error {
 				if openAIGateway != nil {
 					openAIGateway.CloseOpenAIWSPool()
+					return openAIGateway.CloseDevinCacheWarm(ctx)
 				}
 				return nil
 			}},

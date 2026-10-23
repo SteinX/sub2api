@@ -6,6 +6,28 @@ import (
 	"testing"
 )
 
+func TestFusionCatalogFastAliasPreservesEffortAndLane(t *testing.T) {
+	for _, fast := range []bool{true, false} {
+		models := inferenceModels("gpt-6-1-sol-high", "gpt-6-1-sol-high-priority", "worker")
+		if fast {
+			models[1].ModelFamilyMetadata = &pb.ModelFamilyMetadata{Entries: []*pb.ModelFamilyMetadataEntry{{Key: "Fast Mode", Value: &pb.ModelFamilyMetadataValue{Order: 1}}}}
+		}
+		profile, err := InferProfile("fusion-gpt-6-1-sol-high-fast-sidekick-worker", models)
+		if fast {
+			require.NoError(t, err)
+			require.Equal(t, "gpt-6-1-sol-high-priority", profile.LeadModel)
+			require.True(t, profile.KeepalivePolicy().Enabled)
+		} else {
+			require.Error(t, err)
+		}
+		_, err = InferProfile("fusion-gpt-6-1-sol-max-fast-sidekick-worker", models)
+		require.Error(t, err, "must not change the requested effort")
+		models[1].Disabled = true
+		_, err = InferProfile("fusion-gpt-6-1-sol-high-fast-sidekick-worker", models)
+		require.Error(t, err, "must not fall back to ordinary high when Fast is disabled")
+	}
+}
+
 func inferenceModels(ids ...string) []*pb.ClientModelConfig {
 	var models []*pb.ClientModelConfig
 	for _, id := range ids {
@@ -70,4 +92,19 @@ func TestFusionInferenceUsesConcreteCatalogAliasAndNeverPublicHarness(t *testing
 	require.NoError(t, err)
 	require.Equal(t, "concrete-lead", p.LeadModel)
 	require.Equal(t, "worker", p.SidekickModel)
+}
+
+func TestFusionInfersNativeMembersWithClientHarnessHints(t *testing.T) {
+	const public = "fusion-claude-opus-5-5-medium-sidekick-swe-2-medium"
+	models := inferenceModels("claude-opus-5-5-medium", "swe-2-medium")
+	models[0].ModelInfo.HarnessUids = []string{"strawberry-pancake"}
+	models[1].ModelInfo.HarnessUids = []string{"swe-1p6-exec", "swe-1p6", "swe-1p5"}
+	models = append(models, &pb.ClientModelConfig{ModelUid: public, ModelInfo: &pb.ModelInfo{IsModelRouter: true, HarnessUids: []string{"fusion", "strawberry-pancake"}}})
+	profile, err := InferProfile(public, models)
+	require.NoError(t, err)
+	require.Equal(t, models[0].ModelUid, profile.LeadModel)
+	require.Equal(t, models[1].ModelUid, profile.SidekickModel)
+	models[1].ModelInfo.HarnessUids = append(models[1].ModelInfo.HarnessUids, "unverified-future-harness")
+	_, err = InferProfile(public, models)
+	requireCode(t, err, "pair_unresolved")
 }

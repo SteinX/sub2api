@@ -18,6 +18,23 @@ func DefaultProfile(public, lead, sidekick string) Profile {
 func normalizeMemberID(id string) string {
 	return strings.NewReplacer(".", "-", "_", "-").Replace(strings.ToLower(strings.TrimSpace(id)))
 }
+
+// The native catalog calls some advertised Fast variants "-priority". Resolve
+// that spelling only with the exact base/effort and explicit Fast Mode metadata;
+// never fall back to the ordinary lane when the Fast variant is unavailable.
+func catalogFastAlias(fragment string, m *pb.ClientModelConfig) bool {
+	fragment = normalizeMemberID(fragment)
+	uid := normalizeMemberID(devin.ModelID(m))
+	if !strings.HasSuffix(fragment, "-fast") || !strings.HasSuffix(uid, "-priority") || strings.TrimSuffix(fragment, "-fast") != strings.TrimSuffix(uid, "-priority") {
+		return false
+	}
+	for _, entry := range m.GetModelFamilyMetadata().GetEntries() {
+		if entry.GetKey() == "Fast Mode" && entry.GetValue().GetOrder() > 0 {
+			return true
+		}
+	}
+	return false
+}
 func concreteMatches(fragment string, models []*pb.ClientModelConfig) []string {
 	exact := map[string]bool{}
 	normalized := map[string]bool{}
@@ -27,6 +44,9 @@ func concreteMatches(fragment string, models []*pb.ClientModelConfig) []string {
 		}
 		if f := m.GetModelInfo().GetModelFeatures(); f != nil && !f.GetSupportsToolCalls() {
 			continue
+		}
+		if catalogFastAlias(fragment, m) {
+			normalized[devin.ModelID(m)] = true
 		}
 		for _, name := range []string{devin.ModelID(m), m.GetModelInfo().GetModelUid(), m.GetModelOrAlias().GetModelUid()} {
 			if name == "" {
@@ -54,7 +74,7 @@ func concreteMatches(fragment string, models []*pb.ClientModelConfig) []string {
 // InferProfile resolves fusion-<lead>-sidekick-<sidekick> against this account's
 // concrete model catalog. Catalog UIDs and their explicit aliases are accepted;
 // punctuation normalization is permitted only when it selects a unique member.
-// Never drop effort/fast suffixes, guess a missing member or invoke the public
+// Preserve effort/Fast semantics, never guess a missing member or invoke the public
 // entry's opaque harness: the public ID names a gateway-managed virtual pair.
 func InferProfile(public string, models []*pb.ClientModelConfig) (*Profile, error) {
 	if !strings.HasPrefix(strings.ToLower(public), "fusion-") {
