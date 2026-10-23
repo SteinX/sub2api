@@ -63,11 +63,24 @@ enabled and an open bot-authored `Devin upstream repair: vX.Y.Z` issue owns the
 integration, other maintenance agents must observe read-only and leave repairs
 to that session unless the user explicitly hands the work back.
 
-No personal access token is required. The workflow uses its repository-scoped
-`GITHUB_TOKEN` with `contents: write` and `actions: write`; the existing Release
-workflow requests `packages: write` for GHCR. Actions must be enabled on the fork,
-and repository rules must allow the bot to update main. No deployed server is
-upgraded by this workflow.
+No personal access token is required in the common case. The workflow uses its
+repository-scoped `GITHUB_TOKEN` with `contents: write` and `actions: write`; the
+existing Release workflow requests `packages: write` for GHCR. Actions must be
+enabled on the fork, and repository rules must allow the bot to update main. No
+deployed server is upgraded by this workflow.
+
+Two optional settings make the sync resilient when upstream itself changes
+`.github/workflows/*`:
+
+- `SYNC_TOKEN` (repository secret): a PAT for this repository with `Contents`,
+  `Pull requests` and `Workflows` write access. When present it replaces
+  `GITHUB_TOKEN` in the plan/publish steps, so creating the sync branch and the
+  integration PR work even when upstream touched workflow files — both operations
+  `GITHUB_TOKEN` cannot perform.
+- The repository setting *Allow GitHub Actions to create and approve pull
+  requests*: without it, `pulls.create` is rejected and the maintenance agent
+  has to open the sync PR by hand (as it did for v0.2.18). A configured
+  `SYNC_TOKEN` also covers this case.
 
 Fork release binaries have their update repository injected at build time as
 `SteinX/sub2api`. Release installation instructions pin the installer to the same
