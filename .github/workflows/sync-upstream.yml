@@ -36,7 +36,12 @@ jobs:
       - name: Check upstream and prepare integration PR
         id: plan
         uses: actions/github-script@v8
+        # Optional SYNC_TOKEN: a PAT with `workflow` scope for this repository.
+        # When upstream changes .github/workflows, creating the sync branch fails
+        # with GITHUB_TOKEN ("Resource not accessible by integration"); the PAT
+        # is the only way to keep that step automated.
         with:
+          github-token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             await require(process.env.RUNNER_TEMP + '/sync-upstream.cjs').plan({github, context, core});
       - uses: actions/checkout@v6
@@ -82,6 +87,7 @@ jobs:
           SYNC_PR: ${{ steps.plan.outputs.pr_number }}
           SYNC_BASE_SHA: ${{ steps.plan.outputs.base_sha }}
         with:
+          github-token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             await require(process.env.RUNNER_TEMP + '/sync-upstream.cjs').publishOrWait(
               {github, context, core},

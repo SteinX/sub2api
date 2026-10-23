@@ -980,6 +980,8 @@ const (
 // GatewayConfig API网关相关配置
 type GatewayConfig struct {
 	DevinContext DevinContextConfig `mapstructure:"devin_context"`
+	// Paid Devin cache warming defaults on; false disables new background requests.
+	DevinFusionCacheWarmEnabled bool `mapstructure:"devin_fusion_cache_warm_enabled"`
 	// MinOutputTokens is the minimum max_output_tokens used when
 	// converting Chat Completions or Anthropic requests to Responses.
 	MinOutputTokens int `mapstructure:"min_output_tokens"`
@@ -2050,6 +2052,7 @@ func setDefaults() {
 	}
 
 	viper.SetDefault("run_mode", RunModeStandard)
+	viper.SetDefault("gateway.devin_fusion_cache_warm_enabled", true)
 	viper.SetDefault("gateway.min_output_tokens", 128)
 	viper.SetDefault("simple_mode.auto_create_default_groups", true)
 	viper.SetDefault("simple_mode_key_rate_limit_enabled", false)

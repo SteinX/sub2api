@@ -180,7 +180,15 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 		*lane = append(*lane, apicompat.ResponsesInputItem{Type: "function_call_output", CallID: s.Pending.InternalID, Output: added[0].Output})
 		s.Role = s.Pending.Role
 		s.Pending = nil
-		if s.Role == Sidekick {
+		if len(s.QueuedTools) > 0 {
+			next := s.QueuedTools[0]
+			if next.Role != s.Role || next.Turn != s.Turn || next.PublicID == "" || next.InternalID == "" {
+				return result, E("session_corrupt", "queued tool ownership is invalid", 503)
+			}
+			s.Pending = &next
+			s.QueuedTools = s.QueuedTools[1:]
+			s.State = WaitingTool
+		} else if s.Role == Sidekick {
 			s.State = RunningSidekick
 		} else {
 			s.State = RunningLead
@@ -194,6 +202,7 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 		s.Turn++
 		s.TurnRequests = 0
 		s.TurnHandoffs = 0
+		s.TurnDelegationReminders = 0
 		s.TurnTools = 0
 		s.TurnCostUSD = 0
 		s.TurnStarted = e.now()
@@ -227,6 +236,9 @@ func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte
 		return a, err
 	}
 	if a.Status != "completed" || a.Settled {
+		if err := e.settleBudget(ctx, s, *a); err != nil {
+			return a, err
+		}
 		if a.Status != previousStatus {
 			return a, e.save(ctx, s, raw)
 		}
@@ -242,7 +254,12 @@ func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte
 	a.CostUSD = cost
 	a.Settled = true
 	s.TurnCostUSD += cost
-	_ = e.journal(ctx, s, a)
+	if err = e.journal(ctx, s, a); err != nil {
+		return a, err
+	}
+	if err = e.settleBudget(ctx, s, *a); err != nil {
+		return a, err
+	}
 	return a, e.save(ctx, s, raw)
 }
 
@@ -266,11 +283,15 @@ func (e *Engine) ReconcileUsage(ctx context.Context, scope, id string, x Executo
 	}
 	_, inferenceErr := e.reconcileInference(ctx, s, &raw, x)
 	maintenanceErr := e.collectCompactions(ctx, s, &raw, x)
+	var cacheErr error
+	if e.Cache != nil {
+		cacheErr = e.Cache.Resume(ctx, s)
+	}
 	cancelled, cancelErr := e.cancelled(ctx, s)
 	if cancelled {
 		cancelErr = e.finalizeCancellation(ctx, s, &raw)
 	}
-	return s, errors.Join(inferenceErr, maintenanceErr, cancelErr)
+	return s, errors.Join(inferenceErr, maintenanceErr, cacheErr, cancelErr)
 }
 
 func (e *Engine) finalizeCancellation(ctx context.Context, s *Session, raw *[]byte) error {
@@ -381,6 +402,11 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		}
 		// Publication can be resumed independently after a crash following apply.
 		if (s.State == WaitingTool || s.State == Completed) && s.ActiveRequest >= 0 && len(s.Attempts) > 0 {
+			if cancelled, err := e.cancelled(persistCtx, s); err != nil {
+				return result, err
+			} else if cancelled {
+				return stop(E("cancelled", "Fusion session was cancelled", 409), Cancelled)
+			}
 			return e.publish(persistCtx, s, raw, result)
 		}
 		cancelled, err := e.cancelled(persistCtx, s)
@@ -456,6 +482,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		if math.IsNaN(estimate) || math.IsInf(estimate, 0) || estimate < 0 || s.TurnCostUSD+s.AuxReservedUSD+estimate > s.Profile.MaxCostUSD {
 			return stop(E("budget_exhausted", "next inference would exceed the Fusion turn cost budget", 409), BudgetExhausted)
 		}
+		if err = e.reserveBudget(persistCtx, s, call.AttemptID, Inference, estimate); err != nil {
+			return stop(err, BudgetExhausted)
+		}
 		call.EstimateUSD = estimate
 		for i := range s.Attempts {
 			a := &s.Attempts[i]
@@ -468,7 +497,15 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		s.Attempts = append(s.Attempts, Attempt{ID: call.AttemptID, Purpose: Inference, Role: s.Role, Turn: s.Turn, Model: req.Model, StartedAt: call.PricingAt, Status: "started", EstimateUSD: estimate})
 		s.TurnRequests++
 		if err = e.save(persistCtx, s, raw); err != nil {
-			return result, err
+			// Execute was never entered. A store error may have happened after
+			// committing the snapshot, so journal that fact for either outcome.
+			a := &s.Attempts[len(s.Attempts)-1]
+			a.Status, a.Settled, a.Failure = "completed", true, "request_not_sent"
+			cleanup, releaseCleanup := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			journalErr := e.journal(cleanup, s, a)
+			budgetErr := e.settleBudget(cleanup, s, *a)
+			releaseCleanup()
+			return result, errors.Join(err, journalErr, budgetErr)
 		}
 		deadline := s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)
 		runCtx, release := context.WithDeadline(ctx, deadline)
@@ -489,6 +526,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			a.Status = "completed"
 			a.Settled = true
 			a.Applied = true
+			if err = e.settleBudget(persistCtx, s, *a); err != nil {
+				return result, err
+			}
 			if err = e.save(persistCtx, s, raw); err != nil {
 				return result, err
 			}
@@ -515,6 +555,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 				billingErr = E("billing_invalid", "invalid inference cost", 502)
 			}
 		}
+		if budgetErr := e.settleBudget(persistCtx, s, *a); budgetErr != nil {
+			return result, budgetErr
+		}
 		if err = e.save(persistCtx, s, raw); err != nil {
 			return result, err
 		}
@@ -524,7 +567,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		if a.Role == Lead && a.Status == "completed" && a.Failure == "" && e.Cache != nil {
 			// Capture the immutable request, not an invented refresh wire shape.
 			// Arming is deferred until the delegation has been applied below.
-			_ = e.Cache.Capture(persistCtx, s, req, a.ID, e.RouteIdentity)
+			_ = e.Cache.Capture(persistCtx, s, req, a.ID, e.RouteIdentity, e.CacheIdentity)
 		}
 		if outcome.ClientDisconnected {
 			e.Runner.Cancel(s.Scope, s.ID)
@@ -568,9 +611,9 @@ func (e *Engine) roleRequest(s *Session, base *apicompat.ResponsesRequest) (*api
 	req.ToolChoice = json.RawMessage(`"auto"`)
 	if s.Role == Lead {
 		req.Tools = append(req.Tools, apicompat.ResponsesTool{Type: "function", Name: DelegateTool, Description: "Delegate a bounded task to the persistent Sidekick and receive its report for review.", Parameters: json.RawMessage(`{"type":"object","properties":{"task":{"type":"string"},"constraints":{"type":"string"},"acceptance_criteria":{"type":"string"}},"required":["task","acceptance_criteria"],"additionalProperties":false}`)})
-		if s.TurnHandoffs == 0 {
-			req.ToolChoice = json.RawMessage(`{"type":"function","name":"sub2api_sidekick"}`)
-		}
+		// Thinking-enabled members can reject named/required tool choice. Keep
+		// auto and a stable tool set across the Lead's planning/review calls;
+		// apply still forbids a final answer before a Sidekick handoff.
 	}
 	return &req, nil
 }
@@ -585,11 +628,15 @@ func (e *Engine) apply(s *Session, r *apicompat.ResponsesResponse) error {
 		}
 	}
 	if len(calls) > 1 {
-		return E("parallel_tools_unsupported", "model returned multiple tool calls despite serial-tool policy", 502)
+		for _, call := range calls {
+			if call.Name == DelegateTool {
+				return E("parallel_tools_unsupported", "a delegation cannot be mixed with other calls", 502)
+			}
+		}
 	}
 	lane := s.Lane(s.Role)
 	*lane = append(*lane, laneItems(r)...)
-	if len(calls) == 1 {
+	if len(calls) > 0 {
 		c := calls[0]
 		if c.Name == DelegateTool {
 			if s.Role != Lead {
@@ -614,15 +661,22 @@ func (e *Engine) apply(s *Session, r *apicompat.ResponsesResponse) error {
 			s.State = RunningSidekick
 			return nil
 		}
-		if s.TurnTools >= s.Profile.MaxTools {
+		if len(calls) > s.Profile.MaxTools-s.TurnTools {
 			return E("budget_exhausted", "client tool budget exhausted", 409)
 		}
-		s.TurnTools++
+		s.TurnTools += len(calls)
 		handoff := ""
 		if s.Role == Sidekick && len(s.Handoffs) > 0 {
 			handoff = s.Handoffs[len(s.Handoffs)-1].ID
 		}
 		s.Pending = &PendingTool{PublicID: "call_fusion_" + uuid.NewString(), InternalID: c.CallID, Role: s.Role, Turn: s.Turn, HandoffID: handoff, Name: c.Name, Arguments: c.Arguments}
+		// Some native members still batch client calls after parallel tool use
+		// was disabled. Persist the batch and publish one owned call at a time;
+		// no new inference may see the history until every result is supplied.
+		s.QueuedTools = nil
+		for _, queued := range calls[1:] {
+			s.QueuedTools = append(s.QueuedTools, PendingTool{PublicID: "call_fusion_" + uuid.NewString(), InternalID: queued.CallID, Role: s.Role, Turn: s.Turn, HandoffID: handoff, Name: queued.Name, Arguments: queued.Arguments})
+		}
 		s.State = WaitingTool
 		return nil
 	}
@@ -641,7 +695,17 @@ func (e *Engine) apply(s *Session, r *apicompat.ResponsesResponse) error {
 		return nil
 	}
 	if s.TurnHandoffs == 0 {
-		return E("delegation_required", "Lead finished before consulting Sidekick", 502)
+		if s.TurnDelegationReminders >= 1 || strings.TrimSpace(outputText(r)) == "" {
+			return E("delegation_required", "Lead finished before consulting Sidekick", 502)
+		}
+		// Auto tool choice is required by some thinking-enabled members. An
+		// unpublished draft gets one durable reminder, then the ordinary turn
+		// admission checks bound and bill any additional inference. Never turn
+		// repeated non-delegation into an unbounded retry or a Lead-only result.
+		s.TurnDelegationReminders++
+		s.Lead = append(s.Lead, textMessage("user", "Gateway workflow reminder: before publishing this turn's answer, call sub2api_sidekick with a bounded brief and acceptance criteria, then review its report. Your previous text is an unpublished draft, not a completed answer."))
+		s.State = RunningLead
+		return nil
 	}
 	if strings.TrimSpace(outputText(r)) == "" {
 		return E("upstream_incomplete", "Lead returned no final answer", 502)

@@ -135,7 +135,7 @@ curl "$BASE_URL/v1/responses" \
 
 ## 持久化与恢复
 
-迁移 `246_context_sessions.sql` 新增三个 SQL 表，不引入另一份 Ent 状态：`context_records` 保存有限 JSON 元数据、会话租约、operation/job/attempt；`context_history` 保存不可变内容 manifest 和归属；`context_blob_parts` 保存最多 1 MiB 的有序内容块。会话视图和新历史在一个 PostgreSQL 事务提交，CAS 检查 revision、租约 token 和存活时间。长调用期间没有数据库长事务。
+迁移 `247_context_sessions.sql` 新增三个 SQL 表，不引入另一份 Ent 状态：`context_records` 保存有限 JSON 元数据、会话租约、operation/job/attempt；`context_history` 保存不可变内容 manifest 和归属；`context_blob_parts` 保存最多 1 MiB 的有序内容块。会话视图和新历史在一个 PostgreSQL 事务提交，CAS 检查 revision、租约 token 和存活时间。长调用期间没有数据库长事务。
 
 每个物理调用在派发前写 prepared/dispatching journal；终态 usage/body 独立于会话租约保存，账务用 `context:<attempt_id>` 去重。只有费用已结算、公共响应已提交后才向客户端返回内容。进程崩溃后，客户端按原键恢复已知结果；后台每 30 秒扫描最多 50 个待恢复 attempt，不派发新的推理。失败的结算记录轮转，避免一个失效归属长期阻塞整批。
 

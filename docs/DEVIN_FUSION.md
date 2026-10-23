@@ -10,6 +10,8 @@ Fusion 默认开启，现有账号也立即适用，无需逐个创建 profile�
 
 公开 Fusion 条目即使包含 router/harness 元数据，仍只作为虚拟配对名称使用；不会把该条目或其 opaque harness 发给聊天接口。两个成员必须是账号可用、可直接调用的具体模型；成员自己的 router 或未知 harness 不会自动放行。这复现的是所选模型组合的网关协作机制，不证明私有官方 harness 的行为。
 
+已核验的 CLI 客户端 harness 提示不会阻止具体成员的标准聊天调用。例如 Opus 的 `strawberry-pancake` 和 SWE-2 的 `swe-1p6*` 提示可以进入现有双角色编排，仍分别使用两个具体模型 UID 和独立 Cascade 历史。支持范围及未知提示的拒绝规则见 [模型路由](DEVIN_MODEL_ROUTING.md#cli-客户端-harness-提示)；不会把整个 Fusion ID 或其 `fusion` harness 当作单模型请求发送。
+
 角色调用先将请求模型设为已固定的具体 Lead 或 Sidekick，再以 `direct_chat` 计划进入 `Prepare`，不会对公开 Fusion ID 调用 `AssignModel`。新版补充第 24.5 节报告：官方 Fusion 专用分配路径把 `assignment.model_uid` 用作 Sidekick；这不能套用普通 router 将分配结果作为唯一推理模型的规则。当前显式配对不依赖这条专用分配路径，也不从 `harness_uids` 提取 Sidekick UID；普通 router 的分配逻辑保持独立。
 
 1. 同步账号模型目录后，已解析的配对会进入模型列表，并显示 Lead / Sidekick 成员。已有目录也会按当前策略重新计算展示。
@@ -57,6 +59,10 @@ Fusion 默认开启，现有账号也立即适用，无需逐个创建 profile�
 
 三个接口共用状态机；均支持 JSON 和 SSE。Responses 的固定 custom/freeform 工具及 namespace 通过已有可逆工具适配器转换，返回时恢复原工具形式。内部 `sub2api_sidekick` 永不对外发布，客户端也不能声明同名工具。每次只发布一个客户端工具调用。
 
+上游偶尔会在请求禁用并行工具后仍返回多个客户端调用。网关将它们作为有界队列持久化，按原顺序逐个发布和接收结果；整批结果到齐前不再次调用角色模型。每个调用保留原角色、turn 和内部 call ID，预算在发布首个调用前按整批检查。排队期间的下一次发布没有新物理推理，公共 usage 为零，也不会重复入账。内部委派与其他调用混合的批次仍拒绝。回退到不识别队列的旧版本前，应先完成或取消这些待工具会话。
+
+已完成的原生零参数调用可能不包含 `arguments_json`。只有明确声明为简单 object、没有必填字段或其他未知约束的工具，才将缺失参数补为 `{}`，并补齐 SSE 参数增量。必填参数、半截 JSON、未知工具及达到 token 上限的未完成调用仍拒绝，不能借此把截断结果标为完成。
+
 ```mermaid
 sequenceDiagram
   participant C as 接入客户端
@@ -79,6 +85,8 @@ sequenceDiagram
 ```
 
 每个新用户 turn 都要求至少一次委派。Lead 可以在报告后返工或自己调用客户端工具验证；后续委派继续使用同一条 Sidekick 历史。两个角色可以选同一个真实模型，但 Cascade 身份仍独立。
+
+Lead 使用 `tool_choice=auto`，规划与审查阶段保持相同的工具声明和系统策略。部分带 thinking 的具体成员会拒绝强制指定工具，不能靠 named/required choice 保证委派。如果 Lead 尚未交接就给出文本，该文本只保留为私有草稿，每轮最多追加一次持久化的工作流提醒；再次未交接则明确失败，不发布单角色结果。提醒后的推理仍检查并消耗原有请求数、费用和耗时预算，草稿实际用量照常计费，重试不会重置提醒次数。保持工具集合稳定也避免在 Lead 恢复审查时主动改变可缓存前缀。
 
 流式请求在内部阶段只发送保活注释，形成公共工具调用或最终结果后发布一个公共 Responses 生命周期，再转换到对应协议。内部推理、Sidekick 私有文本和报告不会混入最终用户流。
 
@@ -147,41 +155,65 @@ Lead 的用户目标、system/developer 约束、当前 turn 最近交接的调�
 
 已有会话的费用恢复在 HTTP 绑定阶段、账号调度和当前模型授权检查之前执行，只使用原账号和当前认证 scope 补账，不刷新凭据或调用上游。原账号暂停、限流、配对关闭或模型从目录移除，不会阻断已知费用结算；这不放宽任何新推理的授权。推理与两个角色的摘要分别核对，一笔未知结果不会阻挡其他已知 usage 入账。未知费用仍保留预留，不自动重发；取消标记仍可收束任务状态。
 
-## Lead 缓存保活基础
+## Lead 缓存预热（默认开启，可关闭）
 
-缓存优化与 Fusion 总开关独立。当前实现的是缓存生命周期、不可变候选身份、独立 epoch、固定等待窗口、due claim、并发栅栏、独立 `cache_refresh` 账本和恢复控制。**没有注册真实 Devin refresh adapter，也没有启动生产 refresh 定时器；不会发送保活推理。** SSE 的 `: keepalive` 仅维护 HTTP 连接，不是模型缓存续期。
+`devin-full-prefix-one-token-v4` adapter 对所有已通过 Fusion 路由、工具能力及价格校验的具体 Lead 模型通用，支持目录自动配对与自定义 profile，不限制单一模型 UID。进程配置 `gateway.devin_fusion_cache_warm_enabled` 默认 `true`（环境变量 `GATEWAY_DEVIN_FUSION_CACHE_WARM_ENABLED=false` 可关闭）；profile 省略 `cache_keepalive` 或省略其中的 `enabled` 时继承开启，显式 `"enabled": false` 始终关闭。费用恢复在开关关闭后仍可执行。SSE 的 `: keepalive` 只维护 HTTP 连接。
 
-候选身份包括租户/API key scope、账号、凭据/路由身份 digest、具体 Lead 模型、profile revision、Lead context epoch、请求前缀及工具合同 digest。协议未验证时只保留候选元数据，不额外复制整份 prompt。Sidekick 单独更新或压缩不重置 Lead cache epoch；Lead 正常推理、报告进入 Lead、Lead 压缩、取消、异常断连或终态会失效旧快照。正常工具响应结束则保留有限等待窗口。
+默认每 240 秒检查一次，等待窗口最多 900 秒、每 turn 最多两次、每次最多 30 秒，独立金额上限为 `min($0.50, profile turn 上限)`。原 turn 截止时间、session TTL、共用费用预算和前台容量限制同时生效，因此短 turn 不会触发预热。自定义启用的部分策略继承缺省值；负值或超出合法范围仍拒绝。
 
-控制器可以通过可控 adapter 和虚拟时钟验证：首次到期、同一窗口单在途、资源紧张跳过、固定次数/时长/费用预算、旧 owner/epoch 回调只结算不重新 arm、未知 attempt 保留预算且不重放，以及重启不补发错过的 tick。HTTP 请求成功与明确缓存确认分开记录；普通文本或工具输出会停止该窗口，绝不执行或写入会话。
+adapter 深拷贝成功 Lead 请求的完整 input、instructions、工具和采样参数，保持 Lead Cascade scope，只把实际请求输出上限改为 1，并使用新 execution ID。这不等同于官方 CLI 的私有 keepalive 协议。原生实测发现 GPT 成员的一 token 请求会报告 32 个 output tokens，直接把 wire 上限增到 32 反而产生 111–197 个 tokens；因此保留一 token wire 请求，GPT 的估价和结果上限单独按 32 计算，其他成员按 1 计算。无法满足费用预留、授权、身份或用量校验的请求不会继续调度。
 
-`cache_keepalive` 默认关闭。未来经验证的适配器还须提供明确的请求形态、能力范围、鉴权/assignment 生命周期、低优先级容量和原子费用预留；接入生产调度前还需明确费用归属，将并发 refresh 与正常推理接入同一原子 turn 预算，并通过真实账号的净成本/延迟对照。当前后台刷新费用为零，因为没有发送此类请求；这不表示已证明真实缓存收益。
+快照同时保存原请求的配额平台、客户端模型名和账号映射入口，后台预热及后续补账沿用同一平台；composite 分组按原始别名重新检查当前分组白名单。新预热还会重新加载用户的分组授权，并检查账号当前模型白名单与映射目标。撤销权限会阻止新预热，但不阻止已发生费用结算。独立缓存账本也在 HTTP 绑定阶段恢复，因此取消或关闭预热后仍可补账；未知结果继续保留预留，不重发。准备账本先于待处理标记保存，初次写入失败会释放未发送请求的预算。窗口截止时间随当前窗口持久化，旧回调不会缩短新一轮的预热窗口。
 
-### 新版静态证据与当前实现的关系
+候选绑定用户/API key scope、账号、具体模型、profile revision、Lead context epoch、原前缀及工具合同 digest，并保存不含凭据的计费身份。只有 Sidekick 的当前委派尚未报告时才能 arm；正常工具响应结束后可继续有限等待。Sidekick 单独更新或压缩不重置 Lead due time；Lead 恢复、报告进入 Lead、Lead 压缩、取消、异常断连或终态会失效旧快照。关闭窗口保留独立未结算 attempt，迟到结果不能重新 arm 新窗口。
 
-来源为 `sub2api-devin-fusion-cache-keepalive-patch-2026-10-22.md` 新增第 24–26 节。该补充报告对 CLI `3000.11.92`、macOS arm64、SHA-256 `623c03a8ad06fef8ff50148c52834846348336c600fbc5267f7387c8d07fe18f` 的 LLVM/Ghidra 静态分析；本仓库没有独立复核该二进制或完成真实请求验证。
+以下参数已经是默认值；只需在修改限制或关闭时添加 `cache_keepalive`：
 
-| 补充报告的证据 | 当前实施决策 |
-| --- | --- |
-| 内部 `query_label=cache_keepalive`、`is_user_initiated=false`、`temperature=0`、`max_tokens=1`，top-p/top-k 未设置 | 小输出推理已有候选依据；这些是内部语义，尚不能转换为已验证的 wire 请求 |
-| 一条分支复制会话链后临时追加 `user: continue`，另一条读取已保存请求历史 | 不向正式 transcript 追加 `continue`，也不据此统一重放最后一条消息 |
-| 默认分支 285 秒、至多 11 次；特定模型能力分支 1680 秒、至多 2 次；元数据 `24h` 分支跳过 | 仅作为绑定具体能力与 CLI 版本的实验候选；不写入全局默认值，不按公开名称前缀猜测适用模型，不推导服务端 TTL |
-| 最终端点、缓存控制字段、动态 hook、harness 与 assignment JWT 契约仍未闭合 | 不猜 protobuf tag，不注册生产 refresh adapter，不启动生产定时器 |
+```json
+"cache_keepalive": {
+  "enabled": true,
+  "interval_seconds": 240,
+  "max_window_seconds": 900,
+  "max_attempts_per_turn": 2,
+  "max_cost_usd_per_turn": 0.5,
+  "timeout_seconds": 30
+}
+```
 
-现有普通 `devin.BuildRequest` 还会把温度 0 转为 0.0001、默认填入 top-p=1；当前子集协议也没有上述内部 query label / user-initiated 字段的已核验映射。因此仅复制正常请求并设置输出上限 1，不能复现新版报告的保活语义；不能把普通请求构造器直接注册为已验证 refresh adapter。后续需要专门核验字段存在性、完整历史分支、前缀关系和最终 wire fixture，再决定如何表达这些语义。
+定时器每个 Devin 服务实例最多跟踪 128 个窗口，同时运行 4 个 tick，无排队、无错过周期的补发、无重启扫描。每个 session 还需取得共享 refresh lease 和 epoch/window claim；不同进程不能重复发送同一在途请求。账号和用户容量由现有共享并发服务非排队获取，各保留一个前台槽；任一并发上限为 1、前台已有等待或容量不足时跳过。停止服务会取消 worker 并限时等待收束。
 
-首次真实验证应固定一个适用模型对、测试账号作用域、CLI build、网关 revision、profile 和 adapter shape version，预先限定调用数、时长与费用。使用互不预热的独立 session，依次保留脱敏官方请求样本、候选请求逐字段差异、无保活/有限保活的配对对照，以及取消和压缩后的迟到结果。按 attempt 汇总正常推理、摘要、刷新及已发生失败/重试的费用，比较 Lead 恢复时的真实 cache usage 与时延；HTTP 成功或单次命中都不能替代净收益结论。上游未提供 cache usage 时保留未知，不宣称续期成功。
+每次发送前重新读取 API key、用户状态、账号、订阅、profile、路由及模型授权，重新获取有效 token/assignment；不保留 Gin writer、前台 executor 或认证 token。模型权限 discovery 必须成功，两个成员都需要可识别的真实 UID 价卡；未知价格、额度/余额预留失败或发送前估价增加均拒绝。准入使用全冷输入及 cache write 的保守上界，不假定缓存命中。普通推理、摘要和预热共用 CAS 原子 turn 费用账本，因此并发估价不能各自通过后超额发送。费用账本按 attempt 去重，未知结果继续占用预算；预热也有独立次数、时间和金额上限。
+
+预热使用独立的终态和用量判定：Connect trailer 正常结束、明确且非全零的 usage、模型身份无冲突、计费输出不超过对应预算，才算请求成功。缺少 `stop_reason` 但干净结束的流也可成功；partial、error、过滤、断流和全零 usage 不被当作有效预热。供应商报告 cache read 或 cache write 才确认缓存活动；不同模型按不同块大小报告缓存，不能把 Opus 的 90% 阈值套给所有模型，也不声称该确认等于完整前缀命中。
+
+文本、思考、签名及工具片段都只计入一个 `discarded_output` 标记；统计 decoder 不接收这些输出，不执行工具，不把结果写入业务历史或公共响应。没有缓存证据时停止当前窗口，不以 HTTP 成功冒充缓存确认；全零或不完整 usage 保留未知预算，不按免费结算。
+
+所有已知终态 usage 通过现有持久账务服务以 `fusion:<attempt UUID>` 单独结算，模型映射链标记 `cache_refresh/lead`。预热不进入任何业务 lane、工具分发或公共 response usage。失去网络或取消可能留下未知费用；保留原预算和余额/额度预留，绝不记为免费或自动重放。已知账务失败可从独立 journal 重试结算，即使窗口已停止或快照已清除；进程预热开关关闭后仍允许已知费用恢复。变更了原计费组，或将分组在订阅与余额模式之间切换时，保留 pending，避免给其他组或资金来源记账；恢复原模式后可继续补账。账本和预留仍受各自 TTL 约束。
+
+本进程通过取消函数中止请求，其他进程的取消、epoch/window 失效或 Sidekick 结束由 250ms 栅栏轮询中止；不会取消已经发出的请求可能产生的费用。已知迟到 usage 仍结算，缺失终态的结果保留未知，worker 不重发。费用恢复只影响独立账本，不修改业务历史。
+
+### 隔离验证证据
+
+2026-10-23 的首次原生 A/B 使用两组独立随机前缀：初始缓存写入后约 6.5–7 分钟恢复，无中途请求组 cache-read/input 为 8.21%；第 4 分钟增加一次一 token 请求的组为 99.95%。改变系统提示或工具定义会破坏对应前缀；相同前缀换 Cascade ID 仍可能命中，因此冷组不能只更换会话 ID。这是普通全前缀请求的有限实验，不证明 CLI 私有协议、长期稳定性或净收益。
+
+本次真实 adapter + 自动定时器的加速隔离验证：冷写入后两次自动预热，各 6,103 个 input token（其中 cache read 6,099）、1 个 output token、零可见输出，命中占比 99.93%，业务快照完全不变。按测试环境显式价卡，两次预热共 $0.0025116；初始化冷写入另计 $0.030531。第四个一 token 请求在 HTTP 确认发出后由另一 controller 取消，未收到终态 usage，保留 $0.137576 保守预留，没有重发。这些金额是隔离账本按配置价格换算的结果，不是 Devin 最终账单。测试没有修改生产服务或开关。
+
+回归覆盖：60 个并发费用准入、正常推理/摘要/预热竞争同一预算、64 个并发容量申请保留前台槽、重复 tick、多实例互斥、窗口到期、worker/watch 上限、关闭、超时、本地/跨进程取消、迟到已知 usage、未知预留、账务失败后恢复去重、变更权限/价格/路由的拒绝，以及实际网关入口、默认开启与显式 opt-out。
+
+2026-10-23 的全目录检查遍历了 575 个原生 Fusion ID：545 个配置、70 个具体 Lead 通过解析、默认策略、完整前缀构造及隔离显式价卡下的准入检查（不替代生产缺失价卡的配置）；未发送推理。155 个原先因 `-fast` / `-priority` 名称不一致的配置，现在只有在相同基础型号/effort 的目录成员明确带有 Fast Mode 元数据时，解析到其 `-priority` UID。另 30 个 Fable/Sonnet Fast 条目没有对应可调用的具体成员，仍明确拒绝，绝不改成普通档或其他 effort。
+
+跨模型实测覆盖 Opus 5/5.5（含 Fast）、Fable、Sonnet、Haiku、GPT 各家族、SWE、GLM 和 Gemini。首次 26 个有完整记录的诊断请求暴露了 GPT 的 32-token 用量行为；额外的 wire=32 试验 6 次证明会产生更多输出，已放弃该请求形态。恢复 wire=1、单独预留 GPT 32-token 用量后，5 个 GPT 成员的冷/热 10 次请求通过；Luna 则在后续测试返回全零 usage，按未知停止，不能宣称该上游状态已恢复。其他成员的热输入缓存读取占比从 SWE 约 46%、Gemini 约 54% 到 Claude 约 99.9% 不等；没有把部分缓存描述为全量命中。上述实验均使用临时账务与合成输入，没有修改生产。
 
 ## 费用与限制
 
 - 每次实际 Lead/Sidekick 推理按真实 billing model、独立 token/cache 桶及当次计费时点计算，使用稳定 `fusion:<attempt UUID>` 入账 ID；外层 request ID 不会把多个角色费用去重成一笔。
-- 公共响应 usage 只汇总该 HTTP 推进请求触发的正常推理 attempts；不是整个 session 累计。重放返回原响应，不再次收费。公共 usage 包含私有规划与报告；摘要独立记账。
+- 公共响应 usage 只汇总该 HTTP 推进请求触发的正常推理 attempts；不是整个 session 累计。重放返回原响应，不再次收费。公共 usage 包含私有规划与报告；摘要与缓存预热独立记账。
 - 每次推理重新检查余额/订阅/API key/RPM，确认原子在途预留。预留覆盖推理截止时间和 drain 窗口，结算完成才释放；缓存故障拒绝下一次调用。
 - 费用准入采用保守 token 估价和输出上限。终态使用上游真实 usage；估价不能替代上游的最终账单。实际费用超限后停止后续推理。
 - 角色上下文受配置字节数和真实模型窗口的保守上界约束；压缩有明确策略、来源归档与费用记录，不截断工具结果或 rewind。单会话至多 256 个 HTTP 推进请求，持久快照最多 12 MiB；压缩不会缩减客户端公共检查点或无限扩大持久存储上限。
 - session 到期后不再接受推进；历史及结果账本有 TTL，账本额外保留一天用于故障核对，费用去重由现有数据库账务层承担。
 
-当前合同要求固定的客户端工具声明，支持 tool choice `auto`/`none`。不支持动态 tool discovery、更改 schema、并行工具、多 Sidekick、任意 steering、结构化最终输出、`store:true` 及公共 response retrieval。WebSocket 接入应使用客户端的 HTTP Responses 模式；本实现的协议适配范围是上述三个 HTTP 接口。不能据此声称所有客户端默认配置都已真实联调。
+当前合同要求固定的客户端工具声明，支持 tool choice `auto`/`none`。不支持动态 tool discovery、更改 schema、并行执行工具、多 Sidekick、任意 steering、结构化最终输出、`store:true` 及公共 response retrieval；上游的客户端工具批次按上述规则串行处理。WebSocket 接入应使用客户端的 HTTP Responses 模式；本实现的协议适配范围是上述三个 HTTP 接口。不能据此声称所有客户端默认配置都已真实联调。
 
 ## 验证与观测
 
@@ -197,6 +229,14 @@ go test -tags=unit ./internal/service ./internal/handler ./internal/server/middl
 
 `audit.devin.fusion` 记录每次推理的角色、attempt ID、真实模型和 usage 是否已观察到；日志不包含凭据、JWT、brief、工具输出或私有正文。完整角色历史只存在有 TTL 的会话/结果存储中。
 
-测试使用模拟上游及隔离 Redis。真实账号模型能力、实际任务质量，以及 Codex/Claude Code/OpenCode 等目标客户端版本的端到端验收，需用部署环境另行验证；开发中没有触发真实付费推理或部署。
+自动化测试使用模拟上游及隔离 Redis。2026-10-23 的兼容修复额外用真实上游 Opus 5.5 + SWE-2 完成了隔离的三轮计算任务，核对双角色执行、缓存读写与幂等重放；这些调用可能消耗上游额度，未写生产配置或生产账单。该验证不等同于目标客户端的端到端验收或完整生产计费验证。Codex/Claude Code/OpenCode 的真实文件/命令工具、部署配置和所有模型组合仍需单独验收。
 
-普通模型的显式托管会话和平台手动 compact 见 [Devin 平台托管上下文](DEVIN_CONTEXT.md)。Fusion 的旧会话继续使用原格式；新普通会话使用独立的 PostgreSQL engine。
+同日扩展验收固定抽取 HumanEval 和 MBPP sanitized 各 6 题，种子 `20261023`；仅从纯标准库、参考程序能够通过判题器的候选中抽样，MBPP 采用官方 test split。公开样例供受限 `read_file` / `write_file` / `run_tests` 协作使用，最终官方断言独立保留。任务明确要求 Lead 在每份 Sidekick 报告后亲自复测，失败时再委派，不能由此推导未提出该要求的任务也必定重验。
+
+首轮 11/12 完成协作并通过最终断言；另一题发现批返回兼容问题，修复后在新会话复测通过。前置试跑另发现零参数工具解码问题。一轮复测出现传输 EOF，按结果未知的网络异常单列，不自动重放原请求。陈旧 Sidekick 报告故障通过 Lead 复测及二次委派恢复，测试服务暂时失败也成功恢复。该评测包含工具反馈和开发期间修复，不是官方 HumanEval/MBPP pass@1，也不是冻结版本的全量基准成绩。
+
+另有一项受控的真实上游批返回用例：仅在测试中显式允许并要求 Sidekick 同批返回 `write_file` 和 `run_tests`，网关逐个发布，两次客户端工具执行之间没有新增物理推理，随后 Sidekick 报告、Lead 独立复测和最终断言均通过。该兼容用例不计入上述 12 题成绩，也没有改变生产请求禁用并行工具的策略。
+
+数据源固定为 [HumanEval](https://github.com/openai/human-eval/tree/463c980b59e818ace59f6f9803cd92c749ceae61) 和 [MBPP sanitized](https://github.com/google-research/google-research/blob/f82046ba5aabbbb427dbfd38a254d26bff08b533/mbpp/sanitized-mbpp.json)。题目 ID、数据哈希、角色工具轨迹、初轮失败及复测、缓存干预用量和被废弃的实验对照均保留在本次验证报告中；没有将账号凭据或原始认证报文提交到仓库。
+
+普通模型的显式托管会话和平台手动 compact 见 [Devin 平台托管上下文](DEVIN_CONTEXT.md)。Fusion 的旧会话继续使用原格式；新普通会话使用独立的 PostgreSQL engine。托管上下文的自动测试不代替其真实模型质量验收。

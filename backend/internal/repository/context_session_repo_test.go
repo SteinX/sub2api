@@ -48,7 +48,7 @@ func contextTestDB(t *testing.T) *sql.DB {
 	require.NoError(t, err)
 	db.SetMaxOpenConns(12)
 	t.Cleanup(func() { _ = db.Close(); _, _ = admin.Exec(`DROP SCHEMA ` + schema + ` CASCADE`); _ = admin.Close() })
-	migration, err := os.ReadFile("../../migrations/246_context_sessions.sql")
+	migration, err := os.ReadFile("../../migrations/247_context_sessions.sql")
 	require.NoError(t, err)
 	_, err = db.Exec(string(migration))
 	require.NoError(t, err)

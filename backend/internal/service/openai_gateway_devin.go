@@ -286,7 +286,7 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			return nil
 		}
 	}
-	decoder := devin.NewEventDecoder(original, emit)
+	decoder := devin.NewEventDecoder(original, emit, wire.Tools...)
 	drainInterval := 3 * time.Minute
 	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
 		drainInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second

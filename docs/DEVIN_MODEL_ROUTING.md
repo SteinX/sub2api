@@ -13,15 +13,23 @@
 | 目录条目 | 路线 | 默认行为 |
 | --- | --- | --- |
 | 可从 ID 唯一解析出成员的 Fusion 配对，或启用中的显式覆盖 | `gateway_fusion` | 默认开启；验证两个具体成员后执行双角色编排 |
-| 普通模型，包括没有完整元数据的普通 UID | `direct_chat` | 保持 UID，发送聊天请求 |
+| 普通模型，包括带已核验 CLI 客户端 harness 提示的具体模型 | `direct_chat` | 保持具体 UID，发送聊天请求 |
 | `is_model_router=true` 或 display 为 `MODEL_ROUTER`，没有特殊执行要求 | `assign_then_chat` | 分配一次，检查结果后聊天 |
 | 配对成员缺失、歧义或不可直调的 `fusion-<lead>-sidekick-<worker>` | `blocked` | 明确拒绝，不抽取 Lead |
 | 裸 `fusion`、`fusion-sidekick-*`、其他以 `fusion` 开头的特殊 UID，或明确标为 Fusion 的目录项 | `blocked` | 执行语义未验证 |
-| 具体成员的非空 `harness_uids` 或无法解析配对的 opaque harness 条目 | `blocked` | 不执行未知 harness；完整公开配对 ID 可走独立的网关编排 |
+| 具体成员的未知 `harness_uids` 或无法解析配对的 opaque harness 条目 | `blocked` | 不执行未知 harness；完整公开配对 ID 可走独立的网关编排 |
 
 名称匹配只用于识别候选；不会把配对推断、目录可见性或 HTTP 200 标成官方 harness 已验证状态。普通模型的新 UID 不会因没有独立目录元数据而全部被拒绝。
 
 没有 Lead-only 开关或实验白名单。需要单模型时直接选择它的普通模型 ID。把 Fusion 名称通过渠道映射、账号映射或别名改为普通 Lead，仍会拒绝。
+
+### CLI 客户端 harness 提示
+
+`ModelInfo.harness_uids` 不能一律解释为服务器要求另一个执行 RPC。2026-10-23 使用 CLI `3000.11.92` 身份做隔离验证时，Opus 5.5、SWE-2、GPT-6 Luna、Gemini 4 和 GPT-5.4 的具体 UID 均通过已有 `GetUserJwt` / `GetChatMessage` 合同完成短文本调用；无需发送 harness UID、额外 assignment 或改写成员模型。原先将所有非空列表阻止的规则会使这些成员及其 Fusion 配对不可用。
+
+当前仅识别这些客户端提示：`strawberry-pancake`、`swe-1p6-exec`、`swe-1p6`、`swe-1p5`、`gpt-5p6-codex`、`gpt-5p6`、`gemini-3-pro`、`gpt-5p4-persistent`。目录中包含未知提示、`fusion` 虚拟 harness 或特殊 Fusion 身份的条目仍受原有规则保护；混合已知与未知提示不会放行。普通 router 的 `ModelAssignment.harness_uids` 是独立合同，仍按原规则检查，不能用目录提示的兼容性来放宽。
+
+提示仍完整保留在诊断数据中。`devin-routes-v3-client-harness` 使旧运行时目录缓存失效；已保存目录也会按新策略重新计算。此修复不增加账号权限，不代替真实模型价格或分组绑定，不实现官方私有 harness，也不启用缓存保活。
 
 ## 两次检查和请求快照
 
@@ -122,4 +130,4 @@ pnpm --dir frontend run build
 
 本环境带 HTTP 代理，完整测试发现阿里云 SDK 把本地 mock 的 `host:port` 与 `NO_PROXY` 严格比较。测试夹具已补充该随机回环端点的代理例外，外部代理配置保持继承。
 
-真实 Devin 文本调用、真实工具多轮、Lead/Sidekick 协作和官方 CLI 等价性均未验证；没有使用真实凭据、发起付费推理或部署服务。详细执行结果见本次任务交回说明。
+2026-10-23 的兼容修复另做了隔离真实上游验证：上述五类具体成员的短文本调用，以及 Opus 5.5 + SWE-2 三轮计算任务、双角色交接、缓存用量与无新增推理的幂等重放。该采样不代表所有目录模型的授权或所有请求形态均已验证。客户端真实文件/命令工具多轮、生产账务和官方 CLI 等价性仍需部署前验收；本次验证没有修改生产分组或部署服务。

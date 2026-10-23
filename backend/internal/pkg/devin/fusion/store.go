@@ -16,6 +16,7 @@ type Engine struct {
 	Runner        *MaintenanceRunner
 	Cache         *CacheKeepaliveController
 	RouteIdentity string
+	CacheIdentity CacheIdentity
 	Observer      func(MaintenanceEvent)
 }
 

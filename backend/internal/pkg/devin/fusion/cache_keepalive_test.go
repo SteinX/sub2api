@@ -16,6 +16,50 @@ import (
 
 type virtualCacheClock struct{ ns atomic.Int64 }
 
+type failWarmJournalStore struct {
+	AtomicStore
+	fail bool
+}
+
+func (s *failWarmJournalStore) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if s.fail && strings.Contains(key, ":cache_refresh:") {
+		s.fail = false
+		return errors.New("simulated warm journal interruption")
+	}
+	return s.AtomicStore.Set(ctx, key, value, ttl)
+}
+
+func TestFusionWarmJournalPreparationFailureDoesNotStrandBudget(t *testing.T) {
+	e, s, c, clock, fake := cacheFixture(t)
+	s.Profile.MaxCostUSD = .1
+	s.ProfileRevision = s.Profile.Revision()
+	_, raw, err := e.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.NoError(t, e.save(context.Background(), s, &raw))
+	req := testRequest("lead prefix")
+	req.Model = s.Profile.LeadModel
+	require.NoError(t, c.Capture(context.Background(), s, req, "lead", "route"))
+	c.Store = &failWarmJournalStore{AtomicStore: c.Store, fail: true}
+	state, _, err := c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	clock.Advance(10 * time.Second)
+	require.ErrorContains(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID), "warm journal interruption")
+	state, _, err = c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.Empty(t, state.Pending)
+	require.Empty(t, state.InFlightID)
+	require.Zero(t, state.ReservedUSD)
+	require.Zero(t, state.Attempts)
+	require.Equal(t, "ARMED", state.State)
+	require.Zero(t, fake.calls)
+	clock.Advance(10 * time.Second)
+	require.NoError(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID))
+	require.Equal(t, 1, fake.calls, "the entire turn budget is available for the first actual send")
+	state, _, err = c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.Empty(t, state.Pending)
+}
+
 func newCacheClock() *virtualCacheClock {
 	c := &virtualCacheClock{}
 	c.ns.Store(time.Now().UnixNano())
@@ -42,7 +86,7 @@ func (f *refreshFake) Acquire(context.Context, CacheSnapshot) (func(), bool) {
 	return func() {}, !f.busy
 }
 func (f *refreshFake) Estimate(context.Context, CacheSnapshot) (float64, error) { return .1, nil }
-func (f *refreshFake) Refresh(_ context.Context, _ CacheSnapshot, _ string) (RefreshResult, error) {
+func (f *refreshFake) Refresh(_ context.Context, _ CacheSnapshot, _ Attempt) (RefreshResult, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
@@ -52,7 +96,7 @@ func (f *refreshFake) Refresh(_ context.Context, _ CacheSnapshot, _ string) (Ref
 	}
 	return f.result, f.err
 }
-func (f *refreshFake) Settle(_ context.Context, a Attempt) (float64, error) {
+func (f *refreshFake) Settle(_ context.Context, _ CacheSnapshot, a Attempt) (float64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.billed == nil {
@@ -207,6 +251,61 @@ func TestFusionKeepaliveConfirmationUnknownCostAndUnexpectedOutput(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestFusionKeepaliveOneTokenUsageNeverEntersBusinessHistory(t *testing.T) {
+	for _, visibleOutput := range []bool{false, true} {
+		e, s, c, clock, adapter := cacheFixture(t)
+		before, _, err := e.Load(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		state, _, err := c.Load(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		// A bounded native warm request can report max_tokens and one billed
+		// output token without any visible content. This is distinct from a
+		// business generation, whose decoder correctly rejects no content.
+		adapter.result.Outcome.Response = &apicompat.ResponsesResponse{Status: "incomplete", IncompleteDetails: &apicompat.ResponsesIncompleteDetails{Reason: "max_output_tokens"}, Usage: &apicompat.ResponsesUsage{InputTokens: 8219, OutputTokens: 1, TotalTokens: 8220, InputTokensDetails: &apicompat.ResponsesInputTokensDetails{CachedTokens: 8215}}}
+		if visibleOutput {
+			adapter.result.Outcome.Response.Output = textResponse("x").Output
+		}
+		clock.Advance(10 * time.Second)
+		require.NoError(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID))
+		after, _, err := e.Load(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		require.Equal(t, Digest(before), Digest(after), "warm output and usage belong to their independent ledger")
+		control, _, err := c.Load(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		require.InDelta(t, .04, control.CumulativeCostUSD, .00001, "one output token is still settled")
+		if visibleOutput {
+			require.Equal(t, "STOPPED", control.State)
+			require.True(t, control.LastCacheConfirmedAt.IsZero())
+		} else {
+			require.Equal(t, "ARMED", control.State)
+			require.False(t, control.LastCacheConfirmedAt.IsZero())
+		}
+		require.NoError(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID))
+		require.Equal(t, 1, adapter.calls, "the same due tick must not be sent twice")
+	}
+}
+
+func TestFusionKeepaliveSnapshotOwnsNestedRequestData(t *testing.T) {
+	_, s, c, _, _ := cacheFixture(t)
+	request := testRequest("immutable input")
+	request.Model = s.Profile.LeadModel
+	output := 32
+	request.MaxOutputTokens = &output
+	require.NoError(t, c.Capture(context.Background(), s, request, "captured-lead", "route"))
+	before, _, err := c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	digest := Digest(before.Snapshot.Request)
+	request.Instructions = "caller changed instructions"
+	request.Input[0] = ' '
+	request.Tools[0].Description = "caller changed tool contract"
+	request.Tools[0].Parameters[0] = ' '
+	output = 1
+	after, _, err := c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.Equal(t, digest, Digest(after.Snapshot.Request))
+	require.Equal(t, 32, *after.Snapshot.Request.MaxOutputTokens)
 }
 func TestFusionKeepaliveRestartUnknownAndIdempotentCost(t *testing.T) {
 	_, s, c, clock, f := cacheFixture(t)
