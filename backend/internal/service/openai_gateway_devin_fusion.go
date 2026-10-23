@@ -380,7 +380,8 @@ func (s *OpenAIGatewayService) forwardDevinFusion(ctx context.Context, c *gin.Co
 	}
 	engine := s.devin.fusionEngine()
 	s.devin.configureCacheWarm(s, binding.Updater)
-	engine.CacheIdentity = fusion.CacheIdentity{UserID: key.UserID, APIKeyID: key.ID, InboundEndpoint: x.inboundEndpoint}
+	clientModel, _ := devinInboundModel(ctx, original)
+	engine.CacheIdentity = fusion.CacheIdentity{UserID: key.UserID, APIKeyID: key.ID, InboundEndpoint: x.inboundEndpoint, QuotaPlatform: QuotaPlatform(ctx, key), ClientModel: clientModel}
 	if key.GroupID != nil {
 		engine.CacheIdentity.GroupID = *key.GroupID
 	}

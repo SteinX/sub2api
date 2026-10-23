@@ -161,6 +161,8 @@ Lead 的用户目标、system/developer 约束、当前 turn 最近交接的调�
 
 adapter 深拷贝成功 Lead 请求的完整 input、instructions、工具和采样参数，保持 Lead Cascade scope，只把实际请求输出上限改为 1，并使用新 execution ID。这不等同于官方 CLI 的私有 keepalive 协议。原生实测发现 GPT 成员的一 token 请求会报告 32 个 output tokens，直接把 wire 上限增到 32 反而产生 111–197 个 tokens；因此保留一 token wire 请求，GPT 的估价和结果上限单独按 32 计算，其他成员按 1 计算。无法满足费用预留、授权、身份或用量校验的请求不会继续调度。
 
+快照同时保存原请求的配额平台和客户端模型名，后台预热及后续补账沿用同一平台；composite 分组按原始别名重新检查当前分组白名单。撤销模型权限会阻止新预热，但不阻止已发生费用结算。独立缓存账本也在 HTTP 绑定阶段恢复，因此取消或关闭预热后仍可补账；未知结果继续保留预留，不重发。窗口截止时间随当前窗口持久化，旧回调不会缩短新一轮的预热窗口。
+
 候选绑定用户/API key scope、账号、具体模型、profile revision、Lead context epoch、原前缀及工具合同 digest，并保存不含凭据的计费身份。只有 Sidekick 的当前委派尚未报告时才能 arm；正常工具响应结束后可继续有限等待。Sidekick 单独更新或压缩不重置 Lead due time；Lead 恢复、报告进入 Lead、Lead 压缩、取消、异常断连或终态会失效旧快照。关闭窗口保留独立未结算 attempt，迟到结果不能重新 arm 新窗口。
 
 以下参数已经是默认值；只需在修改限制或关闭时添加 `cache_keepalive`：

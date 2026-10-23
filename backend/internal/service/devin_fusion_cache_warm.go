@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
@@ -136,6 +137,16 @@ func warmEstimateRequest(s fusion.CacheSnapshot) (*apicompat.ResponsesRequest, e
 	request.MaxOutputTokens = &limit
 	return request, nil
 }
+
+func cacheWarmContext(ctx context.Context, snapshot fusion.CacheSnapshot) context.Context {
+	ctx = devin.WithClientIdentity(ctx)
+	if snapshot.Identity != nil && snapshot.Identity.QuotaPlatform != "" {
+		ctx = context.WithValue(ctx, ctxkey.ForcePlatform, snapshot.Identity.QuotaPlatform)
+		ctx = WithResolvedTargetPlatform(ctx, snapshot.Identity.QuotaPlatform)
+	}
+	return ctx
+}
+
 func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.CacheSnapshot, admit bool) (*devinFusionExecutor, error) {
 	s := a.service
 	identity := snapshot.Identity
@@ -158,6 +169,9 @@ func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.Ca
 	if groupID != identity.GroupID {
 		return nil, fusion.E("billing_pending", "original cache refresh billing group is unavailable", 503)
 	}
+	if key.Group != nil && key.Group.Platform == PlatformComposite && identity.QuotaPlatform == "" {
+		return nil, fusion.E("billing_pending", "original cache refresh quota platform is unavailable", 503)
+	}
 	if admit {
 		p := devinFusionProfile(account, profile.PublicModel)
 		if !a.Supports(snapshot) || !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() || !key.User.IsActive() || !account.IsSchedulable() || p == nil || p.Revision() != snapshot.ProfileRevision || !p.KeepalivePolicy().Enabled || s.devin.runtimeKey(ctx, account) != snapshot.RouteIdentity {
@@ -165,6 +179,9 @@ func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.Ca
 		}
 		if groupID != identity.GroupID || groupID != 0 && (key.Group == nil || !key.Group.IsActive() || !slices.Contains(account.GroupIDs, groupID)) {
 			return nil, fusion.E("refresh_unavailable", "cache refresh group access changed", 409)
+		}
+		if key.Group.ModelAllowlistEnabled() && (strings.TrimSpace(identity.ClientModel) == "" || !key.Group.ModelAllowlist.Allows(identity.ClientModel)) {
+			return nil, fusion.E("refresh_unavailable", "cache refresh client model is no longer allowed", 409)
 		}
 	}
 	var subscription *UserSubscription
@@ -181,7 +198,7 @@ func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.Ca
 	return x, nil
 }
 func (a *devinCacheWarmAdapter) Acquire(ctx context.Context, s fusion.CacheSnapshot) (func(), bool) {
-	ctx = devin.WithClientIdentity(ctx)
+	ctx = cacheWarmContext(ctx, s)
 	x, err := a.executor(ctx, s, true)
 	if err != nil {
 		return nil, false
@@ -190,7 +207,7 @@ func (a *devinCacheWarmAdapter) Acquire(ctx context.Context, s fusion.CacheSnaps
 	return release, ok
 }
 func (a *devinCacheWarmAdapter) Estimate(ctx context.Context, s fusion.CacheSnapshot) (float64, error) {
-	ctx = devin.WithClientIdentity(ctx)
+	ctx = cacheWarmContext(ctx, s)
 	x, err := a.executor(ctx, s, true)
 	if err != nil {
 		return 0, err
@@ -204,6 +221,7 @@ func (a *devinCacheWarmAdapter) Estimate(ctx context.Context, s fusion.CacheSnap
 	return x.estimate(ctx, fusion.Call{Purpose: fusion.CacheRefresh, Role: fusion.Lead, Request: req, PricingAt: time.Now()}, false)
 }
 func (a *devinCacheWarmAdapter) Settle(ctx context.Context, s fusion.CacheSnapshot, attempt fusion.Attempt) (float64, error) {
+	ctx = cacheWarmContext(ctx, s)
 	x, err := a.executor(ctx, s, false)
 	if err != nil {
 		return 0, err
@@ -216,7 +234,7 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if id == "" || attempt.Purpose != fusion.CacheRefresh || attempt.Role != fusion.Lead || math.IsNaN(attempt.EstimateUSD) || math.IsInf(attempt.EstimateUSD, 0) || attempt.EstimateUSD < 0 {
 		return fusion.RefreshResult{Outcome: fusion.Outcome{KnownFailure: true, NotStarted: true}}, fusion.E("refresh_unavailable", "invalid cache refresh attempt", 503)
 	}
-	ctx = devin.WithClientIdentity(ctx)
+	ctx = cacheWarmContext(ctx, snapshot)
 	x, err := a.executor(ctx, snapshot, true)
 	result := fusion.RefreshResult{Outcome: fusion.Outcome{KnownFailure: true, NotStarted: true}}
 	if err != nil {

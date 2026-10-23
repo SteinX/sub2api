@@ -155,3 +155,32 @@ func TestFusionWarmDefaultIntervalLongerThanTurnExpiresOnce(t *testing.T) {
 	require.Equal(t, "turn_deadline", state.StopReason)
 	require.Zero(t, f.calls)
 }
+
+func TestFusionWarmLateSchedulePreservesNewTurnDeadline(t *testing.T) {
+	e, s, c, clock, _ := cacheFixture(t)
+	oldSession := *s
+	c.Scheduler = newCacheWarmScheduler(c, 1, 1, time.Hour)
+	t.Cleanup(func() { require.NoError(t, c.Scheduler.Close(context.Background())) })
+	c.schedule(context.Background(), s)
+	clock.Advance(90 * time.Second)
+	s.Turn++
+	s.TurnStarted = clock.Now()
+	s.Handoffs = []Handoff{{ID: "new-window", Turn: s.Turn}}
+	_, raw, err := e.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.NoError(t, e.save(context.Background(), s, &raw))
+	req := testRequest("next lead prefix")
+	req.Model = s.Profile.LeadModel
+	require.NoError(t, c.Capture(context.Background(), s, req, "new-lead", "route"))
+	state, _, err := c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	// A completed old Tick calls schedule with its original session snapshot.
+	c.schedule(context.Background(), &oldSession)
+	c.Scheduler.mu.Lock()
+	watch := c.Scheduler.watches[cacheKey(s.Scope, s.ID)]
+	c.Scheduler.mu.Unlock()
+	require.Equal(t, state.Epoch, watch.epoch)
+	require.Equal(t, "new-window", watch.window)
+	require.True(t, state.WindowDeadline.Equal(watch.until))
+	require.True(t, clock.Now().Add(100*time.Second).Equal(watch.until))
+}

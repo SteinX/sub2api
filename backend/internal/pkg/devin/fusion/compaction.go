@@ -495,19 +495,42 @@ func (e *Engine) prepareCompaction(ctx context.Context, s *Session, raw *[]byte,
 		return false, err
 	}
 	j.EstimateUSD = estimate
+	previousJob := c.Job
 	c.Job = &j
 	c.Attempts++
 	s.TurnRequests++
 	s.AuxReservedUSD += estimate
 	s.Maintenance.CompactionsPrepared++
 	r := &compactionRecord{Job: j, Request: req, Attempt: Attempt{ID: j.ID, Purpose: Compaction, Role: role, Turn: s.Turn, Model: req.Model, StartedAt: call.PricingAt, Status: "prepared", EstimateUSD: estimate}}
+	abortPreparation := func(cause error) (bool, error) {
+		// No executor has been launched. Restore the caller's counters before
+		// its error handling can persist them, and fence an acknowledged or
+		// ambiguously committed preparation journal as a known zero-cost result.
+		c.Job = previousJob
+		c.Attempts--
+		s.TurnRequests--
+		s.AuxReservedUSD -= estimate
+		s.Maintenance.CompactionsPrepared--
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		r.Attempt.Status, r.Attempt.Settled = "completed", true
+		r.Job.State, r.Job.Reason, r.Request = "failed", "request_not_sent", nil
+		_, old, readErr := e.readCompaction(cleanup, s, &j)
+		var journalErr error
+		if readErr == nil {
+			journalErr = e.writeCompaction(cleanup, s, r, old)
+		} else if !errors.Is(readErr, devin.ErrSessionNotFound) {
+			journalErr = readErr
+		}
+		return false, errors.Join(cause, journalErr, e.settleBudget(cleanup, s, r.Attempt))
+	}
 	// Journal first: if session save fails, no network call has started. An
 	// orphan prepared record expires without spending money.
 	if err = e.writeCompaction(ctx, s, r, nil); err != nil {
-		return false, err
+		return abortPreparation(err)
 	}
 	if err = e.save(ctx, s, raw); err != nil {
-		return false, err
+		return abortPreparation(err)
 	}
 	e.observe(MaintenanceEvent{Purpose: Compaction, Role: role, Stage: "prepared", JobID: j.ID, InputBefore: cutBytes((*s.Lane(role))[:cut])})
 	snapshot := Session{ID: s.ID, Scope: s.Scope, AccountID: s.AccountID, Profile: s.Profile, ProfileRevision: s.ProfileRevision, ExpiresAt: s.ExpiresAt, Contexts: map[Role]*RoleContext{role: {Epoch: c.Epoch}}}

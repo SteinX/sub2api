@@ -80,6 +80,8 @@ type CacheIdentity struct {
 	SubscriptionID  int64  `json:"subscription_id,omitempty"`
 	GroupID         int64  `json:"group_id,omitempty"`
 	InboundEndpoint string `json:"inbound_endpoint"`
+	QuotaPlatform   string `json:"quota_platform,omitempty"`
+	ClientModel     string `json:"client_model,omitempty"`
 }
 
 type CacheSnapshot struct {
@@ -107,6 +109,7 @@ type CacheControl struct {
 	Snapshot             *CacheSnapshot  `json:"snapshot,omitempty"`
 	WindowID             string          `json:"window_id,omitempty"`
 	WindowStartedAt      time.Time       `json:"window_started_at"`
+	WindowDeadline       time.Time       `json:"window_deadline"`
 	NextDueAt            time.Time       `json:"next_due_at"`
 	LastAttemptAt        time.Time       `json:"last_attempt_at"`
 	LastRequestSuccessAt time.Time       `json:"last_request_success_at"`
@@ -205,10 +208,41 @@ func (c *CacheKeepaliveController) schedule(ctx context.Context, s *Session) {
 		c.Scheduler.Forget(s.Scope, s.ID)
 		return
 	}
-	p := s.Profile.KeepalivePolicy()
-	until := minTime(s.ExpiresAt, s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds)*time.Second))
-	until = minTime(until, state.WindowStartedAt.Add(time.Duration(p.MaxWindowSeconds)*time.Second))
+	if state.Snapshot == nil {
+		c.Scheduler.Forget(s.Scope, s.ID)
+		return
+	}
+	p := state.Snapshot.Profile.KeepalivePolicy()
+	until := state.WindowDeadline
+	if until.IsZero() {
+		// Older controls have no durable deadline. Reload the session instead of
+		// deriving a new window's bounds from a late callback's old session.
+		current, _, loadErr := New(c.Store).Load(ctx, s.Scope, s.ID)
+		if loadErr != nil || current.Turn != state.Turn {
+			c.Scheduler.Forget(s.Scope, s.ID)
+			return
+		}
+		until = cacheWindowDeadline(current, state.WindowStartedAt)
+	}
 	c.Scheduler.Watch(s.Scope, s.ID, state, until, time.Duration(max(1, p.IntervalSeconds))*time.Second)
+}
+
+func cacheWindowDeadline(s *Session, started time.Time) time.Time {
+	until := minTime(s.ExpiresAt, s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds)*time.Second))
+	return minTime(until, started.Add(time.Duration(s.Profile.KeepalivePolicy().MaxWindowSeconds)*time.Second))
+}
+
+// Cache journals outlive cancellation and are independent of conversation
+// attempts. Ingress must consult them even when foreground usage is settled.
+func (c *CacheKeepaliveController) NeedsReconciliation(ctx context.Context, scope, id string) (bool, error) {
+	if c == nil {
+		return false, nil
+	}
+	state, _, err := c.Load(ctx, scope, id)
+	if err != nil {
+		return false, err
+	}
+	return len(state.Pending) > 0 || state.InFlightID != "", nil
 }
 
 func (c *CacheKeepaliveController) Stop(ctx context.Context, s *Session, reason string) error {
@@ -285,6 +319,7 @@ func (c *CacheKeepaliveController) Capture(ctx context.Context, s *Session, requ
 		state.StopReason = ""
 		state.WindowID = s.Handoffs[len(s.Handoffs)-1].ID
 		state.WindowStartedAt = c.now()
+		state.WindowDeadline = cacheWindowDeadline(s, state.WindowStartedAt)
 		state.NextDueAt = c.now().Add(time.Duration(s.Profile.KeepalivePolicy().IntervalSeconds) * time.Second)
 	})
 }
@@ -309,6 +344,7 @@ func (c *CacheKeepaliveController) Observe(ctx context.Context, s *Session) erro
 		state.StopReason = ""
 		state.WindowID = s.Handoffs[len(s.Handoffs)-1].ID
 		state.WindowStartedAt = c.now()
+		state.WindowDeadline = cacheWindowDeadline(s, state.WindowStartedAt)
 		state.NextDueAt = c.now().Add(time.Duration(s.Profile.KeepalivePolicy().IntervalSeconds) * time.Second)
 	})
 }

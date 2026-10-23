@@ -334,7 +334,12 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 		}
 	}
 	settlementPending := false
-	if session != nil && session.NeedsUsageReconciliation() {
+	cachePending := false
+	var cacheErr error
+	if session != nil {
+		cachePending, cacheErr = engine.Cache.NeedsReconciliation(ctx, scope, id)
+	}
+	if session != nil && (session.NeedsUsageReconciliation() || cachePending || cacheErr != nil) {
 		// Fees already incurred do not require a current model grant or an
 		// inference-schedulable account. This path cannot issue provider requests.
 		recovered, reconcileErr := s.reconcileDevinFusionUsage(c, key, session, updater)
@@ -347,7 +352,11 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 			settlementPending = true
 		} else {
 			session = recovered
-			settlementPending = session.NeedsUsageReconciliation()
+			cachePending, cacheErr = engine.Cache.NeedsReconciliation(ctx, scope, id)
+			settlementPending = session.NeedsUsageReconciliation() || cachePending || cacheErr != nil
+			if cacheErr != nil && !cancelRequested {
+				return true, cacheErr
+			}
 		}
 	}
 	if cancelRequested {

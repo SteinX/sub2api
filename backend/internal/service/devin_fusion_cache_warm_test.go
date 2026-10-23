@@ -17,6 +17,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
@@ -31,6 +32,161 @@ type warmKeys struct {
 	APIKeyQuotaUpdater
 	key   *APIKey
 	reads atomic.Int64
+}
+
+type warmQuotaCache struct {
+	*fusionTestBillingCache
+	quotaMu   sync.Mutex
+	reads     []string
+	writes    []string
+	exhausted bool
+}
+
+func (c *warmQuotaCache) GetUserPlatformQuotaCache(_ context.Context, _ int64, platform string) (*UserPlatformQuotaCacheEntry, bool, error) {
+	c.quotaMu.Lock()
+	defer c.quotaMu.Unlock()
+	c.reads = append(c.reads, platform)
+	limit, usage := 10.0, 0.0
+	if c.exhausted {
+		usage = limit
+	}
+	now := time.Now()
+	return &UserPlatformQuotaCacheEntry{SchemaVersion: UserPlatformQuotaCacheSchemaV1, DailyLimitUSD: &limit, DailyUsageUSD: usage, DailyWindowStart: &now, WeeklyWindowStart: &now, MonthlyWindowStart: &now}, true, nil
+}
+
+func (c *warmQuotaCache) IncrUserPlatformQuotaUsageCache(_ context.Context, _ int64, platform string, _ float64, _ time.Duration, _ bool) error {
+	c.quotaMu.Lock()
+	defer c.quotaMu.Unlock()
+	c.writes = append(c.writes, platform)
+	return nil
+}
+
+func TestFusionWarmCompositeQuotaSurvivesDetachedContext(t *testing.T) {
+	f := newWarmFixture(t)
+	groupID := int64(9)
+	f.keys.key.GroupID = &groupID
+	f.keys.key.Group = &Group{ID: groupID, Platform: PlatformComposite, Status: StatusActive, RateMultiplier: 1}
+	f.account.GroupIDs = []int64{groupID}
+	f.snapshot.Identity.GroupID = groupID
+	f.snapshot.Identity.QuotaPlatform = PlatformDevin
+	quota := &warmQuotaCache{fusionTestBillingCache: f.cache, exhausted: true}
+	f.service.billingCacheService.cache = quota
+	f.service.billingCacheService.userPlatformQuotaRepo = &fakeQuotaRepo{}
+	f.service.userPlatformQuotaRepo = &fakeQuotaRepo{}
+	f.service.cfg.Database.UserPlatformQuotaFlusherEnabled = true
+	estimate, err := f.adapter.Estimate(context.Background(), f.snapshot)
+	require.NoError(t, err)
+	a := fusion.Attempt{ID: "composite-paid-warm", Turn: 1, Purpose: fusion.CacheRefresh, Role: fusion.Lead, Model: f.snapshot.Model, StartedAt: time.Now(), EstimateUSD: estimate}
+	_, err = f.adapter.Refresh(context.Background(), f.snapshot, a)
+	require.ErrorContains(t, err, "balance, quota or request limit")
+	require.Equal(t, []string{PlatformDevin}, quota.reads)
+	require.Zero(t, f.calls.Load())
+	quota.exhausted = false
+	result, err := f.adapter.Refresh(context.Background(), f.snapshot, a)
+	require.NoError(t, err)
+	a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+	_, err = f.adapter.Settle(context.WithValue(context.Background(), ctxkey.ForcePlatform, PlatformOpenAI), f.snapshot, a)
+	require.NoError(t, err)
+	require.Equal(t, []string{PlatformDevin}, quota.writes)
+	for _, platform := range quota.reads {
+		require.Equal(t, PlatformDevin, platform)
+	}
+	f.snapshot.Identity.QuotaPlatform = ""
+	_, err = f.adapter.Estimate(context.Background(), f.snapshot)
+	require.ErrorContains(t, err, "quota platform is unavailable")
+}
+
+func TestFusionWarmRechecksOriginalClientModelAllowlist(t *testing.T) {
+	f := newWarmFixture(t)
+	groupID := int64(9)
+	group := &Group{ID: groupID, Platform: PlatformComposite, Status: StatusActive, RateMultiplier: 1, ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"my-fusion-alias"}}}
+	f.keys.key.GroupID, f.keys.key.Group = &groupID, group
+	f.account.GroupIDs = []int64{groupID}
+	f.snapshot.Identity.GroupID = groupID
+	f.snapshot.Identity.ClientModel = "my-fusion-alias"
+	estimate, err := f.adapter.Estimate(context.Background(), f.snapshot)
+	require.NoError(t, err, "the ingress alias is allowed even when the resolved profile is absent from the allowlist")
+	a := fusion.Attempt{ID: "alias-paid-warm", Turn: 1, Purpose: fusion.CacheRefresh, Role: fusion.Lead, Model: f.snapshot.Model, StartedAt: time.Now(), EstimateUSD: estimate}
+	result, err := f.adapter.Refresh(context.Background(), f.snapshot, a)
+	require.NoError(t, err)
+	group.ModelAllowlist.Models = []string{f.session.PublicModel}
+	_, err = f.adapter.Estimate(context.Background(), f.snapshot)
+	require.ErrorContains(t, err, "client model is no longer allowed")
+	_, err = f.adapter.Refresh(context.Background(), f.snapshot, a)
+	require.ErrorContains(t, err, "client model is no longer allowed")
+	require.EqualValues(t, 1, f.calls.Load())
+	// Revoking admission cannot erase fees already incurred under that alias.
+	a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+	_, err = f.adapter.Settle(context.Background(), f.snapshot, a)
+	require.NoError(t, err)
+	require.Len(t, f.bills.commands, 1)
+	f.snapshot.Identity.ClientModel = ""
+	_, err = f.adapter.Estimate(context.Background(), f.snapshot)
+	require.Error(t, err, "legacy snapshots cannot bypass an enabled allowlist")
+}
+
+func TestFusionWarmIngressRecoversCacheOnlyBillingAfterCancel(t *testing.T) {
+	for _, retryCancel := range []bool{true, false} {
+		t.Run(fmt.Sprint(retryCancel), func(t *testing.T) {
+			f := newWarmFixture(t)
+			f.service.concurrencyService = NewConcurrencyService(&fusionAuxCapacityCache{})
+			f.bills.fail = true
+			require.ErrorContains(t, f.tick(t), "settlement is pending")
+			require.False(t, f.session.NeedsUsageReconciliation(), "only the independent cache journal needs recovery")
+			f.service.cfg.Gateway.DevinFusionCacheWarmEnabled = false
+			bind := func(cancel bool) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(w)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+				c.Request.Header.Set(fusion.HeaderSession, f.session.ID)
+				if cancel {
+					c.Request.Header.Set(fusion.HeaderCancel, "true")
+				}
+				bound, err := f.service.BindDevinFusionRequest(c, f.keys.key, f.session.PublicModel, fusionProtocolBody("responses", false, ""), "responses", f.keys)
+				require.True(t, bound)
+				if cancel {
+					require.True(t, DevinFusionHandled(err))
+					require.Equal(t, 200, w.Code)
+				} else {
+					require.ErrorContains(t, err, "session is CANCELLED")
+				}
+				return w
+			}
+			require.Contains(t, bind(true).Body.String(), `"usage_settlement":"pending"`)
+			f.bills.fail = false
+			bind(retryCancel)
+			bind(retryCancel)
+			pending, err := f.controller.NeedsReconciliation(context.Background(), f.session.Scope, f.session.ID)
+			require.NoError(t, err)
+			require.False(t, pending)
+			require.Len(t, f.bills.commands, 1)
+			require.Zero(t, f.cache.count())
+			require.EqualValues(t, 1, f.calls.Load(), "billing recovery must not replay the warm call")
+		})
+	}
+}
+
+func TestFusionWarmIngressCancelKeepsUnknownCacheUsagePending(t *testing.T) {
+	f := newWarmFixture(t)
+	f.service.concurrencyService = NewConcurrencyService(&fusionAuxCapacityCache{})
+	f.chat = func(*http.Request, *pb.GetChatMessageRequest) (*http.Response, error) {
+		return nil, errors.New("connection lost after send")
+	}
+	require.NoError(t, f.tick(t))
+	f.service.cfg.Gateway.DevinFusionCacheWarmEnabled = false
+	for range 2 {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		c.Request.Header.Set(fusion.HeaderSession, f.session.ID)
+		c.Request.Header.Set(fusion.HeaderCancel, "true")
+		_, err := f.service.BindDevinFusionRequest(c, f.keys.key, f.session.PublicModel, fusionProtocolBody("responses", false, ""), "responses", f.keys)
+		require.True(t, DevinFusionHandled(err))
+		require.Contains(t, w.Body.String(), `"usage_settlement":"pending"`)
+	}
+	require.Empty(t, f.bills.commands)
+	require.Equal(t, 1, f.cache.count())
+	require.EqualValues(t, 1, f.calls.Load())
 }
 
 func (k *warmKeys) GetByID(context.Context, int64) (*APIKey, error) {
@@ -123,7 +279,7 @@ func newWarmFixture(t *testing.T) *warmFixture {
 	f.save(t)
 	out := 512
 	req := &apicompat.ResponsesRequest{Model: p.LeadModel, Instructions: "immutable lead policy", Input: json.RawMessage(`"immutable lead input"`), MaxOutputTokens: &out, Tools: []apicompat.ResponsesTool{{Type: "function", Name: fusion.DelegateTool, Parameters: json.RawMessage(`{"type":"object"}`)}}}
-	require.NoError(t, f.controller.Capture(context.Background(), f.session, req, "original-lead", s.devin.runtimeKey(context.Background(), f.account), fusion.CacheIdentity{UserID: 33, APIKeyID: 22, InboundEndpoint: "/v1/responses"}))
+	require.NoError(t, f.controller.Capture(context.Background(), f.session, req, "original-lead", s.devin.runtimeKey(context.Background(), f.account), fusion.CacheIdentity{UserID: 33, APIKeyID: 22, InboundEndpoint: "/v1/responses", QuotaPlatform: PlatformDevin, ClientModel: p.PublicModel}))
 	state, _, err := f.controller.Load(context.Background(), f.session.Scope, f.session.ID)
 	require.NoError(t, err)
 	f.snapshot = *state.Snapshot
@@ -150,7 +306,7 @@ func (f *warmFixture) useProfile(t *testing.T, p fusion.Profile, models []*pb.Cl
 	f.session.ProfileRevision = p.Revision()
 	f.session.PublicModel = p.PublicModel
 	f.save(t)
-	require.NoError(t, f.controller.Capture(context.Background(), f.session, &request, "lead-profile-fixture", f.service.devin.runtimeKey(context.Background(), f.account), fusion.CacheIdentity{UserID: 33, APIKeyID: 22, InboundEndpoint: "/v1/responses"}))
+	require.NoError(t, f.controller.Capture(context.Background(), f.session, &request, "lead-profile-fixture", f.service.devin.runtimeKey(context.Background(), f.account), fusion.CacheIdentity{UserID: 33, APIKeyID: 22, InboundEndpoint: "/v1/responses", QuotaPlatform: PlatformDevin, ClientModel: p.PublicModel}))
 	state, _, err := f.controller.Load(context.Background(), f.session.Scope, f.session.ID)
 	require.NoError(t, err)
 	f.snapshot = *state.Snapshot

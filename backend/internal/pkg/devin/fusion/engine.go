@@ -497,7 +497,15 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		s.Attempts = append(s.Attempts, Attempt{ID: call.AttemptID, Purpose: Inference, Role: s.Role, Turn: s.Turn, Model: req.Model, StartedAt: call.PricingAt, Status: "started", EstimateUSD: estimate})
 		s.TurnRequests++
 		if err = e.save(persistCtx, s, raw); err != nil {
-			return result, err
+			// Execute was never entered. A store error may have happened after
+			// committing the snapshot, so journal that fact for either outcome.
+			a := &s.Attempts[len(s.Attempts)-1]
+			a.Status, a.Settled, a.Failure = "completed", true, "request_not_sent"
+			cleanup, releaseCleanup := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			journalErr := e.journal(cleanup, s, a)
+			budgetErr := e.settleBudget(cleanup, s, *a)
+			releaseCleanup()
+			return result, errors.Join(err, journalErr, budgetErr)
 		}
 		deadline := s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)
 		runCtx, release := context.WithDeadline(ctx, deadline)
