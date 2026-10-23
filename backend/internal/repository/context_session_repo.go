@@ -102,7 +102,7 @@ func (r *contextSessionStore) Create(ctx context.Context, v *mc.Record, p *mc.Po
 			return false, err
 		}
 		var total, keyCount int
-		if err = tx.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE api_key_id=$2) FROM context_records WHERE user_id=$1 AND kind='session' AND expires_at>NOW() AND NOT cancelled AND NOT (scope=$3 AND id=$4)`, v.UserID, v.KeyID, v.Scope, v.ID).Scan(&total, &keyCount); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE api_key_id=$2) FROM context_records WHERE user_id=$1 AND kind='session' AND expires_at>NOW() AND NOT cancelled AND status<>'failed' AND NOT (scope=$3 AND id=$4)`, v.UserID, v.KeyID, v.Scope, v.ID).Scan(&total, &keyCount); err != nil {
 			return false, err
 		}
 		if total >= p.MaxUserSessions || keyCount >= p.MaxSessions {
@@ -231,6 +231,7 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
  AND (NOT c.cancelled AND c.expires_at>NOW() AND c.status NOT IN ('failed','completed')
  AND NOT EXISTS(SELECT 1 FROM context_records finished_job
  WHERE finished_job.scope=c.scope AND finished_job.kind='job'
+ AND (c.kind='operation' OR NULLIF(c.data->>'operation_id','') IS NULL)
  AND finished_job.id=COALESCE(NULLIF(c.data->>'job_id',''),c.data->>'applied_job_id')
  AND finished_job.data->>'operation_id'=`+contextReservationOperation+`
  AND finished_job.status IN ('failed','stale','applied','compacted','no_op'))

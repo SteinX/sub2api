@@ -239,8 +239,11 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 		return s.RunContext(c, key, keys, body, "responses", session, 0, 0)
 	}
 	body := []byte(`{"model":"gpt-5.5","input":"Preserve API compatibility","max_output_tokens":128,"tools":[{"type":"function","name":"read_file","parameters":{"type":"object"}}]}`)
-	_, err := request("first", "", body)
+	failed, err := request("first", "", body)
 	require.Error(t, err, "known usage cannot publish before settlement")
+	require.NotEmpty(t, failed.SessionID, "failed first turns expose their owned session for inspection/cancellation")
+	_, _, readErr := s.devin.managedEngine().LoadSession(context.Background(), contextScope(key), failed.SessionID)
+	require.NoError(t, readErr)
 	require.Equal(t, 1, calls)
 	billing.fail = false
 	a.Extra[DevinContextEnabledExtra] = false
@@ -253,6 +256,7 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 	s.channelService = newTestChannelService(makeStandardRepo(restrictedChannel, map[int64]string{9: PlatformDevin}))
 	first, err := request("first", "", body)
 	require.NoError(t, err, "known results publish while the account is paused and inference slots are unavailable")
+	require.Equal(t, failed.SessionID, first.SessionID)
 	require.True(t, first.Replayed)
 	require.Equal(t, 1, calls)
 	require.Len(t, billing.commands, 1)

@@ -30,8 +30,29 @@ func (h *OpenAIGatewayHandler) contextError(c *gin.Context, err error) {
 	c.Set(service.ResponseCommittedKey, true)
 	c.JSON(typed.Status, gin.H{"error": gin.H{"type": "invalid_request_error", "code": typed.Code, "message": typed.Message}})
 }
+func writeContextRunHeaders(c *gin.Context, result *service.ContextRunResult) {
+	if result == nil {
+		return
+	}
+	if result.SessionID != "" {
+		c.Header(mc.HeaderSession, result.SessionID)
+	}
+	if result.Revision > 0 {
+		c.Header("X-Sub2API-Context-Revision", strconv.FormatInt(result.Revision, 10))
+	}
+	if result.Replayed {
+		c.Header("X-Sub2API-Context-Replayed", "true")
+	}
+	if result.Compact != nil {
+		c.Header("X-Sub2API-Context-Compaction", result.Compact.ArtifactID)
+	} else if result.Job != nil {
+		c.Header("X-Sub2API-Context-Compaction", result.Job.ID)
+	}
+}
+
 func (h *OpenAIGatewayHandler) contextResponse(c *gin.Context, key *service.APIKey, body []byte) {
 	result, err := h.gatewayService.RunContext(c, key, h.apiKeyService, body, "responses", c.GetHeader(mc.HeaderSession), 0, 0)
+	writeContextRunHeaders(c, result)
 	if err != nil {
 		h.contextError(c, err)
 		return
@@ -39,13 +60,6 @@ func (h *OpenAIGatewayHandler) contextResponse(c *gin.Context, key *service.APIK
 	if result == nil || result.Response == nil {
 		h.contextError(c, mc.E("unavailable", "context returned no response", 503))
 		return
-	}
-	c.Header(mc.HeaderSession, result.SessionID)
-	if result.Revision > 0 {
-		c.Header("X-Sub2API-Context-Revision", strconv.FormatInt(result.Revision, 10))
-	}
-	if result.Replayed {
-		c.Header("X-Sub2API-Context-Replayed", "true")
 	}
 	var request struct {
 		Stream bool `json:"stream"`
@@ -112,13 +126,7 @@ func (h *OpenAIGatewayHandler) ContextCompact(c *gin.Context) {
 		}
 	}
 	result, err := h.gatewayService.RunContext(c, key, h.apiKeyService, body, request.Mode, request.SessionID, request.ExpectedRevision, request.Target)
-	if result != nil {
-		if result.Compact != nil {
-			c.Header("X-Sub2API-Context-Compaction", result.Compact.ArtifactID)
-		} else if result.Job != nil {
-			c.Header("X-Sub2API-Context-Compaction", result.Job.ID)
-		}
-	}
+	writeContextRunHeaders(c, result)
 	if err != nil {
 		h.contextError(c, err)
 		return

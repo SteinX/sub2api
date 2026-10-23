@@ -64,7 +64,7 @@ func contextBlob(id, session, visibility string, data []byte) mc.Blob {
 }
 
 func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
-	for _, mode := range []string{"session", "stateless", "manual", "legacy_manual_job"} {
+	for _, mode := range []string{"session", "stateless", "manual", "legacy_manual_job", "applied_auto"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			db := contextTestDB(t)
@@ -78,6 +78,15 @@ func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
 			oldJob.Data = json.RawMessage(`{"operation_id":"old-op"}`)
 			_, err := s.Create(ctx, oldJob, nil)
 			require.NoError(t, err)
+			if mode == "applied_auto" {
+				a.Status = "running"
+				a.Data = json.RawMessage(`{"operation_id":"op-a","reservation_operation_id":"op-a","job_id":"applied-auto","applied_job_id":"applied-auto","reserved_bytes":921600}`)
+				job := contextRecord("job", "applied-auto", 1, 2)
+				job.Status = "applied"
+				job.Data = json.RawMessage(`{"operation_id":"op-a"}`)
+				_, err = s.Create(ctx, job, nil)
+				require.NoError(t, err)
+			}
 			_, err = s.Create(ctx, a, &p)
 			require.NoError(t, err)
 			la, err := s.Acquire(ctx, a.Scope, a.Kind, a.ID, "owner-a", time.Minute)
@@ -103,6 +112,12 @@ func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
 			lb, err := s.Acquire(ctx, b.Scope, b.Kind, b.ID, "owner-b", time.Minute)
 			require.NoError(t, err)
 			require.NoError(t, s.CAS(ctx, b, &lb, nil, &p))
+			if mode == "applied_auto" {
+				// The worker stopped after applying the automatic summary,
+				// before journaling its foreground inference.
+				_, err = db.Exec(`UPDATE context_records SET lease_until=NOW()-interval '1 second' WHERE kind='session' AND id='a'`)
+				require.NoError(t, err)
+			}
 			attemptB := contextRecord("attempt", "attempt-b", 1, 3)
 			attemptB.Data, _ = json.Marshal(map[string]any{"operation_id": "op-b", "session_id": bSession, "response_ref": "result-b"})
 			_, err = s.Create(ctx, attemptB, nil)
@@ -116,6 +131,10 @@ func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
 			_, err = s.Create(ctx, attemptA, nil)
 			require.NoError(t, err)
 			require.NoError(t, s.CAS(ctx, attemptA, nil, []mc.Blob{contextBlob("result-a", "a", "private", bytes.Repeat([]byte("a"), 800<<10))}, &p))
+			if mode == "applied_auto" {
+				la, err = s.Acquire(ctx, a.Scope, a.Kind, a.ID, "resumed-a", time.Minute)
+				require.NoError(t, err)
+			}
 			require.NoError(t, s.CAS(ctx, a, &la, nil, &p), "persisted physical bytes are credited against their own promise")
 			require.NoError(t, s.CAS(ctx, attemptB, nil, []mc.Blob{contextBlob("result-b", bSession, "private", bytes.Repeat([]byte("b"), 400<<10))}, &p))
 			if mode == "legacy_manual_job" {
@@ -541,4 +560,33 @@ func TestContextStorePostgres(t *testing.T) {
 		_, err = s.Read(ctx, a.Scope, "session", "missing")
 		require.True(t, errors.Is(err, mc.ErrNotFound))
 	})
+}
+
+func TestContextStorePostgresFailedSessionsDoNotUseActiveSlots(t *testing.T) {
+	ctx := context.Background()
+	db := contextTestDB(t)
+	s := NewContextSessionStore(db)
+	p := mc.DefaultPolicy()
+	p.MaxSessions, p.MaxUserSessions = 1, 2
+	for _, id := range []string{"failed-1", "failed-2", "failed-3"} {
+		r := contextRecord("session", id, 1, 2)
+		_, err := s.Create(ctx, r, &p)
+		require.NoError(t, err)
+		l, err := s.Acquire(ctx, r.Scope, r.Kind, r.ID, "owner", time.Minute)
+		require.NoError(t, err)
+		r.Status = "failed"
+		require.NoError(t, s.CAS(ctx, r, &l, nil, &p))
+		require.NoError(t, s.Release(ctx, l))
+	}
+	_, err := s.Create(ctx, contextRecord("session", "live-key-2", 1, 2), &p)
+	require.NoError(t, err, "failed first turns do not consume key slots")
+	_, err = s.Create(ctx, contextRecord("session", "blocked-key-2", 1, 2), &p)
+	require.Error(t, err, "a live session still consumes its key slot")
+	_, err = s.Create(ctx, contextRecord("session", "live-key-3", 1, 3), &p)
+	require.NoError(t, err, "failed sessions do not consume user slots")
+	_, err = s.Create(ctx, contextRecord("session", "blocked-key-4", 1, 4), &p)
+	require.Error(t, err, "the user cap still counts all live keys")
+	r, err := s.Read(ctx, "scope", "session", "failed-1")
+	require.NoError(t, err, "failed metadata remains available for usage/history recovery")
+	require.Equal(t, "failed", r.Status)
 }

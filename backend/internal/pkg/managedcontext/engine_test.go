@@ -596,6 +596,43 @@ func TestManualSummaryReservationHasItsOwnOperationIdentity(t *testing.T) {
 	require.NoError(t, e.Close(context.Background()))
 }
 
+func TestManualSummaryPreparationFailureReleasesItsReservation(t *testing.T) {
+	e := New(newMem())
+	defer func() { require.NoError(t, e.Close(context.Background())) }()
+	s, _ := seedSummary(t, e)
+	x := &fakeExecutor{safe: 20000}
+	limited := s.Policy
+	limited.MaxTurnCostUSD = .0005 // Session maintenance admits the .001 estimate.
+	op, _, err := e.Begin(context.Background(), owner(), "internal:"+s.ID, "over-turn-cap", "first", s.Model, s.ID, limited)
+	require.NoError(t, err)
+	compact := func(op *Operation) error {
+		_, sr, err := e.LoadSession(context.Background(), s.Scope, s.ID)
+		if err != nil {
+			return err
+		}
+		return e.WithOperation(context.Background(), op, func(ctx context.Context, op *Operation, r *Record, l *Lease) error {
+			_, err := e.Internal(ctx, op, r, l, sr.Revision, x)
+			return err
+		})
+	}
+	require.ErrorContains(t, compact(op), "budget")
+	stored, _, err := e.LoadSession(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.Zero(t, stored.ReservedBytes)
+	require.Empty(t, stored.ReservationOperationID)
+	require.Zero(t, x.callCount())
+	fresh, _, err := e.Begin(context.Background(), owner(), "internal:"+s.ID, "after-preparation-failure", "next", s.Model, s.ID, s.Policy)
+	require.NoError(t, err)
+	x.beforeReturn = func(Call) {
+		current, _, err := e.LoadSession(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		require.Equal(t, fresh.ID, current.ReservationOperationID)
+	}
+	require.NoError(t, compact(fresh))
+	require.Equal(t, 1, x.callCount())
+	require.Equal(t, 1, x.charges)
+}
+
 func TestInternalTerminalRecoveryReleasesOnlyItsReservation(t *testing.T) {
 	for _, legacy := range []bool{false, true} {
 		t.Run(fmt.Sprint("legacy-", legacy), func(t *testing.T) {

@@ -355,6 +355,14 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 	}
 	out := new(ContextRunResult)
 	err = engine.WithOperation(ctx, op, func(ctx context.Context, op *mc.Operation, r *mc.Record, l *mc.Lease) error {
+		defer func() {
+			if out.SessionID == "" {
+				out.SessionID = op.SessionID
+			}
+			if out.Job == nil && op.JobID != "" {
+				out.Job = &mc.Job{ID: op.JobID}
+			}
+		}()
 		// Published idempotent results need no fresh token/model discovery or slots.
 		if mode == "responses" {
 			response, err := engine.RecoverPublished(ctx, op, r, l)

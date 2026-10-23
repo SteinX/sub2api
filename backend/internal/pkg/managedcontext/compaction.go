@@ -172,7 +172,7 @@ func (e *Engine) apply(ctx context.Context, s *Session, sr *Record, l *Lease, ba
 	e.emit("applied", j.Trigger)
 	return true, nil
 }
-func (e *Engine) startSummary(ctx context.Context, s *Session, sr *Record, l *Lease, op *Operation, or *Record, ol *Lease, base *apicompat.ResponsesRequest, x Executor, background bool, trigger string, target int) (bool, error) {
+func (e *Engine) startSummary(ctx context.Context, s *Session, sr *Record, l *Lease, op *Operation, or *Record, ol *Lease, base *apicompat.ResponsesRequest, x Executor, background bool, trigger string, target int) (started bool, resultErr error) {
 	if s.JobID != "" {
 		j, _, err := load[Job](ctx, e.Store, s.Scope, "job", s.JobID)
 		if err != nil {
@@ -296,9 +296,31 @@ func (e *Engine) startSummary(ctx context.Context, s *Session, sr *Record, l *Le
 		}
 	}()
 	// An explicit internal compact has no foreground output reservation yet.
+	allocatedReservation := false
+	defer func() {
+		if !allocatedReservation || launched {
+			return
+		}
+		persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		// Reload the committed view: preparation may have changed only its
+		// local job pointer before failing. Roll back just our own promise.
+		current, cr, cleanupErr := e.LoadSession(persist, s.Scope, s.ID)
+		if cleanupErr == nil && current.ReservationOperationID == op.ID {
+			current.ReservedBytes, current.ReservationOperationID = 0, ""
+			cleanupErr = e.save(persist, cr, current, current.Status, l, nil, &current.Policy)
+			if cleanupErr == nil {
+				*s, *sr = *current, *cr
+			}
+		}
+		if cleanupErr != nil {
+			resultErr = E("unavailable", "summary preparation reservation could not be rolled back", 503)
+		}
+	}()
 	if s.ReservedBytes == 0 {
 		s.ReservedBytes = int64((s.Policy.SummaryOutputTokens*(s.Policy.SummaryAttempts*2+1))*64 + 65536)
 		s.ReservationOperationID = op.ID
+		allocatedReservation = true
 		if err = e.save(ctx, sr, s, s.Status, l, nil, &s.Policy); err != nil {
 			return false, err
 		}
