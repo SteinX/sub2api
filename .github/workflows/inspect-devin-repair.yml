@@ -1,0 +1,39 @@
+name: Inspect reserved Devin repair (read only)
+
+on:
+  push:
+    branches: [codex/fix-devin-session-id-format]
+    paths: ['.github/workflows/inspect-devin-repair.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'SteinX/sub2api'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/github-script@v8
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+          DEVIN_ORG_ID: ${{ vars.DEVIN_ORG_ID || secrets.DEVIN_ORG_ID }}
+        with:
+          script: |
+            const { config, client } = require('./.github/devin-upstream-repair.cjs');
+            const settings = config(process.env);
+            core.setSecret(settings.key);
+            const result = await client(settings)('GET', 'sessions?first=100');
+            if (!Array.isArray(result.items)) throw new Error('Unexpected sessions response');
+            const sessions = result.items.filter(session =>
+              session.title === 'Repair sub2api upstream v0.2.18' &&
+              session.tags?.includes('sub2api-upstream-repair') && session.tags?.includes('v0.2.18'));
+            core.info(JSON.stringify({ sessions: sessions.map(session => ({
+              session_id: session.session_id, url: session.url, created_at: session.created_at,
+              status: session.status, status_detail: session.status_detail,
+              acus_consumed: session.acus_consumed, pull_requests: session.pull_requests,
+            })), has_next_page: result.has_next_page }));
