@@ -11,6 +11,7 @@ import (
 	cc "github.com/Wei-Shaw/sub2api/internal/pkg/contextcompact"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	mc "github.com/Wei-Shaw/sub2api/internal/pkg/managedcontext"
 	"github.com/gin-gonic/gin"
@@ -99,6 +100,21 @@ type contextExecutor struct {
 	keys     *APIKeyService
 	owner    mc.Owner
 	manual   bool
+}
+
+func (x *contextExecutor) modelLimits() mc.ModelLimits {
+	m := devin.FindModel(x.physical.models, x.physical.publicModel)
+	return mc.ModelLimits{ContextTokens: m.GetMaxTokens(), OutputTokens: m.GetModelInfo().GetMaxOutputTokens(), ParallelToolCalls: m.GetModelInfo().GetModelFeatures().GetSupportsParallelToolCalls()}
+}
+
+func (x *contextExecutor) restoreModelLimits(limits *mc.ModelLimits) {
+	if limits == nil {
+		return
+	}
+	x.physical.models = []*pb.ClientModelConfig{{ModelUid: x.physical.publicModel, MaxTokens: limits.ContextTokens, ModelInfo: &pb.ModelInfo{MaxOutputTokens: limits.OutputTokens, ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true, SupportsParallelToolCalls: limits.ParallelToolCalls}}}}
+	if limits.OutputTokens > 0 {
+		x.physical.profile.MaxOutputTokens = min(x.physical.profile.MaxOutputTokens, int(limits.OutputTokens))
+	}
 }
 
 func (x *contextExecutor) settings(ctx context.Context) (devinContextSettings, error) {
@@ -386,6 +402,7 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 						return recoveryErr
 					}
 					defer recovery.physical.Close()
+					recovery.restoreModelLimits(op.ModelLimits)
 					out.Job, err = engine.RecoverInternal(ctx, op, r, l, recovery)
 				}
 				return err
@@ -408,6 +425,7 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 				return err
 			}
 			defer recovery.physical.Close()
+			recovery.restoreModelLimits(op.ModelLimits)
 			if err = engine.ReconcileKnown(ctx, op, r, l, recovery); err != nil {
 				return err
 			}
@@ -427,6 +445,16 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 				job, recoveryErr := engine.RecoverInternal(ctx, op, r, l, recovery)
 				if job != nil || recoveryErr != nil {
 					out.Job, out.SessionID, out.Replayed = job, op.SessionID, true
+					return recoveryErr
+				}
+			}
+			if mode == "stateless" && op.ModelLimits != nil {
+				result, recoveryErr := engine.RecoverStateless(ctx, op, r, l, parsed, target, recovery)
+				if result != nil || recoveryErr != nil {
+					out.Compact, out.Replayed = result, true
+					if op.JobID != "" {
+						out.Job = &mc.Job{ID: op.JobID}
+					}
 					return recoveryErr
 				}
 			}
@@ -472,6 +500,11 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 		}
 		defer x.physical.Close()
 		x.manual = manual
+		limits := x.modelLimits()
+		if op.ModelLimits != nil && *op.ModelLimits != limits {
+			return mc.E("model_unavailable", "concrete model capabilities changed during this operation", 409)
+		}
+		op.ModelLimits = &limits
 		if err = engine.Bind(ctx, op, r, l, owner, op.SessionID); err != nil {
 			return err
 		}

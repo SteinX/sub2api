@@ -115,7 +115,17 @@ type Operation struct {
 	ReservedBytes int64          `json:"reserved_bytes,omitempty"`
 	Error         *cc.Error      `json:"error,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
+	ModelLimits   *ModelLimits   `json:"model_limits,omitempty"`
 }
+
+// ModelLimits pins provider request measurement for an operation's recovery.
+// Fresh inference admission still verifies the current catalog and permissions.
+type ModelLimits struct {
+	ContextTokens     int32 `json:"context_tokens"`
+	OutputTokens      int32 `json:"output_tokens"`
+	ParallelToolCalls bool  `json:"parallel_tool_calls"`
+}
+
 type Attempt struct {
 	Owner
 	ID             string                    `json:"id"`

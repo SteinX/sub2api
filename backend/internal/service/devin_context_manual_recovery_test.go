@@ -20,8 +20,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestContextManualRetrySettlesKnownUsageWithoutInferenceAdmission(t *testing.T) {
-	for _, interruptedAt := range []string{"billing", "application", "worker_receipt"} {
+func TestContextCompactRetryRecoversWithoutInferenceAdmission(t *testing.T) {
+	for _, interruptedAt := range []string{"billing", "application", "worker_receipt", "stateless_billing"} {
 		t.Run(interruptedAt, func(t *testing.T) { testContextManualRecovery(t, interruptedAt) })
 	}
 }
@@ -87,6 +87,11 @@ func testContextManualRecovery(t *testing.T, interruptedAt string) {
 	second, err := run("second", "responses", first.SessionID, body, 0)
 	require.NoError(t, err)
 	body, _ = json.Marshal(map[string]any{"mode": "internal", "session_id": second.SessionID, "lane": "main", "expected_revision": second.Revision})
+	mode, sessionID, revision := "internal", second.SessionID, second.Revision
+	if interruptedAt == "stateless_billing" {
+		mode, sessionID, revision = "stateless", "", 0
+		body, _ = json.Marshal(map[string]any{"mode": mode, "model": "gpt-5.5", "max_output_tokens": 128, "input": []map[string]any{{"role": "user", "content": "Keep the API"}, {"role": "assistant", "content": strings.Repeat("old evidence ", 3300)}, {"role": "user", "content": "Continue"}}})
+	}
 	billing.fail = interruptedAt != "application"
 	interrupted := false
 	if interruptedAt == "application" {
@@ -107,7 +112,7 @@ func testContextManualRecovery(t *testing.T, interruptedAt string) {
 			return false
 		}
 	}
-	_, err = run("compact", "internal", second.SessionID, body, second.Revision)
+	_, err = run("compact", mode, sessionID, body, revision)
 	require.Error(t, err)
 	require.Equal(t, 3, calls)
 	if interruptedAt != "application" {
@@ -122,23 +127,28 @@ func testContextManualRecovery(t *testing.T, interruptedAt string) {
 	billing.fail = false
 	a.Schedulable, a.Extra[DevinContextEnabledExtra] = false, false
 	s.concurrencyService = nil
-	result, err := run("compact", "internal", second.SessionID, body, second.Revision)
+	result, err := run("compact", mode, sessionID, body, revision)
 	require.NoError(t, err)
 	require.True(t, result.Replayed)
-	require.True(t, result.Job.Accounted)
 	require.Len(t, billing.commands, 3, "the known summary is charged exactly once")
-	session, _, err := s.devin.managedEngine().LoadSession(context.Background(), contextScope(key), second.SessionID)
-	require.NoError(t, err)
-	require.Zero(t, session.ReservedBytes)
-	require.Empty(t, session.ReservationOperationID)
-	require.Equal(t, 100, session.MaintenanceUsage.InputTokens)
-	if interruptedAt != "billing" {
-		require.Equal(t, "applied", result.Job.State)
-		require.Equal(t, uint64(1), session.Epoch)
-		require.LessOrEqual(t, result.Job.After, result.Job.Target, "recovery retains the original validated model target")
+	if mode == "internal" {
+		require.True(t, result.Job.Accounted)
+		session, _, err := s.devin.managedEngine().LoadSession(context.Background(), contextScope(key), second.SessionID)
+		require.NoError(t, err)
+		require.Zero(t, session.ReservedBytes)
+		require.Empty(t, session.ReservationOperationID)
+		require.Equal(t, 100, session.MaintenanceUsage.InputTokens)
+		if interruptedAt != "billing" {
+			require.Equal(t, "applied", result.Job.State)
+			require.Equal(t, uint64(1), session.Epoch)
+			require.LessOrEqual(t, result.Job.After, result.Job.Target, "recovery retains the original validated model target")
+		}
+	} else {
+		require.Equal(t, "compacted", result.Compact.Status)
+		require.Less(t, result.Compact.After, result.Compact.Before)
 	}
 	repo.lookupErr = errors.New("account no longer available")
-	_, err = run("compact", "internal", second.SessionID, body, second.Revision)
+	_, err = run("compact", mode, sessionID, body, revision)
 	require.NoError(t, err, "fully settled replay does not need account metadata")
 	require.Equal(t, 3, calls)
 	require.Len(t, billing.commands, 3)

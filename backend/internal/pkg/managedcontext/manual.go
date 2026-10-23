@@ -11,6 +11,36 @@ import (
 	cc "github.com/Wei-Shaw/sub2api/internal/pkg/contextcompact"
 )
 
+var errFreshInference = errors.New("compact recovery requires fresh inference")
+
+type knownCompactExecutor struct{ Executor }
+
+func (x knownCompactExecutor) OutputLimit() int {
+	if bounded, ok := x.Executor.(interface{ OutputLimit() int }); ok {
+		return bounded.OutputLimit()
+	}
+	return 0
+}
+func (knownCompactExecutor) Estimate(context.Context, Call) (float64, error) {
+	return 0, errFreshInference
+}
+func (knownCompactExecutor) Execute(context.Context, Call) (Outcome, error) {
+	return Outcome{KnownFailure: true, NotStarted: true}, errFreshInference
+}
+func (knownCompactExecutor) Auxiliary(context.Context) (Executor, func(), bool) {
+	return nil, nil, false
+}
+
+// RecoverStateless reconstructs a compact result only from recorded summaries.
+// A missing summary returns control to fresh admission without dispatching it.
+func (e *Engine) RecoverStateless(ctx context.Context, op *Operation, r *Record, l *Lease, parsed Parsed, target int, x Executor) (*CompactResult, error) {
+	result, err := e.Stateless(ctx, op, r, l, parsed, target, knownCompactExecutor{x})
+	if errors.Is(err, errFreshInference) {
+		return nil, nil
+	}
+	return result, err
+}
+
 func (e *Engine) CompactResponse(ctx context.Context, op *Operation) (*CompactResult, error) {
 	if op.Error != nil && (op.State == "failed" || op.State == "uncertain") {
 		return nil, op.Error
@@ -72,7 +102,7 @@ func (e *Engine) Stateless(ctx context.Context, op *Operation, r *Record, l *Lea
 	}
 	op.JobID = job.ID
 	defer func() {
-		if resultErr != nil {
+		if resultErr != nil && !errors.Is(resultErr, errFreshInference) {
 			p, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer stop()
 			e.failCompactJob(p, op, job.ID, typed(resultErr))

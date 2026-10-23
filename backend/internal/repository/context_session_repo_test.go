@@ -169,7 +169,7 @@ func TestContextStorePostgresRetainsUnsettledBodiesAndRecoveryWindow(t *testing.
 
 func TestContextStorePostgresRetiresInactiveReservationsAfterDrain(t *testing.T) {
 	for _, inactive := range []string{"cancelled", "expired"} {
-		for _, completion := range []string{"terminal", "drained", "not_started"} {
+		for _, completion := range []string{"terminal", "drained", "not_started", "leased_preparation"} {
 			t.Run(inactive+"/"+completion, func(t *testing.T) {
 				ctx := context.Background()
 				db := contextTestDB(t)
@@ -184,8 +184,13 @@ func TestContextStorePostgresRetiresInactiveReservationsAfterDrain(t *testing.T)
 				attemptA.Status = "dispatching"
 				attemptData := map[string]any{"operation_id": "op-a", "session_id": "a", "deadline": time.Now().Add(time.Minute), "settled": false}
 				attemptA.Data, _ = json.Marshal(attemptData)
-				if completion != "not_started" {
+				if completion == "terminal" || completion == "drained" {
 					_, err = s.Create(ctx, attemptA, nil)
+					require.NoError(t, err)
+				}
+				var preparationLease mc.Lease
+				if completion == "leased_preparation" {
+					preparationLease, err = s.Acquire(ctx, a.Scope, a.Kind, a.ID, "preparing-a", time.Minute)
 					require.NoError(t, err)
 				}
 				if inactive == "cancelled" {
@@ -208,7 +213,9 @@ func TestContextStorePostgresRetiresInactiveReservationsAfterDrain(t *testing.T)
 				result := []mc.Blob{contextBlob("result-b", "b", "private", bytes.Repeat([]byte("b"), 800<<10))}
 				if completion != "not_started" {
 					require.Error(t, s.CAS(ctx, attemptB, nil, result, &p), "in-flight late-result capacity remains protected")
-					if completion == "terminal" {
+					if completion == "leased_preparation" {
+						require.NoError(t, s.Release(ctx, preparationLease))
+					} else if completion == "terminal" {
 						attemptA.Status = "terminal"
 						attemptData["response_ref"] = "result-a"
 						attemptA.Data, _ = json.Marshal(attemptData)

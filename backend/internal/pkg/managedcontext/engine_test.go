@@ -702,6 +702,32 @@ func TestStatelessNoopAndKnownResultReplay(t *testing.T) {
 	require.Equal(t, "no_op", result.Status)
 	require.Equal(t, 1, x.callCount())
 }
+
+func TestStatelessRecoveryStopsBeforeFreshInference(t *testing.T) {
+	e := New(newMem())
+	defer func() { require.NoError(t, e.Close(context.Background())) }()
+	x := &fakeExecutor{safe: 20000}
+	body := mustJSON(map[string]any{"model": "concrete", "input": []cc.Item{{Type: "message", Role: "user", Content: mustJSON("Goal")}, {Type: "message", Role: "assistant", Content: mustJSON(strings.Repeat("old evidence ", 800))}, {Type: "message", Role: "user", Content: mustJSON("Current constraint")}}})
+	p, err := Parse(body, true)
+	require.NoError(t, err)
+	op, _, err := e.Begin(context.Background(), owner(), "stateless", "recover", cc.Digest(body), "concrete", "", DefaultPolicy())
+	require.NoError(t, err)
+	err = e.WithOperation(context.Background(), op, func(ctx context.Context, op *Operation, r *Record, l *Lease) error {
+		result, err := e.RecoverStateless(ctx, op, r, l, p, 5000, x)
+		require.NoError(t, err)
+		require.Nil(t, result, "missing summary returns to fresh admission")
+		require.Zero(t, x.callCount())
+		require.Zero(t, x.charges)
+		require.Empty(t, op.Attempts, "recovery must not journal or dispatch another call")
+		result, err = e.Stateless(ctx, op, r, l, p, 5000, x)
+		require.NoError(t, err)
+		require.Equal(t, "compacted", result.Status)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, x.callCount())
+	require.Equal(t, 1, x.charges)
+}
 func TestManagedParserRejectsMultimodalAndUnpairedToolData(t *testing.T) {
 	for _, body := range []string{`{"model":"m","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,a"}]}]}`, `{"model":"m","input":[{"type":"function_call_output","call_id":"unknown","output":"x"}]}`, `{"model":"m","input":[{"type":"function_call","call_id":"c","name":"t","arguments":"{}"}]}`, `{"model":"m","input":"x","store":true}`} {
 		_, err := Parse([]byte(body), true)
