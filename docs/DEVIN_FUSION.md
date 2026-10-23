@@ -121,6 +121,8 @@ Redis 推进锁有有限租期，持久会话使用整份状态 CAS/revision；�
 
 ## 双角色上下文压缩
 
+预算阈值、前缀选择、受保护项、摘要构造/校验和来源快照检查已提取到 `internal/pkg/contextcompact`，供平台其他上下文管理模式复用。Fusion 适配层继续管理原有角色策略、任务账本、CAS、归档、取消、计费和 Lead 缓存失效；持久格式与 `fusion-summary-v1` 策略保持兼容。
+
 网关压缩默认开启，可在每个配对的「角色上下文压缩」中关闭或配置独立阈值。省略 `compaction` 也使用上述默认值。Lead 与 Sidekick 分别使用本角色的具体模型做摘要；摘要没有执行工具权限，不是客户端 `/compact`，也不会重置客户端公共历史。
 
 摘要复用正常 Devin 请求构造、鉴权、准备与计费流程，使用独立摘要会话，工具列表为空且 `tool_choice=none`；返回工具调用会使摘要失败。新版补充第 24.4 节报告官方 `file_compactor.compact` 也走共用推理构造器，支持这一实现方向，无需引入假定的专用 compact RPC。该内部 query label 不直接作为未经核验的上游字段发送。
@@ -196,3 +198,5 @@ go test -tags=unit ./internal/service ./internal/handler ./internal/server/middl
 `audit.devin.fusion` 记录每次推理的角色、attempt ID、真实模型和 usage 是否已观察到；日志不包含凭据、JWT、brief、工具输出或私有正文。完整角色历史只存在有 TTL 的会话/结果存储中。
 
 测试使用模拟上游及隔离 Redis。真实账号模型能力、实际任务质量，以及 Codex/Claude Code/OpenCode 等目标客户端版本的端到端验收，需用部署环境另行验证；开发中没有触发真实付费推理或部署。
+
+普通模型的显式托管会话和平台手动 compact 见 [Devin 平台托管上下文](DEVIN_CONTEXT.md)。Fusion 的旧会话继续使用原格式；新普通会话使用独立的 PostgreSQL engine。

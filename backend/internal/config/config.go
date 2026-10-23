@@ -979,6 +979,7 @@ const (
 
 // GatewayConfig API网关相关配置
 type GatewayConfig struct {
+	DevinContext DevinContextConfig `mapstructure:"devin_context"`
 	// MinOutputTokens is the minimum max_output_tokens used when
 	// converting Chat Completions or Anthropic requests to Responses.
 	MinOutputTokens int `mapstructure:"min_output_tokens"`
@@ -2037,6 +2038,17 @@ func configureConfigSource(setConfigFile, addConfigPath func(string)) {
 }
 
 func setDefaults() {
+	for key, value := range map[string]any{
+		"enabled": false, "force_disabled": false, "manual_compact": false, "auto_compaction": true,
+		"api_key_ids": []int64{}, "model_uids": []string{}, "account_ids": []int64{},
+		"ttl_seconds": 86400, "max_history_bytes": int64(64 << 20), "max_user_history_bytes": int64(256 << 20),
+		"max_sessions_per_key": 8, "max_sessions_per_user": 32, "max_requests": 4096, "max_turn_requests": 4,
+		"max_turn_cost_usd": 5.0, "max_maintenance_cost_usd": 10.0, "max_user_maintenance_cost_usd": 50.0, "max_context_bytes": 2 << 20,
+		"max_output_tokens": 4096, "wall_seconds": 180, "summary_seconds": 30, "summary_output_tokens": 1024, "summary_attempts": 2,
+	} {
+		viper.SetDefault("gateway.devin_context."+key, value)
+	}
+
 	viper.SetDefault("run_mode", RunModeStandard)
 	viper.SetDefault("gateway.min_output_tokens", 128)
 	viper.SetDefault("simple_mode.auto_create_default_groups", true)
@@ -2713,6 +2725,9 @@ func setEnvReachableDefaults() {
 }
 
 func (c *Config) Validate() error {
+	if err := c.Gateway.DevinContext.Validate(); err != nil {
+		return err
+	}
 	if c.Gateway.MinOutputTokens < 16 {
 		return fmt.Errorf("gateway.min_output_tokens must be at least 16")
 	}

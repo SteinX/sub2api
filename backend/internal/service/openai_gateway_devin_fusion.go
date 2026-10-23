@@ -22,6 +22,7 @@ import (
 )
 
 type devinFusionExecutor struct {
+	attemptPrefix      string
 	service            *OpenAIGatewayService
 	c                  *gin.Context
 	account            *Account
@@ -54,6 +55,11 @@ func (x *devinFusionExecutor) MeasureContext(req *apicompat.ResponsesRequest) (i
 	wire, err := devin.BuildRequest(req, "fusion:capacity-check")
 	if err != nil {
 		return 0, 0, fusion.E("context_limit", "role request cannot be represented safely for context measurement", 413)
+	}
+	if x.attemptPrefix == "context" {
+		if err := devin.ApplyModelConfig(wire, devin.FindModel(x.models, req.Model), req); err != nil {
+			return 0, 0, err
+		}
 	}
 	b, _ := json.Marshal(wire)
 	raw, _ := json.Marshal(req)
@@ -182,6 +188,11 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
 	selected := devin.FindModel(x.models, call.Request.Model)
+	if x.attemptPrefix == "context" {
+		if err := devin.ApplyModelConfig(wire, selected, call.Request); err != nil {
+			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
+		}
+	}
 	if limit := int(selected.GetMaxTokens()); limit > 0 {
 		payload, _ := json.Marshal(wire)
 		if len(payload)+int(wire.Configuration.MaxTokens) > limit {
@@ -245,7 +256,11 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 		}
 		x.holdUnsettled[call.AttemptID] = true
 	}
-	logger.FromContext(ctx).Info("devin.fusion_attempt", zap.String("component", "audit.devin.fusion"), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("model", devin.DiagnosticModelID(wire.ChatModelUid)), zap.Bool("usage_observed", decoder.Response.Usage != nil))
+	event, component := "devin.fusion_attempt", "audit.devin.fusion"
+	if x.attemptPrefix == "context" {
+		event, component = "devin.context_attempt", "audit.devin.context"
+	}
+	logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("model", devin.DiagnosticModelID(wire.ChatModelUid)), zap.Bool("usage_observed", decoder.Response.Usage != nil))
 	return outcome, err
 }
 func (x *devinFusionExecutor) Settle(ctx context.Context, a fusion.Attempt) (float64, error) {
@@ -261,7 +276,7 @@ func (x *devinFusionExecutor) Settle(ctx context.Context, a fusion.Attempt) (flo
 	if err != nil {
 		return 0, err
 	}
-	result := &OpenAIForwardResult{RequestID: "fusion:" + a.ID, ResponseID: a.Response.ID, Model: x.publicModel, BillingModel: a.BillingModel, UpstreamModel: a.Model, UpstreamResponseModel: a.Response.Model, Usage: OpenAIUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheReadInputTokens: cached, CacheCreationInputTokens: u.CacheCreationInputTokens}, Duration: time.Since(a.StartedAt), UpstreamEndpoint: devin.ChatPath}
+	result := &OpenAIForwardResult{RequestID: x.attemptKey(a.ID), ResponseID: a.Response.ID, Model: x.publicModel, BillingModel: a.BillingModel, UpstreamModel: a.Model, UpstreamResponseModel: a.Response.Model, Usage: OpenAIUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheReadInputTokens: cached, CacheCreationInputTokens: u.CacheCreationInputTokens}, Duration: time.Since(a.StartedAt), UpstreamEndpoint: devin.ChatPath}
 	purpose := a.Purpose
 	if purpose == "" {
 		purpose = fusion.Inference

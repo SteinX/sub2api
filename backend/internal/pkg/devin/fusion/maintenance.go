@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/contextcompact"
 )
 
 type Purpose string
@@ -64,16 +65,8 @@ func (p Profile) CompactPolicy() CompactionPolicy {
 }
 func (p CompactionPolicy) Validate() error {
 	for _, values := range [][]int{p.Lead, p.Sidekick} {
-		if len(values) == 0 {
-			continue
-		}
-		if len(values) != 2 && len(values) != 3 {
-			return E("compaction_invalid", "thresholds must be spawn,hard or spawn,apply,hard", 400)
-		}
-		for i, n := range values {
-			if n < 64 || n > 2*1024*1024 || i > 0 && n < values[i-1] {
-				return E("compaction_invalid", "compaction thresholds must be positive and ordered", 400)
-			}
+		if err := contextcompact.ValidateThresholds(values, 64, 2*1024*1024); err != nil {
+			return compactionError(err)
 		}
 	}
 	if p.MaxAttempts < 1 || p.MaxAttempts > 4 || p.TimeoutSeconds < 1 || p.TimeoutSeconds > 120 || p.MaxOutputTokens < 64 || p.MaxOutputTokens > 4096 {
@@ -89,16 +82,8 @@ func (p CompactionPolicy) thresholds(role Role, safe int) (thresholds, error) {
 	if role == Sidekick && len(p.Sidekick) > 0 {
 		v = p.Sidekick
 	}
-	t := thresholds{safe * 60 / 100, safe * 75 / 100, safe * 90 / 100}
-	if len(v) == 2 {
-		t = thresholds{v[0], v[1], v[1]}
-	} else if len(v) == 3 {
-		t = thresholds{v[0], v[1], v[2]}
-	}
-	if t.spawn <= 0 || t.spawn > t.apply || t.apply > t.hard || t.hard > safe {
-		return t, E("context_limit", "compaction thresholds exceed the concrete model's safe input budget", 413)
-	}
-	return t, nil
+	t, err := contextcompact.ResolveThresholds(v, safe)
+	return thresholds{t.Spawn, t.Apply, t.Hard}, compactionError(err)
 }
 
 type RoleContext struct {

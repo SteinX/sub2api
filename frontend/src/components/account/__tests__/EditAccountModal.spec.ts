@@ -331,6 +331,35 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 }
 
 describe('EditAccountModal', () => {
+  it('loads, saves and reopens account-level Devin compactor switches while preserving runtime data', async () => {
+    const account = {
+      ...buildAccount(), platform: 'devin',
+      extra: { devin_context_enabled: true, devin_context_auto_compaction: false, devin_context_manual_compact: true, runtime_state: 'retain' }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLSelectElement>('[data-testid=devin-context-mode]').element.value).toBe('enabled')
+    expect(wrapper.get<HTMLInputElement>('[data-testid=devin-context-auto]').element.checked).toBe(false)
+    await wrapper.get('[data-testid=devin-context-manual]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    const saved = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(saved).toMatchObject({ devin_context_enabled: true, devin_context_auto_compaction: false, devin_context_manual_compact: false, runtime_state: 'retain' })
+    expect(account.extra.devin_context_manual_compact).toBe(true)
+    wrapper.unmount()
+    const reopened = mountModal({ ...account, extra: saved })
+    expect(reopened.get<HTMLInputElement>('[data-testid=devin-context-manual]').element.checked).toBe(false)
+    await reopened.get('[data-testid=devin-context-mode]').setValue('disabled')
+    await reopened.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra.devin_context_enabled).toBe(false)
+    reopened.unmount()
+  })
+
+  it('does not expose Devin compactor settings on another platform', () => {
+    const wrapper = mountModal()
+    expect(wrapper.find('[data-testid=devin-context-settings]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it.each(['apikey', 'oauth'])('edits Devin %s endpoint and model restrictions using its authorized catalog', async (type) => {
     const account = {
       ...buildAccount(), platform: 'devin', type,

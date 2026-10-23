@@ -13,14 +13,17 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	mc "github.com/Wei-Shaw/sub2api/internal/pkg/managedcontext"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
-func ProvideDevinService(repo AccountRepository, proxyRepo ProxyRepository, upstream HTTPUpstream, cfg *config.Config, redisClient *redis.Client) *DevinService {
-	return NewDevinService(repo, proxyRepo, upstream, cfg, devin.NewRedisSessionStore(redisClient))
+func ProvideDevinService(repo AccountRepository, proxyRepo ProxyRepository, upstream HTTPUpstream, cfg *config.Config, redisClient *redis.Client, contexts mc.Store) *DevinService {
+	svc := NewDevinService(repo, proxyRepo, upstream, cfg, devin.NewRedisSessionStore(redisClient))
+	svc.contextStore = contexts
+	return svc
 }
 
 func ProvideGrokOAuthService(proxyRepo ProxyRepository, oauthClient GrokOAuthClient, cfg *config.Config, redisClient *redis.Client) *GrokOAuthService {
@@ -866,6 +869,7 @@ func ProvideAPIKeyService(
 
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
+	NewContextMaintenance,
 	ProvideDevinService,
 	// Core services
 	ProvideAuthService,

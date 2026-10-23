@@ -4,9 +4,6 @@ package fusion
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -14,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/contextcompact"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 )
 
@@ -63,15 +61,7 @@ func (p Profile) Revision() string {
 		Profile Profile
 	}{PolicyVersion, p})
 }
-func Digest(v any) string {
-	b, _ := json.Marshal(v)
-	var canonical any
-	if json.Unmarshal(b, &canonical) == nil {
-		b, _ = json.Marshal(canonical)
-	}
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
-}
+func Digest(v any) string              { return contextcompact.Digest(v) }
 func Scope(userID, keyID int64) string { return Digest([]int64{userID, keyID}) }
 func SafeID(id string) bool {
 	if len(id) == 0 || len(id) > 128 {

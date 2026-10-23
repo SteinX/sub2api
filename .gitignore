@@ -143,6 +143,9 @@ docs/*
 !docs/DEVIN_UPSTREAM_REPAIR.md
 !docs/DEVIN_CLIENT_IDENTITY.md
 !docs/DEVIN_FUSION.md
+!docs/DEVIN_CONTEXT.md
+!docs/DEVIN_COMPACTION_MIGRATION.md
+!docs/DEVIN_COMPACTION_IMPLEMENTATION_PLAN.md
 !docs/DEVIN_MODEL_ROUTING.md
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/codex-credits.md

@@ -420,6 +420,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 
 	// Read request body
+	if service.DevinContextIntent(c) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2<<20)
+	}
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
 		if maxErr, ok := extractMaxBytesError(err); ok {
@@ -470,6 +473,28 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	}
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
+	if service.DevinContextIntent(c) {
+		if legacyCompact || nativeV2 {
+			h.errorResponse(c, 400, "invalid_request_error", "Use /v1/context/compact for managed contexts")
+			return
+		}
+		if _, valid := parseOpenAICompatibleStream(body); !valid {
+			h.errorResponse(c, 400, "invalid_request_error", invalidStreamFieldTypeMessage)
+			return
+		}
+		if capped, changed, err := applyOpenAIReasoningEffortPolicyForRequest(c, apiKey, body); err != nil {
+			respondOpenAIReasoningEffortPolicyError(c, err, h.errorResponse)
+			return
+		} else if changed {
+			body = capped
+		}
+		if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, body); decision != nil && !decision.AllowNextStage {
+			h.openAISecurityAuditError(c, decision)
+			return
+		}
+		h.contextResponse(c, apiKey, body)
+		return
+	}
 	if prepareDevinFusionRequest(c, apiKey, h.gatewayService, h.apiKeyService, reqModel, body, "responses") {
 		return
 	}

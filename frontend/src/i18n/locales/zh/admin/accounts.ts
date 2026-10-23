@@ -1,6 +1,18 @@
 export default {
     accounts: {
       devin: {
+        contextTitle: '托管上下文压缩（Compactor）',
+        contextInherit: '跟随全局配置（默认关闭）',
+        contextOn: '为此账号开启',
+        contextOff: '为此账号关闭',
+        contextAuto: '自动压缩历史上下文',
+        contextManual: '允许手动 compact',
+        contextModeHint: {
+          inherit: '使用平台配置中的开关和灰度名单。',
+          enabled: '此账号可独立启用；平台停用配置及已设置的灰度范围仍然生效。自动压缩和手动 compact 默认均开启。',
+          disabled: '保存后阻止此账号的后续托管推理和压缩，已有历史与已发生费用仍保留。'
+        },
+        contextUsageHint: '适用于普通 Devin 模型的 Responses managed 模式及 context/compact 接口，客户端需显式接入。摘要按实际用量计费；Fusion 的压缩策略在协作配置中单独设置。',
         fusionAutoEnabled: '开启 Fusion（默认开启，按 model ID 自动识别配对）',
         fusionOverride: '覆盖设置',
         fusionDisablePair: '关闭此配对',
