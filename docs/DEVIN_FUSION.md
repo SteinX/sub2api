@@ -59,6 +59,10 @@ Fusion 默认开启，现有账号也立即适用，无需逐个创建 profile�
 
 三个接口共用状态机；均支持 JSON 和 SSE。Responses 的固定 custom/freeform 工具及 namespace 通过已有可逆工具适配器转换，返回时恢复原工具形式。内部 `sub2api_sidekick` 永不对外发布，客户端也不能声明同名工具。每次只发布一个客户端工具调用。
 
+上游偶尔会在请求禁用并行工具后仍返回多个客户端调用。网关将它们作为有界队列持久化，按原顺序逐个发布和接收结果；整批结果到齐前不再次调用角色模型。每个调用保留原角色、turn 和内部 call ID，预算在发布首个调用前按整批检查。排队期间的下一次发布没有新物理推理，公共 usage 为零，也不会重复入账。内部委派与其他调用混合的批次仍拒绝。回退到不识别队列的旧版本前，应先完成或取消这些待工具会话。
+
+已完成的原生零参数调用可能不包含 `arguments_json`。只有明确声明为简单 object、没有必填字段或其他未知约束的工具，才将缺失参数补为 `{}`，并补齐 SSE 参数增量。必填参数、半截 JSON、未知工具及达到 token 上限的未完成调用仍拒绝，不能借此把截断结果标为完成。
+
 ```mermaid
 sequenceDiagram
   participant C as 接入客户端
@@ -174,6 +178,10 @@ Lead 的用户目标、system/developer 约束、当前 turn 最近交接的调�
 
 首次真实验证应固定一个适用模型对、测试账号作用域、CLI build、网关 revision、profile 和 adapter shape version，预先限定调用数、时长与费用。使用互不预热的独立 session，依次保留脱敏官方请求样本、候选请求逐字段差异、无保活/有限保活的配对对照，以及取消和压缩后的迟到结果。按 attempt 汇总正常推理、摘要、刷新及已发生失败/重试的费用，比较 Lead 恢复时的真实 cache usage 与时延；HTTP 成功或单次命中都不能替代净收益结论。上游未提供 cache usage 时保留未知，不宣称续期成功。
 
+2026-10-23 的隔离实验用普通 Lead 请求的副本测试了 `max_output_tokens=1` 候选形态。固定 Opus 5.5 请求在两组独立前缀的 A/B 中，初始缓存写入后等待约 6.5–7 分钟：没有中途请求的组恢复时 cache-read/input 约 8.2%；第 4 分钟额外发送一次候选请求的组约 99.95%。候选响应报告 `MAX_TOKENS`、1 个 output token 和 cache-read，但没有可见内容或工具；不能经过要求业务答复的普通 decoder 来判断它失败，也不能把它加入业务历史。改变系统提示或工具定义会损失对应前缀命中，恢复原前缀后重新命中；相同前缀更换 Cascade ID 仍可能命中，因此 A/B 使用不同的随机前缀，而非只换会话 ID。
+
+上述结果只说明这个模型、请求形态和短窗口下的候选请求有效，不证明官方 CLI 保活私有契约、长期稳定性或账单净收益。实验没有注册生产 adapter 或定时器。控制器回归另验证 1-token 无可见内容的独立结算、可见输出拒绝、嵌套请求深拷贝、重复 tick、过期 epoch、取消和压缩失效；生产接入仍须完成前述容量和账务约束。
+
 ## 费用与限制
 
 - 每次实际 Lead/Sidekick 推理按真实 billing model、独立 token/cache 桶及当次计费时点计算，使用稳定 `fusion:<attempt UUID>` 入账 ID；外层 request ID 不会把多个角色费用去重成一笔。
@@ -183,7 +191,7 @@ Lead 的用户目标、system/developer 约束、当前 turn 最近交接的调�
 - 角色上下文受配置字节数和真实模型窗口的保守上界约束；压缩有明确策略、来源归档与费用记录，不截断工具结果或 rewind。单会话至多 256 个 HTTP 推进请求，持久快照最多 12 MiB；压缩不会缩减客户端公共检查点或无限扩大持久存储上限。
 - session 到期后不再接受推进；历史及结果账本有 TTL，账本额外保留一天用于故障核对，费用去重由现有数据库账务层承担。
 
-当前合同要求固定的客户端工具声明，支持 tool choice `auto`/`none`。不支持动态 tool discovery、更改 schema、并行工具、多 Sidekick、任意 steering、结构化最终输出、`store:true` 及公共 response retrieval。WebSocket 接入应使用客户端的 HTTP Responses 模式；本实现的协议适配范围是上述三个 HTTP 接口。不能据此声称所有客户端默认配置都已真实联调。
+当前合同要求固定的客户端工具声明，支持 tool choice `auto`/`none`。不支持动态 tool discovery、更改 schema、并行执行工具、多 Sidekick、任意 steering、结构化最终输出、`store:true` 及公共 response retrieval；上游的客户端工具批次按上述规则串行处理。WebSocket 接入应使用客户端的 HTTP Responses 模式；本实现的协议适配范围是上述三个 HTTP 接口。不能据此声称所有客户端默认配置都已真实联调。
 
 ## 验证与观测
 
@@ -200,3 +208,11 @@ go test -tags=unit ./internal/service ./internal/handler ./internal/server/middl
 `audit.devin.fusion` 记录每次推理的角色、attempt ID、真实模型和 usage 是否已观察到；日志不包含凭据、JWT、brief、工具输出或私有正文。完整角色历史只存在有 TTL 的会话/结果存储中。
 
 自动化测试使用模拟上游及隔离 Redis。2026-10-23 的兼容修复额外用真实上游 Opus 5.5 + SWE-2 完成了隔离的三轮计算任务，核对双角色执行、缓存读写与幂等重放；这些调用可能消耗上游额度，未写生产配置或生产账单。该验证不等同于目标客户端的端到端验收或完整生产计费验证。Codex/Claude Code/OpenCode 的真实文件/命令工具、部署配置和所有模型组合仍需单独验收。
+
+同日扩展验收固定抽取 HumanEval 和 MBPP sanitized 各 6 题，种子 `20261023`；仅从纯标准库、参考程序能够通过判题器的候选中抽样，MBPP 采用官方 test split。公开样例供受限 `read_file` / `write_file` / `run_tests` 协作使用，最终官方断言独立保留。任务明确要求 Lead 在每份 Sidekick 报告后亲自复测，失败时再委派，不能由此推导未提出该要求的任务也必定重验。
+
+首轮 11/12 完成协作并通过最终断言；另一题发现批返回兼容问题，修复后在新会话复测通过。前置试跑另发现零参数工具解码问题。一轮复测出现传输 EOF，按结果未知的网络异常单列，不自动重放原请求。陈旧 Sidekick 报告故障通过 Lead 复测及二次委派恢复，测试服务暂时失败也成功恢复。该评测包含工具反馈和开发期间修复，不是官方 HumanEval/MBPP pass@1，也不是冻结版本的全量基准成绩。
+
+另有一项受控的真实上游批返回用例：仅在测试中显式允许并要求 Sidekick 同批返回 `write_file` 和 `run_tests`，网关逐个发布，两次客户端工具执行之间没有新增物理推理，随后 Sidekick 报告、Lead 独立复测和最终断言均通过。该兼容用例不计入上述 12 题成绩，也没有改变生产请求禁用并行工具的策略。
+
+数据源固定为 [HumanEval](https://github.com/openai/human-eval/tree/463c980b59e818ace59f6f9803cd92c749ceae61) 和 [MBPP sanitized](https://github.com/google-research/google-research/blob/f82046ba5aabbbb427dbfd38a254d26bff08b533/mbpp/sanitized-mbpp.json)。题目 ID、数据哈希、角色工具轨迹、初轮失败及复测、缓存干预用量和被废弃的实验对照均保留在本次验证报告中；没有将账号凭据或原始认证报文提交到仓库。

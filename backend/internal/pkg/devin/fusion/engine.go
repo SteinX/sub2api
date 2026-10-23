@@ -180,7 +180,15 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 		*lane = append(*lane, apicompat.ResponsesInputItem{Type: "function_call_output", CallID: s.Pending.InternalID, Output: added[0].Output})
 		s.Role = s.Pending.Role
 		s.Pending = nil
-		if s.Role == Sidekick {
+		if len(s.QueuedTools) > 0 {
+			next := s.QueuedTools[0]
+			if next.Role != s.Role || next.Turn != s.Turn || next.PublicID == "" || next.InternalID == "" {
+				return result, E("session_corrupt", "queued tool ownership is invalid", 503)
+			}
+			s.Pending = &next
+			s.QueuedTools = s.QueuedTools[1:]
+			s.State = WaitingTool
+		} else if s.Role == Sidekick {
 			s.State = RunningSidekick
 		} else {
 			s.State = RunningLead
@@ -382,6 +390,11 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		}
 		// Publication can be resumed independently after a crash following apply.
 		if (s.State == WaitingTool || s.State == Completed) && s.ActiveRequest >= 0 && len(s.Attempts) > 0 {
+			if cancelled, err := e.cancelled(persistCtx, s); err != nil {
+				return result, err
+			} else if cancelled {
+				return stop(E("cancelled", "Fusion session was cancelled", 409), Cancelled)
+			}
 			return e.publish(persistCtx, s, raw, result)
 		}
 		cancelled, err := e.cancelled(persistCtx, s)
@@ -586,11 +599,15 @@ func (e *Engine) apply(s *Session, r *apicompat.ResponsesResponse) error {
 		}
 	}
 	if len(calls) > 1 {
-		return E("parallel_tools_unsupported", "model returned multiple tool calls despite serial-tool policy", 502)
+		for _, call := range calls {
+			if call.Name == DelegateTool {
+				return E("parallel_tools_unsupported", "a delegation cannot be mixed with other calls", 502)
+			}
+		}
 	}
 	lane := s.Lane(s.Role)
 	*lane = append(*lane, laneItems(r)...)
-	if len(calls) == 1 {
+	if len(calls) > 0 {
 		c := calls[0]
 		if c.Name == DelegateTool {
 			if s.Role != Lead {
@@ -615,15 +632,22 @@ func (e *Engine) apply(s *Session, r *apicompat.ResponsesResponse) error {
 			s.State = RunningSidekick
 			return nil
 		}
-		if s.TurnTools >= s.Profile.MaxTools {
+		if len(calls) > s.Profile.MaxTools-s.TurnTools {
 			return E("budget_exhausted", "client tool budget exhausted", 409)
 		}
-		s.TurnTools++
+		s.TurnTools += len(calls)
 		handoff := ""
 		if s.Role == Sidekick && len(s.Handoffs) > 0 {
 			handoff = s.Handoffs[len(s.Handoffs)-1].ID
 		}
 		s.Pending = &PendingTool{PublicID: "call_fusion_" + uuid.NewString(), InternalID: c.CallID, Role: s.Role, Turn: s.Turn, HandoffID: handoff, Name: c.Name, Arguments: c.Arguments}
+		// Some native members still batch client calls after parallel tool use
+		// was disabled. Persist the batch and publish one owned call at a time;
+		// no new inference may see the history until every result is supplied.
+		s.QueuedTools = nil
+		for _, queued := range calls[1:] {
+			s.QueuedTools = append(s.QueuedTools, PendingTool{PublicID: "call_fusion_" + uuid.NewString(), InternalID: queued.CallID, Role: s.Role, Turn: s.Turn, HandoffID: handoff, Name: queued.Name, Arguments: queued.Arguments})
+		}
 		s.State = WaitingTool
 		return nil
 	}

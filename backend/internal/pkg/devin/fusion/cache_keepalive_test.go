@@ -208,6 +208,61 @@ func TestFusionKeepaliveConfirmationUnknownCostAndUnexpectedOutput(t *testing.T)
 		})
 	}
 }
+
+func TestFusionKeepaliveOneTokenUsageNeverEntersBusinessHistory(t *testing.T) {
+	for _, visibleOutput := range []bool{false, true} {
+		e, s, c, clock, adapter := cacheFixture(t)
+		before, _, err := e.Load(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		state, _, err := c.Load(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		// A bounded native warm request can report max_tokens and one billed
+		// output token without any visible content. This is distinct from a
+		// business generation, whose decoder correctly rejects no content.
+		adapter.result.Outcome.Response = &apicompat.ResponsesResponse{Status: "incomplete", IncompleteDetails: &apicompat.ResponsesIncompleteDetails{Reason: "max_output_tokens"}, Usage: &apicompat.ResponsesUsage{InputTokens: 8219, OutputTokens: 1, TotalTokens: 8220, InputTokensDetails: &apicompat.ResponsesInputTokensDetails{CachedTokens: 8215}}}
+		if visibleOutput {
+			adapter.result.Outcome.Response.Output = textResponse("x").Output
+		}
+		clock.Advance(10 * time.Second)
+		require.NoError(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID))
+		after, _, err := e.Load(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		require.Equal(t, Digest(before), Digest(after), "warm output and usage belong to their independent ledger")
+		control, _, err := c.Load(context.Background(), s.Scope, s.ID)
+		require.NoError(t, err)
+		require.InDelta(t, .04, control.CumulativeCostUSD, .00001, "one output token is still settled")
+		if visibleOutput {
+			require.Equal(t, "STOPPED", control.State)
+			require.True(t, control.LastCacheConfirmedAt.IsZero())
+		} else {
+			require.Equal(t, "ARMED", control.State)
+			require.False(t, control.LastCacheConfirmedAt.IsZero())
+		}
+		require.NoError(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID))
+		require.Equal(t, 1, adapter.calls, "the same due tick must not be sent twice")
+	}
+}
+
+func TestFusionKeepaliveSnapshotOwnsNestedRequestData(t *testing.T) {
+	_, s, c, _, _ := cacheFixture(t)
+	request := testRequest("immutable input")
+	request.Model = s.Profile.LeadModel
+	output := 32
+	request.MaxOutputTokens = &output
+	require.NoError(t, c.Capture(context.Background(), s, request, "captured-lead", "route"))
+	before, _, err := c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	digest := Digest(before.Snapshot.Request)
+	request.Instructions = "caller changed instructions"
+	request.Input[0] = ' '
+	request.Tools[0].Description = "caller changed tool contract"
+	request.Tools[0].Parameters[0] = ' '
+	output = 1
+	after, _, err := c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.Equal(t, digest, Digest(after.Snapshot.Request))
+	require.Equal(t, 32, *after.Snapshot.Request.MaxOutputTokens)
+}
 func TestFusionKeepaliveRestartUnknownAndIdempotentCost(t *testing.T) {
 	_, s, c, clock, f := cacheFixture(t)
 	state, _, err := c.Load(context.Background(), s.Scope, s.ID)

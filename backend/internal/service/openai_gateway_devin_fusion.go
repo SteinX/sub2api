@@ -206,7 +206,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 	if err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
-	decoder := devin.NewEventDecoder(call.Request.Model, func(apicompat.ResponsesStreamEvent) error { return nil })
+	decoder := devin.NewEventDecoder(call.Request.Model, func(apicompat.ResponsesStreamEvent) error { return nil }, wire.Tools...)
 	if err := ctx.Err(); err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
