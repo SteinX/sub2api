@@ -61,7 +61,11 @@ function client(settings, fetchImpl = globalThis.fetch) {
 }
 
 function sessionId(value) {
-  if (!/^devin-[A-Za-z0-9-]+$/.test(value || '')) throw new Error('Invalid Devin session ID; inspect the reserved dispatch before retrying.');
+  // v3 returns opaque IDs (including bare hex), not only legacy devin-* IDs.
+  // Keep IDs bounded and safe as a single URL path segment and Markdown link.
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) {
+    throw new Error('Invalid Devin session ID; inspect the reserved dispatch before retrying.');
+  }
   return value;
 }
 
@@ -203,9 +207,14 @@ async function trackingIssue(github, upstreamTag, create) {
   const issues = await github.paginate(github.rest.issues.listForRepo, { ...FORK, state: 'all', creator: BOT, per_page: 100 });
   const issue = issues.find(item => !item.pull_request && item.user?.login === BOT && item.body?.startsWith(marker));
   if (issue || !create) return issue;
-  return (await github.rest.issues.create({ ...FORK, title: `Devin upstream repair: ${upstreamTag}`,
-    body: `${marker}\n\nWaiting to reserve a Devin repair dispatch.`,
-  })).data;
+  try {
+    return (await github.rest.issues.create({ ...FORK, title: `Devin upstream repair: ${upstreamTag}`,
+      body: `${marker}\n\nWaiting to reserve a Devin repair dispatch.`,
+    })).data;
+  } catch (error) {
+    if (error.status === 410) throw new Error('Enable Issues in SteinX/sub2api Settings > General > Features before dispatching repairs.');
+    throw error;
+  }
 }
 
 function readState(issue) {
@@ -313,9 +322,11 @@ async function run({ github, context, core }, options = {}) {
   core.setSecret(settings.key);
   const api = options.api || client(settings);
   if (env.REPAIR_MODE === 'check') {
+    const repository = (await github.rest.repos.get(FORK)).data;
+    if (!repository.has_issues) throw new Error('Enable Issues in SteinX/sub2api Settings > General > Features before dispatching repairs.');
     // Read only: validate organization membership without starting a paid session.
     await api('GET', 'sessions?first=1');
-    core.info('Devin API authentication and organization access verified; no session was created.');
+    core.info('Devin API authentication, organization access and Issues prerequisite verified; no session was created.');
     return;
   }
   const imageCheck = options.imageCheck || publicImage;

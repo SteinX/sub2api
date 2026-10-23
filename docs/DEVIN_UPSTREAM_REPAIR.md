@@ -82,6 +82,9 @@ check, even while automatic repairs are disabled. To run it again, open
 Run workflow**, choose `main`, and leave **mode = check**. This performs one
 read-only API request. It does not start a paid session, change GitHub state, or
 verify whether the service user can create a session or push repository changes.
+It also checks that repository Issues are enabled, since a tracking issue must
+exist before any billable dispatch. Disabling Issues later stops new dispatches
+with a configuration error.
 
 Once preflight and the Devin repository environment are ready, set
 `DEVIN_UPSTREAM_REPAIR_ENABLED=true`. Automatic workflow completion events then
@@ -134,7 +137,8 @@ repair the same branch. Neither this change nor preflight disables that task.
 
 To recover a reserved/blocked record, inspect the source run, issue and Devin
 sessions first. A repository maintainer may edit the issue's machine state block:
-restore `phase` to `active` and set the verified `sessionId` if the write succeeded;
+restore `phase` to `active` and set the verified `sessionId` if the write succeeded
+(use the returned ID exactly, including bare v3 IDs without a `devin-` prefix);
 or remove only the unaccepted fingerprint and restore `phase` to `ready` if it
 definitely did not. A replacement after a terminal session needs explicit review
 of spent ACUs and removal of `sessionId`; it is never automatic. Keep the
