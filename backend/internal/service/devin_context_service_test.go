@@ -32,6 +32,7 @@ type contextGatewayStore struct {
 	records map[string]mc.Record
 	blobs   map[string][]byte
 	leases  map[string]mc.Lease
+	fail    func(*mc.Record) bool
 }
 
 func newContextGatewayStore() *contextGatewayStore {
@@ -71,6 +72,9 @@ func (s *contextGatewayStore) CAS(_ context.Context, r *mc.Record, l *mc.Lease, 
 	}
 	if l != nil && s.leases[k] != *l {
 		return fmt.Errorf("lease conflict")
+	}
+	if s.fail != nil && s.fail(r) {
+		return fmt.Errorf("injected persistence failure")
 	}
 	r.Revision++
 	v := *r

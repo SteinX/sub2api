@@ -21,6 +21,13 @@ import (
 )
 
 func TestContextManualRetrySettlesKnownUsageWithoutInferenceAdmission(t *testing.T) {
+	for _, interruptedAt := range []string{"billing", "application"} {
+		t.Run(interruptedAt, func(t *testing.T) { testContextManualRecovery(t, interruptedAt) })
+	}
+}
+
+func testContextManualRecovery(t *testing.T, interruptedAt string) {
+	t.Helper()
 	cfg, key := contextEnabledFixture()
 	models := []*pb.ClientModelConfig{{ModelUid: "gpt-5.5", MaxTokens: 65536, ModelInfo: &pb.ModelInfo{MaxOutputTokens: 4096, ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}}}}
 	a := &Account{ID: 7, Platform: PlatformDevin, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1, GroupIDs: []int64{9}, Credentials: map[string]any{"access_token": "synthetic-token"}, Extra: devinCatalogExtra(models, "fixture")}
@@ -62,7 +69,8 @@ func TestContextManualRetrySettlesKnownUsageWithoutInferenceAdmission(t *testing
 	defer s.billingCacheService.Stop()
 	s.concurrencyService = NewConcurrencyService(&stubConcurrencyCacheForTest{acquireResult: true})
 	s.devin = NewDevinService(repo, nil, upstream, cfg, nil)
-	s.devin.contextStore = newContextGatewayStore()
+	store := newContextGatewayStore()
+	s.devin.contextStore = store
 	defer func() { require.NoError(t, s.devin.managedEngine().Close(context.Background())) }()
 	keys := &APIKeyService{apiKeyRepo: &apiKeyRepoStub{apiKey: key}}
 	run := func(id, mode, session string, body []byte, revision int64) (*ContextRunResult, error) {
@@ -79,11 +87,27 @@ func TestContextManualRetrySettlesKnownUsageWithoutInferenceAdmission(t *testing
 	second, err := run("second", "responses", first.SessionID, body, 0)
 	require.NoError(t, err)
 	body, _ = json.Marshal(map[string]any{"mode": "internal", "session_id": second.SessionID, "lane": "main", "expected_revision": second.Revision})
-	billing.fail = true
+	billing.fail = interruptedAt == "billing"
+	interrupted := false
+	if interruptedAt == "application" {
+		store.fail = func(r *mc.Record) bool {
+			var session mc.Session
+			if !interrupted && r.Kind == "session" && json.Unmarshal(r.Data, &session) == nil && session.Epoch > 0 {
+				interrupted = true
+				return true
+			}
+			return false
+		}
+	}
 	_, err = run("compact", "internal", second.SessionID, body, second.Revision)
 	require.Error(t, err)
 	require.Equal(t, 3, calls)
-	require.Len(t, billing.commands, 2)
+	if interruptedAt == "billing" {
+		require.Len(t, billing.commands, 2)
+	} else {
+		require.True(t, interrupted)
+		require.Len(t, billing.commands, 3)
+	}
 	billing.fail = false
 	a.Schedulable, a.Extra[DevinContextEnabledExtra] = false, false
 	s.concurrencyService = nil
@@ -91,7 +115,17 @@ func TestContextManualRetrySettlesKnownUsageWithoutInferenceAdmission(t *testing
 	require.NoError(t, err)
 	require.True(t, result.Replayed)
 	require.True(t, result.Job.Accounted)
-	require.Len(t, billing.commands, 3, "the known summary is charged once during the retry")
+	require.Len(t, billing.commands, 3, "the known summary is charged exactly once")
+	session, _, err := s.devin.managedEngine().LoadSession(context.Background(), contextScope(key), second.SessionID)
+	require.NoError(t, err)
+	require.Zero(t, session.ReservedBytes)
+	require.Empty(t, session.ReservationOperationID)
+	require.Equal(t, 100, session.MaintenanceUsage.InputTokens)
+	if interruptedAt == "application" {
+		require.Equal(t, "applied", result.Job.State)
+		require.Equal(t, uint64(1), session.Epoch)
+		require.LessOrEqual(t, result.Job.After, result.Job.Target, "recovery retains the original validated model target")
+	}
 	repo.lookupErr = errors.New("account no longer available")
 	_, err = run("compact", "internal", second.SessionID, body, second.Revision)
 	require.NoError(t, err, "fully settled replay does not need account metadata")

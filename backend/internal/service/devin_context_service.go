@@ -377,8 +377,8 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 			job, err := engine.RecoverInternal(ctx, op, r, l, nil)
 			if job != nil || err != nil {
 				out.Job, out.SessionID, out.Replayed = job, op.SessionID, true
-				if err == nil && !job.Accounted && len(op.Attempts) > 0 {
-					// Terminal job replay may still owe known usage. Settlement
+				if err == nil && (!job.Accounted || job.State == "ready") && len(op.Attempts) > 0 {
+					// Known jobs may still need accounting or application. Recovery
 					// uses original ownership and needs neither a model client nor
 					// inference slots, including after the account was disabled.
 					recovery, recoveryErr := s.contextPhysical(ctx, key, keys, job.Owner, model, op.SessionID, policy, c, false)

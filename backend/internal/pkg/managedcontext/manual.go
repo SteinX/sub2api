@@ -224,9 +224,9 @@ func (e *Engine) failCompactJob(ctx context.Context, op *Operation, id string, c
 	_ = e.save(ctx, jr, j, j.State, nil, nil, nil)
 }
 
-// RecoverInternal returns an already-terminal manual job without model discovery,
-// account slots or new inference. An unsettled job is returned for discovery
-// when x is nil; a settlement-only executor finishes its accounting on retry.
+// RecoverInternal recovers known manual jobs without model discovery, account
+// slots or new inference. With x nil it discovers jobs needing accounting or
+// application; a recovery executor can then finish that work under the lease.
 func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record, ol *Lease, x Executor) (*Job, error) {
 	id := op.JobID
 	if id == "" {
@@ -257,10 +257,10 @@ func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record,
 	if j.OperationID != op.ID || j.SessionID != op.SessionID {
 		return nil, nil
 	}
-	if j.State != "applied" && j.State != "failed" && j.State != "stale" && j.State != "no_op" {
+	if j.State != "applied" && j.State != "failed" && j.State != "stale" && j.State != "no_op" && j.State != "ready" {
 		return nil, nil
 	}
-	if !j.Accounted && x == nil {
+	if (!j.Accounted || j.State == "ready") && x == nil {
 		return j, nil
 	}
 	s, _, err := e.LoadSession(ctx, op.Scope, op.SessionID)
@@ -268,10 +268,14 @@ func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record,
 		return nil, err
 	}
 	reserved := func(s *Session) bool {
+		linkedJob := s.JobID
+		if linkedJob == "" {
+			linkedJob = s.AppliedJobID
+		}
 		return s.OperationID == "" && (s.ReservationOperationID == op.ID ||
-			s.ReservationOperationID == "" && (s.JobID == j.ID || s.AppliedJobID == j.ID)) && s.ReservedBytes > 0
+			s.ReservationOperationID == "" && linkedJob == j.ID) && s.ReservedBytes > 0
 	}
-	if !j.Accounted || reserved(s) {
+	if !j.Accounted || j.State == "ready" || reserved(s) {
 		ctx, sl, release, err := e.lease(ctx, op.Scope, "session", op.SessionID)
 		if err != nil {
 			return nil, err
@@ -281,11 +285,28 @@ func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record,
 		if err != nil {
 			return nil, err
 		}
-		if !j.Accounted {
+		if !j.Accounted || j.State == "ready" {
 			if err = e.ReconcileKnown(ctx, op, or, ol, x); err != nil {
 				return nil, err
 			}
 			if err = e.collectJob(ctx, s, sr, &sl, j.ID, x); err != nil {
+				return nil, err
+			}
+			j, _, err = e.LoadJob(ctx, op.Scope, j.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if j.State == "ready" {
+			if s.OperationID != "" || s.PendingCall != "" {
+				return nil, E("tool_pending", "finish the active request and pending tool before manual compaction", 409)
+			}
+			if s.JobID != j.ID {
+				return nil, E("revision_conflict", "the manual summary no longer owns this session boundary", 409)
+			}
+			// The original validated target remains the upper bound even when
+			// recovery uses a catalog-free provider request measurement.
+			if _, err = e.apply(ctx, s, sr, &sl, &s.Template, x); err != nil {
 				return nil, err
 			}
 			j, _, err = e.LoadJob(ctx, op.Scope, j.ID)

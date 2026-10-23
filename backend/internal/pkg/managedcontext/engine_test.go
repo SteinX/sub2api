@@ -649,6 +649,16 @@ func TestInternalTerminalRecoveryReleasesOnlyItsReservation(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, int64(654321), s.ReservedBytes)
 			require.Equal(t, "later-turn", s.ReservationOperationID)
+			// A legacy manual reservation belongs to its current JobID, even
+			// while AppliedJobID still references this older completed summary.
+			s, sr, err = e.LoadSession(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			s.OperationID, s.ReservationOperationID, s.JobID = "", "", "later-manual"
+			require.NoError(t, e.save(context.Background(), sr, s, s.Status, nil, nil, &s.Policy))
+			require.NoError(t, compact())
+			s, _, err = e.LoadSession(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.Equal(t, int64(654321), s.ReservedBytes)
 			require.Equal(t, 1, x.callCount())
 			require.Equal(t, 1, x.charges)
 		})
