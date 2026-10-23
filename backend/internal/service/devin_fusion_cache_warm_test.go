@@ -40,6 +40,53 @@ type warmUserRepo struct {
 	err  error
 }
 
+type warmSubscriptionRepo struct {
+	UserSubscriptionRepository
+	subscription *UserSubscription
+}
+
+func (r *warmSubscriptionRepo) GetByID(context.Context, int64) (*UserSubscription, error) {
+	return r.subscription, nil
+}
+
+func TestFusionWarmBillingModeChangeRetainsOriginalFundingSource(t *testing.T) {
+	for _, originalMode := range []string{SubscriptionTypeStandard, SubscriptionTypeSubscription} {
+		t.Run(originalMode, func(t *testing.T) {
+			f := newWarmFixture(t)
+			groupID := int64(9)
+			f.keys.key.GroupID = &groupID
+			group := &Group{ID: groupID, Platform: PlatformDevin, Status: StatusActive, RateMultiplier: 1, SubscriptionType: originalMode}
+			f.keys.key.Group = group
+			f.snapshot.Identity.GroupID = groupID
+			if originalMode == SubscriptionTypeSubscription {
+				f.snapshot.Identity.SubscriptionID = 88
+				f.service.userSubRepo = &warmSubscriptionRepo{subscription: &UserSubscription{ID: 88, UserID: 33, GroupID: groupID, Status: SubscriptionStatusActive, ExpiresAt: time.Now().Add(time.Hour)}}
+			}
+			_, err := f.adapter.executor(context.Background(), f.snapshot, false)
+			require.NoError(t, err)
+			group.SubscriptionType = SubscriptionTypeSubscription
+			if originalMode == SubscriptionTypeSubscription {
+				group.SubscriptionType = SubscriptionTypeStandard
+			}
+			a := fusion.Attempt{ID: "original-funding-warm", Turn: 1, Purpose: fusion.CacheRefresh, Role: fusion.Lead, Model: f.snapshot.Model, BillingModel: f.snapshot.Model, StartedAt: time.Now(), EstimateUSD: .1, Status: "completed", Response: &apicompat.ResponsesResponse{Status: "completed", Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 1}}}
+			_, err = f.adapter.Settle(context.Background(), f.snapshot, a)
+			require.ErrorContains(t, err, "original cache refresh billing mode changed")
+			_, err = f.adapter.Estimate(context.Background(), f.snapshot)
+			require.ErrorContains(t, err, "original cache refresh billing mode changed")
+			require.Empty(t, f.bills.commands, "known usage must remain pending instead of charging another funding source")
+			require.Zero(t, f.calls.Load())
+			group.SubscriptionType = originalMode
+			x, err := f.adapter.executor(context.Background(), f.snapshot, false)
+			require.NoError(t, err, "restoring the original mode makes settlement recoverable")
+			if originalMode == SubscriptionTypeSubscription {
+				require.EqualValues(t, 88, x.subscription.ID)
+			} else {
+				require.Nil(t, x.subscription)
+			}
+		})
+	}
+}
+
 func (r *warmUserRepo) GetByID(context.Context, int64) (*User, error) {
 	return r.user, r.err
 }

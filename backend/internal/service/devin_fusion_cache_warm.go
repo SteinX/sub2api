@@ -169,6 +169,11 @@ func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.Ca
 	if groupID != identity.GroupID {
 		return nil, fusion.E("billing_pending", "original cache refresh billing group is unavailable", 503)
 	}
+	// A pinned subscription ID identifies the admitted funding source. Never
+	// reinterpret an incurred charge using a group's newly selected mode.
+	if (key.Group != nil && key.Group.IsSubscriptionType()) != (identity.SubscriptionID != 0) {
+		return nil, fusion.E("billing_pending", "original cache refresh billing mode changed", 503)
+	}
 	if key.Group != nil && key.Group.Platform == PlatformComposite && identity.QuotaPlatform == "" {
 		return nil, fusion.E("billing_pending", "original cache refresh quota platform is unavailable", 503)
 	}
@@ -202,9 +207,6 @@ func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.Ca
 		if key.Group != nil && !key.Group.IsSubscriptionType() && !user.CanBindGroup(groupID, key.Group.IsExclusive) {
 			return nil, fusion.E("refresh_unavailable", "cache refresh user group grant changed", 409)
 		}
-		if key.Group != nil && key.Group.IsSubscriptionType() && identity.SubscriptionID == 0 {
-			return nil, fusion.E("refresh_unavailable", "cache refresh subscription binding changed", 409)
-		}
 		accountModel := identity.AccountModel
 		if accountModel == "" {
 			if len(account.GetModelMapping()) > 0 {
@@ -222,7 +224,7 @@ func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.Ca
 			return nil, fusion.E("refresh_unavailable", "cache refresh subscription is unavailable", 503)
 		}
 		subscription, err = s.userSubRepo.GetByID(ctx, identity.SubscriptionID)
-		if err != nil || subscription == nil || subscription.UserID != key.UserID || subscription.GroupID != identity.GroupID || admit && !subscription.IsActive() {
+		if err != nil || subscription == nil || subscription.ID != identity.SubscriptionID || subscription.UserID != key.UserID || subscription.GroupID != identity.GroupID || admit && !subscription.IsActive() {
 			return nil, fusion.E("refresh_unavailable", "cache refresh subscription changed", 409)
 		}
 	}
