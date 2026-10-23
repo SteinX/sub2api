@@ -153,15 +153,17 @@ Lead 的用户目标、system/developer 约束、当前 turn 最近交接的调�
 
 已有会话的费用恢复在 HTTP 绑定阶段、账号调度和当前模型授权检查之前执行，只使用原账号和当前认证 scope 补账，不刷新凭据或调用上游。原账号暂停、限流、配对关闭或模型从目录移除，不会阻断已知费用结算；这不放宽任何新推理的授权。推理与两个角色的摘要分别核对，一笔未知结果不会阻挡其他已知 usage 入账。未知费用仍保留预留，不自动重发；取消标记仍可收束任务状态。
 
-## Lead 缓存预热（实验性，默认关闭）
+## Lead 缓存预热（默认开启，可关闭）
 
-已实现 `devin-full-prefix-output1-v1` adapter 和有界定时器。启用必须同时满足进程配置 `gateway.devin_fusion_cache_warm_enabled: true`（环境变量 `GATEWAY_DEVIN_FUSION_CACHE_WARM_ENABLED=true`）及原账号显式 profile 的 `cache_keepalive.enabled: true`。两个开关都默认关闭；进程开关关闭时不创建定时器。自动发现的模型对不会自行启用预热。SSE 的 `: keepalive` 只维护 HTTP 连接。
+`devin-full-prefix-one-token-v4` adapter 对所有已通过 Fusion 路由、工具能力及价格校验的具体 Lead 模型通用，支持目录自动配对与自定义 profile，不限制单一模型 UID。进程配置 `gateway.devin_fusion_cache_warm_enabled` 默认 `true`（环境变量 `GATEWAY_DEVIN_FUSION_CACHE_WARM_ENABLED=false` 可关闭）；profile 省略 `cache_keepalive` 或省略其中的 `enabled` 时继承开启，显式 `"enabled": false` 始终关闭。费用恢复在开关关闭后仍可执行。SSE 的 `: keepalive` 只维护 HTTP 连接。
 
-当前唯一支持的 Lead UID 为 `claude-opus-5-5-medium`。adapter 从已成功执行的 Lead 请求深拷贝完整 input、instructions、工具和采样参数，只将输出上限改为 1，保留 Lead Cascade scope，使用新 execution ID。它不是官方 CLI 私有 `query_label=cache_keepalive` / `is_user_initiated=false` 协议的实现。其他模型、未知 shape revision、改变的 profile、路由身份或 Lead context epoch 均不发送。
+默认每 240 秒检查一次，等待窗口最多 900 秒、每 turn 最多两次、每次最多 30 秒，独立金额上限为 `min($0.50, profile turn 上限)`。原 turn 截止时间、session TTL、共用费用预算和前台容量限制同时生效，因此短 turn 不会触发预热。自定义启用的部分策略继承缺省值；负值或超出合法范围仍拒绝。
+
+adapter 深拷贝成功 Lead 请求的完整 input、instructions、工具和采样参数，保持 Lead Cascade scope，只把实际请求输出上限改为 1，并使用新 execution ID。这不等同于官方 CLI 的私有 keepalive 协议。原生实测发现 GPT 成员的一 token 请求会报告 32 个 output tokens，直接把 wire 上限增到 32 反而产生 111–197 个 tokens；因此保留一 token wire 请求，GPT 的估价和结果上限单独按 32 计算，其他成员按 1 计算。无法满足费用预留、授权、身份或用量校验的请求不会继续调度。
 
 候选绑定用户/API key scope、账号、具体模型、profile revision、Lead context epoch、原前缀及工具合同 digest，并保存不含凭据的计费身份。只有 Sidekick 的当前委派尚未报告时才能 arm；正常工具响应结束后可继续有限等待。Sidekick 单独更新或压缩不重置 Lead due time；Lead 恢复、报告进入 Lead、Lead 压缩、取消、异常断连或终态会失效旧快照。关闭窗口保留独立未结算 attempt，迟到结果不能重新 arm 新窗口。
 
-一个隔离测试用 profile 配置示例（不是生产建议）：
+以下参数已经是默认值；只需在修改限制或关闭时添加 `cache_keepalive`：
 
 ```json
 "cache_keepalive": {
@@ -178,7 +180,9 @@ Lead 的用户目标、system/developer 约束、当前 turn 最近交接的调�
 
 每次发送前重新读取 API key、用户状态、账号、订阅、profile、路由及模型授权，重新获取有效 token/assignment；不保留 Gin writer、前台 executor 或认证 token。模型权限 discovery 必须成功，两个成员都需要可识别的真实 UID 价卡；未知价格、额度/余额预留失败或发送前估价增加均拒绝。准入使用全冷输入及 cache write 的保守上界，不假定缓存命中。普通推理、摘要和预热共用 CAS 原子 turn 费用账本，因此并发估价不能各自通过后超额发送。费用账本按 attempt 去重，未知结果继续占用预算；预热也有独立次数、时间和金额上限。
 
-预热采用独立终态判定：完整 transport 成功、`MAX_TOKENS`、1 个 output token、明确 usage、无任何可见文本/思考/签名/工具输出且模型身份无冲突，才算请求成功；还需 cache write 为 0 且 cache-read/input 至少 90% 才确认缓存并允许下一周期。未确认、输出不兼容、失败或结果未知即停止该窗口。usage 缺终态时保留为未知；普通 decoder 的“无业务内容”检查不能用于预热。
+预热使用独立的终态和用量判定：Connect trailer 正常结束、明确且非全零的 usage、模型身份无冲突、计费输出不超过对应预算，才算请求成功。缺少 `stop_reason` 但干净结束的流也可成功；partial、error、过滤、断流和全零 usage 不被当作有效预热。供应商报告 cache read 或 cache write 才确认缓存活动；不同模型按不同块大小报告缓存，不能把 Opus 的 90% 阈值套给所有模型，也不声称该确认等于完整前缀命中。
+
+文本、思考、签名及工具片段都只计入一个 `discarded_output` 标记；统计 decoder 不接收这些输出，不执行工具，不把结果写入业务历史或公共响应。没有缓存证据时停止当前窗口，不以 HTTP 成功冒充缓存确认；全零或不完整 usage 保留未知预算，不按免费结算。
 
 所有已知终态 usage 通过现有持久账务服务以 `fusion:<attempt UUID>` 单独结算，模型映射链标记 `cache_refresh/lead`。预热不进入任何业务 lane、工具分发或公共 response usage。失去网络或取消可能留下未知费用；保留原预算和余额/额度预留，绝不记为免费或自动重放。已知账务失败可从独立 journal 重试结算，即使窗口已停止或快照已清除；进程预热开关关闭后仍允许已知费用恢复。变更了原计费组等无法可靠恢复的身份会保留 pending，避免给其他组记账。账本和预留仍受各自 TTL 约束。
 
@@ -190,7 +194,11 @@ Lead 的用户目标、system/developer 约束、当前 turn 最近交接的调�
 
 本次真实 adapter + 自动定时器的加速隔离验证：冷写入后两次自动预热，各 6,103 个 input token（其中 cache read 6,099）、1 个 output token、零可见输出，命中占比 99.93%，业务快照完全不变。按测试环境显式价卡，两次预热共 $0.0025116；初始化冷写入另计 $0.030531。第四个一 token 请求在 HTTP 确认发出后由另一 controller 取消，未收到终态 usage，保留 $0.137576 保守预留，没有重发。这些金额是隔离账本按配置价格换算的结果，不是 Devin 最终账单。测试没有修改生产服务或开关。
 
-回归覆盖：60 个并发费用准入、正常推理/摘要/预热竞争同一预算、64 个并发容量申请保留前台槽、重复 tick、多实例互斥、窗口到期、worker/watch 上限、关闭、超时、本地/跨进程取消、迟到已知 usage、未知预留、账务失败后恢复去重、变更权限/价格/路由的拒绝，以及实际网关入口的默认关闭与显式 opt-in。
+回归覆盖：60 个并发费用准入、正常推理/摘要/预热竞争同一预算、64 个并发容量申请保留前台槽、重复 tick、多实例互斥、窗口到期、worker/watch 上限、关闭、超时、本地/跨进程取消、迟到已知 usage、未知预留、账务失败后恢复去重、变更权限/价格/路由的拒绝，以及实际网关入口、默认开启与显式 opt-out。
+
+2026-10-23 的全目录检查遍历了 575 个原生 Fusion ID：545 个配置、70 个具体 Lead 通过解析、默认策略、完整前缀构造及隔离显式价卡下的准入检查（不替代生产缺失价卡的配置）；未发送推理。155 个原先因 `-fast` / `-priority` 名称不一致的配置，现在只有在相同基础型号/effort 的目录成员明确带有 Fast Mode 元数据时，解析到其 `-priority` UID。另 30 个 Fable/Sonnet Fast 条目没有对应可调用的具体成员，仍明确拒绝，绝不改成普通档或其他 effort。
+
+跨模型实测覆盖 Opus 5/5.5（含 Fast）、Fable、Sonnet、Haiku、GPT 各家族、SWE、GLM 和 Gemini。首次 26 个有完整记录的诊断请求暴露了 GPT 的 32-token 用量行为；额外的 wire=32 试验 6 次证明会产生更多输出，已放弃该请求形态。恢复 wire=1、单独预留 GPT 32-token 用量后，5 个 GPT 成员的冷/热 10 次请求通过；Luna 则在后续测试返回全零 usage，按未知停止，不能宣称该上游状态已恢复。其他成员的热输入缓存读取占比从 SWE 约 46%、Gemini 约 54% 到 Claude 约 99.9% 不等；没有把部分缓存描述为全量命中。上述实验均使用临时账务与合成输入，没有修改生产。
 
 ## 费用与限制
 

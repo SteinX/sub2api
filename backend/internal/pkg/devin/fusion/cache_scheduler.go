@@ -105,8 +105,14 @@ func (s *CacheWarmScheduler) dispatch() {
 			s.mu.Lock()
 			s.workers--
 			if current, ok := s.watches[key]; ok && current.epoch == w.epoch && current.window == w.window {
-				current.running = false
-				s.watches[key] = current
+				// Session expiry, a shorter turn deadline, or unavailable state must
+				// not turn an expired watch into a busy loop. Never remove a new epoch.
+				if !s.controller.now().Before(w.until) {
+					delete(s.watches, key)
+				} else {
+					current.running = false
+					s.watches[key] = current
+				}
 			}
 			s.mu.Unlock()
 		}(key, w)

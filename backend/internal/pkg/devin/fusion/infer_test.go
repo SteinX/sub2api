@@ -6,6 +6,28 @@ import (
 	"testing"
 )
 
+func TestFusionCatalogFastAliasPreservesEffortAndLane(t *testing.T) {
+	for _, fast := range []bool{true, false} {
+		models := inferenceModels("gpt-6-1-sol-high", "gpt-6-1-sol-high-priority", "worker")
+		if fast {
+			models[1].ModelFamilyMetadata = &pb.ModelFamilyMetadata{Entries: []*pb.ModelFamilyMetadataEntry{{Key: "Fast Mode", Value: &pb.ModelFamilyMetadataValue{Order: 1}}}}
+		}
+		profile, err := InferProfile("fusion-gpt-6-1-sol-high-fast-sidekick-worker", models)
+		if fast {
+			require.NoError(t, err)
+			require.Equal(t, "gpt-6-1-sol-high-priority", profile.LeadModel)
+			require.True(t, profile.KeepalivePolicy().Enabled)
+		} else {
+			require.Error(t, err)
+		}
+		_, err = InferProfile("fusion-gpt-6-1-sol-max-fast-sidekick-worker", models)
+		require.Error(t, err, "must not change the requested effort")
+		models[1].Disabled = true
+		_, err = InferProfile("fusion-gpt-6-1-sol-high-fast-sidekick-worker", models)
+		require.Error(t, err, "must not fall back to ordinary high when Fast is disabled")
+	}
+}
+
 func inferenceModels(ids ...string) []*pb.ClientModelConfig {
 	var models []*pb.ClientModelConfig
 	for _, id := range ids {

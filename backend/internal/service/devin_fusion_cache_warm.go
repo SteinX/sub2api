@@ -93,10 +93,23 @@ func (s *OpenAIGatewayService) CloseDevinCacheWarm(ctx context.Context) error {
 func (a *devinCacheWarmAdapter) Supports(s fusion.CacheSnapshot) bool {
 	return a.service.cfg != nil && a.service.cfg.Gateway.DevinFusionCacheWarmEnabled &&
 		s.ShapeRevision == fusion.CacheRefreshShape && s.Profile.Revision() == s.ProfileRevision && s.Profile.LeadModel == s.Model &&
-		s.Model == "claude-opus-5-5-medium" && s.Request != nil && s.Request.Model == s.Model &&
+		devin.PlanModelUID(s.Model).Mode == devin.RouteDirect && s.Request != nil && s.Request.Model == s.Model &&
 		s.Identity != nil && s.Identity.UserID > 0 && s.Identity.APIKeyID > 0 &&
 		s.Scope == fusion.Scope(s.Identity.UserID, s.Identity.APIKeyID) && s.LaneScope != "" &&
 		s.RouteIdentity != "" && s.PrefixDigest == fusion.Digest(s.Request.Input)
+}
+
+// Native GPT one-token requests report a 32-token usage floor. Keep the wire
+// cap at one; only monetary admission and terminal usage checks use this bound.
+func warmOutputTokens(uid string) int {
+	uid = strings.ToLower(strings.TrimSpace(uid))
+	if slash := strings.LastIndex(uid, "/"); slash >= 0 {
+		uid = uid[slash+1:]
+	}
+	if strings.HasPrefix(uid, "gpt-") {
+		return 32
+	}
+	return 1
 }
 func warmRequest(s fusion.CacheSnapshot) (*apicompat.ResponsesRequest, error) {
 	b, err := json.Marshal(s.Request)
@@ -107,9 +120,21 @@ func warmRequest(s fusion.CacheSnapshot) (*apicompat.ResponsesRequest, error) {
 	if err = json.Unmarshal(b, &r); err != nil {
 		return nil, err
 	}
-	one := 1
-	r.MaxOutputTokens = &one
+	limit := 1
+	r.MaxOutputTokens = &limit
 	return &r, nil
+}
+
+// Estimation needs the billed token allowance, without changing the preserved
+// warm request. Raising GPT's wire cap can trigger substantially more reasoning.
+func warmEstimateRequest(s fusion.CacheSnapshot) (*apicompat.ResponsesRequest, error) {
+	request, err := warmRequest(s)
+	if err != nil {
+		return nil, err
+	}
+	limit := warmOutputTokens(s.Model)
+	request.MaxOutputTokens = &limit
+	return request, nil
 }
 func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.CacheSnapshot, admit bool) (*devinFusionExecutor, error) {
 	s := a.service
@@ -170,7 +195,7 @@ func (a *devinCacheWarmAdapter) Estimate(ctx context.Context, s fusion.CacheSnap
 	if err != nil {
 		return 0, err
 	}
-	req, err := warmRequest(s)
+	req, err := warmEstimateRequest(s)
 	if err != nil {
 		return 0, err
 	}
@@ -211,7 +236,11 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if err != nil {
 		return result, err
 	}
-	estimate, err := x.Estimate(ctx, fusion.Call{Purpose: fusion.CacheRefresh, Role: fusion.Lead, Request: req, PricingAt: attempt.StartedAt})
+	priced, err := warmEstimateRequest(snapshot)
+	if err != nil {
+		return result, err
+	}
+	estimate, err := x.Estimate(ctx, fusion.Call{Purpose: fusion.CacheRefresh, Role: fusion.Lead, Request: priced, PricingAt: attempt.StartedAt})
 	if err != nil {
 		return result, err
 	}
@@ -266,7 +295,11 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 			}
 		}
 		visible = visible || m.DeltaText != "" || m.DeltaThinking != "" || m.DeltaSignature != "" || len(m.DeltaToolCalls) > 0
-		return d.Apply(m)
+		// Decode only identities and usage. A one-token response may contain text,
+		// reasoning or an incomplete tool fragment on any concrete member model.
+		// None is executed, parsed as a business result or retained in a lane.
+		stats := &pb.GetChatMessageResponse{MessageId: m.MessageId, StopReason: m.StopReason, Usage: m.Usage, ActualModelUid: m.ActualModelUid}
+		return d.Apply(stats)
 	})
 	billingModel := strings.TrimSpace(d.BillingModel)
 	if billingModel == "" {
@@ -283,16 +316,23 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if d.Response.Usage != nil || !result.Outcome.KnownFailure {
 		x.holdUnsettled[id] = true
 	}
-	// A one-token warm request often ends with usage/MAX_TOKENS and no output.
-	// The ordinary business decoder intentionally rejects that shape. Here it
-	// is accepted only with explicit terminal usage, never appended to a lane.
+	// A clean Connect trailer is terminal even when a provider omits stop_reason.
+	// Broken streams without a known terminal stop keep their monetary reserve.
 	u := d.Response.Usage
-	result.UsageUncertain = u != nil && (stop == pb.StopReason_STOP_REASON_UNSPECIFIED || stop == pb.StopReason_STOP_REASON_PARTIAL || stop == pb.StopReason_STOP_REASON_INCOMPLETE)
-	compatible := !mismatch && !visible && stop == pb.StopReason_STOP_REASON_MAX_TOKENS && u != nil && u.InputTokens > 0 && u.OutputTokens == 1 && (d.ActualModel == "" || d.ActualModel == snapshot.Model) && len(d.Evidence.ActualModels) <= 1 && billingModel == snapshot.Model
+	knownStop := stop != pb.StopReason_STOP_REASON_UNSPECIFIED && stop != pb.StopReason_STOP_REASON_PARTIAL && stop != pb.StopReason_STOP_REASON_INCOMPLETE
+	result.UsageUncertain = u != nil && (u.InputTokens <= 0 || !knownStop && err != nil)
+	result.DiscardedOutput = visible
+	complete := stop != pb.StopReason_STOP_REASON_PARTIAL && stop != pb.StopReason_STOP_REASON_INCOMPLETE && stop != pb.StopReason_STOP_REASON_ERROR && stop != pb.StopReason_STOP_REASON_CONTENT_FILTER && stop != pb.StopReason_STOP_REASON_NONFINITE_LOGIT_OR_PROB
+	compatible := complete && !mismatch && u != nil && u.InputTokens > 0 && u.OutputTokens >= 0 && u.OutputTokens <= warmOutputTokens(snapshot.Model) && billingModel == snapshot.Model
+	if err == nil && u != nil && !result.UsageUncertain {
+		d.Response.Status = "completed"
+	}
 	result.RequestSucceeded = err == nil && compatible
-	result.CacheConfirmed = result.RequestSucceeded && u.InputTokensDetails != nil && u.CacheCreationInputTokens == 0 && float64(u.InputTokensDetails.CachedTokens)/float64(u.InputTokens) >= .9
+	// Reported reads and writes both attest cache activity. Providers quantize
+	// read blocks differently, so no family-specific full-prefix ratio is imposed.
+	result.CacheConfirmed = result.RequestSucceeded && (u.CacheCreationInputTokens > 0 || u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens > 0)
 	if err == nil && !compatible {
-		err = fusion.E("refresh_incompatible", "cache refresh response differs from the verified zero-output terminal shape", 502)
+		err = fusion.E("refresh_incompatible", "cache refresh lacks a bounded terminal usage result", 502)
 	}
 	return result, err
 }

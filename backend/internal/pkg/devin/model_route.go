@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	RoutePolicyRevision   = "devin-routes-v3-client-harness"
+	RoutePolicyRevision   = "devin-routes-v4-fast-priority"
 	CatalogSchemaRevision = "cascade-model-info-harness-20-v1"
 
 	KindDirect         = "direct_model"

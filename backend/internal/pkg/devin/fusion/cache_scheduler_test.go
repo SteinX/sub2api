@@ -22,7 +22,7 @@ func TestFusionWarmTimerNoCatchupAndShutdown(t *testing.T) {
 	}, time.Second, time.Millisecond)
 	state, _, err := c.Load(context.Background(), s.Scope, s.ID)
 	require.NoError(t, err)
-	require.Equal(t, clock.Now().Add(10*time.Second), state.NextDueAt)
+	require.True(t, state.NextDueAt.Equal(clock.Now().Add(10*time.Second)))
 	require.NoError(t, c.Scheduler.Close(context.Background()))
 	clock.Advance(20 * time.Second)
 	c.Scheduler.dispatch()
@@ -127,5 +127,31 @@ func TestFusionWarmTimerExpiresWithoutSending(t *testing.T) {
 		return err == nil && state.State == "STOPPED"
 	}, time.Second, time.Millisecond)
 	require.NoError(t, c.Scheduler.Close(context.Background()))
+	require.Zero(t, f.calls)
+}
+
+func TestFusionWarmDefaultIntervalLongerThanTurnExpiresOnce(t *testing.T) {
+	e, s, c, clock, f := cacheFixture(t)
+	s.Profile.Keepalive = nil
+	s.Profile.MaxWallSeconds = 10
+	s.ProfileRevision = s.Profile.Revision()
+	_, raw, err := e.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.NoError(t, e.save(context.Background(), s, &raw))
+	req := testRequest("short turn")
+	req.Model = s.Profile.LeadModel
+	require.NoError(t, c.Capture(context.Background(), s, req, "new-lead", "route"))
+	c.Scheduler = newCacheWarmScheduler(c, 1, 1, time.Millisecond)
+	t.Cleanup(func() { require.NoError(t, c.Scheduler.Close(context.Background())) })
+	c.schedule(context.Background(), s)
+	clock.Advance(11 * time.Second)
+	require.Eventually(t, func() bool {
+		c.Scheduler.mu.Lock()
+		defer c.Scheduler.mu.Unlock()
+		return len(c.Scheduler.watches) == 0 && c.Scheduler.workers == 0
+	}, time.Second, time.Millisecond)
+	state, _, err := c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.Equal(t, "turn_deadline", state.StopReason)
 	require.Zero(t, f.calls)
 }

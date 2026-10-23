@@ -12,8 +12,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// Both a bounded profile policy and a separately enabled verified adapter are
-// required. The gateway process switch defaults to false.
+// Warming defaults on for enabled Fusion profiles. Explicit process/profile
+// opt-outs, physical-model pricing and bounded admission still apply.
 type KeepalivePolicy struct {
 	Enabled          bool    `json:"enabled"`
 	IntervalSeconds  int     `json:"interval_seconds"`
@@ -23,23 +23,56 @@ type KeepalivePolicy struct {
 	TimeoutSeconds   int     `json:"timeout_seconds"`
 }
 
-func (p Profile) KeepalivePolicy() KeepalivePolicy {
-	if p.Keepalive != nil {
-		return *p.Keepalive
+// An omitted policy inherits these limits. Explicit enabled:false always wins.
+func (p *KeepalivePolicy) UnmarshalJSON(data []byte) error {
+	type policy KeepalivePolicy
+	value := policy{Enabled: true}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
 	}
-	return KeepalivePolicy{}
+	*p = KeepalivePolicy(value)
+	return nil
+}
+func (p Profile) KeepalivePolicy() KeepalivePolicy {
+	defaults := KeepalivePolicy{Enabled: true, IntervalSeconds: 240, MaxWindowSeconds: 900, MaxAttempts: 2, MaxCostUSD: .5, TimeoutSeconds: 30}
+	if p.MaxCostUSD > 0 {
+		defaults.MaxCostUSD = min(defaults.MaxCostUSD, p.MaxCostUSD)
+	}
+	if p.Keepalive == nil {
+		return defaults
+	}
+	policy := *p.Keepalive
+	if !policy.Enabled {
+		return policy
+	}
+	if policy.IntervalSeconds == 0 {
+		policy.IntervalSeconds = defaults.IntervalSeconds
+	}
+	if policy.MaxWindowSeconds == 0 {
+		policy.MaxWindowSeconds = max(defaults.MaxWindowSeconds, policy.IntervalSeconds)
+	}
+	if policy.MaxAttempts == 0 {
+		policy.MaxAttempts = defaults.MaxAttempts
+	}
+	if policy.MaxCostUSD == 0 {
+		policy.MaxCostUSD = defaults.MaxCostUSD
+	}
+	if policy.TimeoutSeconds == 0 {
+		policy.TimeoutSeconds = defaults.TimeoutSeconds
+	}
+	return policy
 }
 func (p KeepalivePolicy) Validate() error {
 	if !p.Enabled {
 		return nil
 	}
 	if p.IntervalSeconds < 1 || p.IntervalSeconds > 3600 || p.MaxWindowSeconds < p.IntervalSeconds || p.MaxWindowSeconds > 3600 || p.MaxAttempts < 1 || p.MaxAttempts > 16 || !validCost(p.MaxCostUSD) || p.MaxCostUSD <= 0 || p.MaxCostUSD > 5 || p.TimeoutSeconds < 1 || p.TimeoutSeconds > 60 {
-		return E("keepalive_invalid", "cache refresh needs explicit bounded interval, window, attempts, timeout and cost", 400)
+		return E("keepalive_invalid", "cache refresh needs bounded interval, window, attempts, timeout and cost", 400)
 	}
 	return nil
 }
 
-const CacheRefreshShape = "devin-full-prefix-output1-v1"
+const CacheRefreshShape = "devin-full-prefix-one-token-v4"
 
 type CacheIdentity struct {
 	UserID          int64  `json:"user_id"`
@@ -87,6 +120,7 @@ type CacheControl struct {
 	CumulativeCostUSD    float64         `json:"cumulative_cost_usd"`
 }
 type RefreshResult struct {
+	DiscardedOutput bool // warm-only text/thinking/tool fragments are never business output
 	// Observed stats without a terminal stop are retained for audit, not treated as a final bill.
 	UsageUncertain   bool
 	Outcome          Outcome
@@ -280,6 +314,7 @@ func (c *CacheKeepaliveController) Observe(ctx context.Context, s *Session) erro
 }
 
 type refreshRecord struct {
+	DiscardedOutput  bool          `json:"discarded_output,omitempty"`
 	Snapshot         CacheSnapshot `json:"snapshot"`
 	Attempt          Attempt       `json:"attempt"`
 	Epoch            uint64        `json:"epoch"`
@@ -339,6 +374,9 @@ func (c *CacheKeepaliveController) Tick(ctx context.Context, scope, id string, e
 	snapshot := state.Snapshot
 	if snapshot.Scope != scope || snapshot.SessionID != id || snapshot.AccountID != s.AccountID || snapshot.Model != s.Profile.LeadModel || snapshot.ProfileRevision != s.ProfileRevision || snapshot.ContextEpoch != contextEpoch || snapshot.ContractDigest != s.Contract || state.WindowID != s.Handoffs[len(s.Handoffs)-1].ID {
 		return c.Stop(ctx, s, "snapshot_invalid")
+	}
+	if !c.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
+		return c.Stop(ctx, s, "turn_deadline")
 	}
 	if c.now().Before(state.NextDueAt) {
 		return nil
@@ -478,6 +516,7 @@ func (c *CacheKeepaliveController) Tick(ctx context.Context, scope, id string, e
 	<-fenceDone
 	r.Attempt.Response = result.Outcome.Response
 	r.Attempt.BillingModel = result.Outcome.BillingModel
+	r.DiscardedOutput = result.DiscardedOutput
 	r.RequestSucceeded = result.RequestSucceeded
 	r.CacheConfirmed = result.CacheConfirmed
 	if r.Attempt.Response != nil && r.Attempt.Response.Usage != nil && !result.UsageUncertain {

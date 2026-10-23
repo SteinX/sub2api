@@ -217,6 +217,9 @@ security:
 # 网关配置
 # =============================================================================
 gateway:
+  # Paid Fusion Lead cache warming defaults on; false stops new warm requests.
+  # Fusion Lead 缓存预热默认开启；可在 profile 中单独关闭，费用和并发限制始终生效。
+  devin_fusion_cache_warm_enabled: true
   # Minimum max_output_tokens when converting Chat Completions or Anthropic requests to Responses (minimum 16, default 128)
   # Chat Completions 或 Anthropic 请求转换为 Responses 时的最小 max_output_tokens（最小 16，默认 128）
   min_output_tokens: 128
