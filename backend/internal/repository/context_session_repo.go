@@ -228,7 +228,13 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
  `+contextReservationOperation+`),0)
  FROM context_records c WHERE c.user_id=$1 AND c.kind IN ('session','operation')
  AND (c.data->>'reserved_bytes')::bigint>0
- AND (NOT c.cancelled AND c.expires_at>NOW() OR c.lease_until>NOW() OR EXISTS(
+ AND (NOT c.cancelled AND c.expires_at>NOW() AND c.status NOT IN ('failed','completed')
+ AND NOT EXISTS(SELECT 1 FROM context_records finished_job
+ WHERE finished_job.scope=c.scope AND finished_job.kind='job'
+ AND finished_job.id=COALESCE(NULLIF(c.data->>'job_id',''),c.data->>'applied_job_id')
+ AND finished_job.data->>'operation_id'=`+contextReservationOperation+`
+ AND finished_job.status IN ('failed','stale','applied','compacted','no_op'))
+ OR c.lease_until>NOW() OR EXISTS(
  SELECT 1 FROM context_records a WHERE a.scope=c.scope AND a.kind='attempt'
  AND a.data->>'operation_id'=`+contextReservationOperation+`
  AND a.status IN ('prepared','dispatching','unknown')

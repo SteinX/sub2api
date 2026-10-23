@@ -72,8 +72,13 @@ func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
 			p := mc.DefaultPolicy()
 			p.MaxHistoryBytes, p.MaxUserHistoryBytes = 1<<20, 1500<<10
 			a := contextRecord("session", "a", 1, 2)
-			a.Data = json.RawMessage(`{"operation_id":"op-a","reserved_bytes":921600}`)
-			_, err := s.Create(ctx, a, &p)
+			a.Data = json.RawMessage(`{"operation_id":"op-a","job_id":"old-failed","reserved_bytes":921600}`)
+			oldJob := contextRecord("job", "old-failed", 1, 2)
+			oldJob.Status = "failed"
+			oldJob.Data = json.RawMessage(`{"operation_id":"old-op"}`)
+			_, err := s.Create(ctx, oldJob, nil)
+			require.NoError(t, err)
+			_, err = s.Create(ctx, a, &p)
 			require.NoError(t, err)
 			la, err := s.Acquire(ctx, a.Scope, a.Kind, a.ID, "owner-a", time.Minute)
 			require.NoError(t, err)
@@ -234,6 +239,63 @@ func TestContextStorePostgresRetiresInactiveReservationsAfterDrain(t *testing.T)
 				}
 			})
 		}
+	}
+}
+
+func TestContextStorePostgresRetiresFailedReservationsAfterDrain(t *testing.T) {
+	for _, mode := range []string{"session", "stateless", "manual"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			db := contextTestDB(t)
+			s := NewContextSessionStore(db)
+			p := mc.DefaultPolicy()
+			p.MaxHistoryBytes, p.MaxUserHistoryBytes = 1<<20, 1500<<10
+			a := contextRecord("session", "a", 1, 2)
+			a.Status = "failed"
+			a.Data = json.RawMessage(`{"operation_id":"op-a","reserved_bytes":921600}`)
+			if mode != "session" {
+				a.Status = "prepared"
+				a.Data = json.RawMessage(`{"reservation_operation_id":"op-a","job_id":"failed-job","reserved_bytes":921600}`)
+				if mode == "stateless" {
+					a.Kind, a.ID = "operation", "op-a"
+				}
+				job := contextRecord("job", "failed-job", 1, 2)
+				job.Status = "failed"
+				job.Data = json.RawMessage(`{"operation_id":"op-a"}`)
+				_, err := s.Create(ctx, job, nil)
+				require.NoError(t, err)
+			}
+			_, err := s.Create(ctx, a, &p)
+			require.NoError(t, err)
+			la, err := s.Acquire(ctx, a.Scope, a.Kind, a.ID, "draining-a", time.Minute)
+			require.NoError(t, err)
+			attemptA := contextRecord("attempt", "attempt-a", 1, 2)
+			attemptA.Status = "dispatching"
+			attemptData := map[string]any{"operation_id": "op-a", "session_id": "a", "deadline": time.Now().Add(time.Minute), "settled": false}
+			attemptA.Data, _ = json.Marshal(attemptData)
+			_, err = s.Create(ctx, attemptA, nil)
+			require.NoError(t, err)
+			b := contextRecord("session", "b", 1, 3)
+			b.Data = json.RawMessage(`{"reservation_operation_id":"op-b","reserved_bytes":512000}`)
+			_, err = s.Create(ctx, b, &p)
+			require.NoError(t, err)
+			lb, err := s.Acquire(ctx, b.Scope, b.Kind, b.ID, "owner-b", time.Minute)
+			require.NoError(t, err)
+			require.NoError(t, s.CAS(ctx, b, &lb, nil, &p))
+			attemptB := contextRecord("attempt", "attempt-b", 1, 3)
+			attemptB.Data = json.RawMessage(`{"operation_id":"op-b","session_id":"b","response_ref":"result-b"}`)
+			_, err = s.Create(ctx, attemptB, nil)
+			require.NoError(t, err)
+			result := []mc.Blob{contextBlob("result-b", "b", "private", bytes.Repeat([]byte("b"), 800<<10))}
+			require.Error(t, s.CAS(ctx, attemptB, nil, result, &p), "terminal failure does not revoke a draining worker's capacity")
+			require.NoError(t, s.Release(ctx, la))
+			require.Error(t, s.CAS(ctx, attemptB, nil, result, &p), "late physical results remain protected after lease release")
+			attemptA.Status = "terminal"
+			attemptData["response_ref"] = "result-a"
+			attemptA.Data, _ = json.Marshal(attemptData)
+			require.NoError(t, s.CAS(ctx, attemptA, nil, []mc.Blob{contextBlob("result-a", "a", "private", bytes.Repeat([]byte("a"), 400<<10))}, &p))
+			require.NoError(t, s.CAS(ctx, attemptB, nil, result, &p), "permanent failures retire unused promises while their actual bodies still count")
+		})
 	}
 }
 
