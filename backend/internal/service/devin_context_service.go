@@ -308,9 +308,6 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 	if err = s.CheckContextAccess(key, model); err != nil {
 		return nil, err
 	}
-	if err = s.checkContextChannelAccess(ctx, key, model); err != nil {
-		return nil, err
-	}
 	if devin.PlanModelUID(model).Mode != devin.RouteDirect {
 		return nil, mc.E("model_unavailable", "select a concrete model UID for managed context", 400)
 	}
@@ -376,6 +373,13 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 				return err
 			}
 		}
+		if mode == "internal" {
+			job, err := engine.RecoverInternal(ctx, op, r, l)
+			if job != nil || err != nil {
+				out.Job, out.SessionID, out.Replayed = job, op.SessionID, true
+				return err
+			}
+		}
 		if op.SessionID != "" {
 			sess, _, err := engine.LoadSession(ctx, owner.Scope, op.SessionID)
 			if err != nil {
@@ -394,6 +398,14 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 			}
 			defer recovery.physical.Close()
 			if err = engine.ReconcileKnown(ctx, op, r, l, recovery); err != nil {
+				return err
+			}
+		}
+		// A new operation must pass channel admission before ingesting input.
+		// Existing attempts may only need to settle/publish their known result;
+		// any additional paid call still rechecks the current channel in x.check.
+		if len(op.Attempts) == 0 {
+			if err = s.checkContextChannelAccess(ctx, key, model); err != nil {
 				return err
 			}
 		}

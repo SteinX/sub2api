@@ -224,31 +224,57 @@ func (e *Engine) failCompactJob(ctx context.Context, op *Operation, id string, c
 	_ = e.save(ctx, jr, j, j.State, nil, nil, nil)
 }
 
+// RecoverInternal returns an already-terminal manual job without model discovery,
+// account slots or new inference. It also repairs a missing operation receipt.
+func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record, ol *Lease) (*Job, error) {
+	id := op.JobID
+	if id == "" {
+		id = "cmp_" + op.ID
+	}
+	j, _, err := e.LoadJob(ctx, op.Scope, id)
+	if errors.Is(err, ErrNotFound) && op.JobID == "" && op.SessionID != "" {
+		// A paid job can commit its session marker before the operation link.
+		s, _, readErr := e.LoadSession(ctx, op.Scope, op.SessionID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		id = s.JobID
+		if id == "" {
+			id = s.AppliedJobID
+		}
+		if id == "" {
+			return nil, nil
+		}
+		j, _, err = e.LoadJob(ctx, op.Scope, id)
+	}
+	if errors.Is(err, ErrNotFound) && op.JobID == "" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if j.OperationID != op.ID || j.SessionID != op.SessionID {
+		return nil, nil
+	}
+	if j.State != "applied" && j.State != "failed" && j.State != "stale" && j.State != "no_op" {
+		return nil, nil
+	}
+	if op.JobID != j.ID || op.State != "completed" {
+		op.JobID, op.State = j.ID, "completed"
+		if err = e.save(ctx, or, op, op.State, ol, nil, nil); err != nil {
+			return nil, err
+		}
+	}
+	return j, nil
+}
+
 func (e *Engine) Internal(ctx context.Context, op *Operation, or *Record, ol *Lease, expected int64, x Executor) (*Job, error) {
 	ctx, stop := context.WithTimeout(ctx, time.Duration(op.Policy.WallSeconds)*time.Second)
 	defer stop()
+	if j, err := e.RecoverInternal(ctx, op, or, ol); j != nil || err != nil {
+		return j, err
+	}
 	noOpID := "cmp_" + op.ID
-	if op.JobID == "" {
-		// A no-op job may have committed before its operation receipt. Recover
-		// that immutable result even if another turn has since moved the head.
-		j, _, err := load[Job](ctx, e.Store, op.Scope, "job", noOpID)
-		if err == nil && j.OperationID == op.ID && j.State == "no_op" {
-			op.JobID, op.State = j.ID, "completed"
-			return j, e.save(ctx, or, op, op.State, ol, nil, nil)
-		}
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			return nil, err
-		}
-	}
-	if op.JobID != "" {
-		j, _, err := e.LoadJob(ctx, op.Scope, op.JobID)
-		if err != nil {
-			return nil, err
-		}
-		if j.State == "applied" || j.State == "failed" || j.State == "stale" || j.State == "no_op" {
-			return j, nil
-		}
-	}
 	ctx, lease, release, err := e.lease(ctx, op.Scope, "session", op.SessionID)
 	if err != nil {
 		return nil, err
@@ -324,6 +350,7 @@ func (e *Engine) Internal(ctx context.Context, op *Operation, or *Record, ol *Le
 		return nil, err
 	}
 	s.ReservedBytes = 0
+	s.ReservationOperationID = ""
 	if err = e.save(ctx, sr, s, s.Status, &lease, nil, &s.Policy); err != nil {
 		return nil, err
 	}

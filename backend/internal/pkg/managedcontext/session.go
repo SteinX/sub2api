@@ -159,6 +159,7 @@ func (e *Engine) Advance(ctx context.Context, op *Operation, or *Record, ol *Lea
 		// Reserve bounded room for the foreground and maintenance outputs before
 		// paying for either. Quotas count this reservation across all user sessions.
 		s.ReservedBytes = int64((n*3+s.Policy.SummaryOutputTokens*(s.Policy.SummaryAttempts*2+1))*64 + 65536)
+		s.ReservationOperationID = op.ID
 		if err = e.save(ctx, sr, s, s.Status, &lease, blobs, &s.Policy); err != nil {
 			return nil, err
 		}
@@ -239,6 +240,7 @@ func (e *Engine) Advance(ctx context.Context, op *Operation, or *Record, ol *Lea
 	s.Head = response.ID
 	s.OperationID = ""
 	s.ReservedBytes = 0
+	s.ReservationOperationID = ""
 	s.Status = "ready"
 	if s.PendingCall != "" {
 		s.Status = "waiting_tool"

@@ -64,8 +64,8 @@ func contextBlob(id, session, visibility string, data []byte) mc.Blob {
 }
 
 func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
-	for _, stateless := range []bool{false, true} {
-		t.Run(map[bool]string{false: "session", true: "stateless"}[stateless], func(t *testing.T) {
+	for _, mode := range []string{"session", "stateless", "manual", "legacy_manual_job"} {
+		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			db := contextTestDB(t)
 			s := NewContextSessionStore(db)
@@ -81,8 +81,17 @@ func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
 			b := contextRecord("session", "b", 1, 3)
 			b.Data = json.RawMessage(`{"operation_id":"op-b","reserved_bytes":512000}`)
 			bSession := "b"
-			if stateless {
+			switch mode {
+			case "stateless":
 				b.Kind, b.ID, bSession = "operation", "op-b", ""
+			case "manual":
+				b.Data = json.RawMessage(`{"reservation_operation_id":"op-b","reserved_bytes":512000}`)
+			case "legacy_manual_job":
+				b.Data = json.RawMessage(`{"job_id":"manual-job","reserved_bytes":512000}`)
+				job := contextRecord("job", "manual-job", 1, 3)
+				job.Data = json.RawMessage(`{"operation_id":"op-b"}`)
+				_, err = s.Create(ctx, job, nil)
+				require.NoError(t, err)
 			}
 			_, err = s.Create(ctx, b, &p)
 			require.NoError(t, err)
@@ -104,6 +113,10 @@ func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
 			require.NoError(t, s.CAS(ctx, attemptA, nil, []mc.Blob{contextBlob("result-a", "a", "private", bytes.Repeat([]byte("a"), 800<<10))}, &p))
 			require.NoError(t, s.CAS(ctx, a, &la, nil, &p), "persisted physical bytes are credited against their own promise")
 			require.NoError(t, s.CAS(ctx, attemptB, nil, []mc.Blob{contextBlob("result-b", bSession, "private", bytes.Repeat([]byte("b"), 400<<10))}, &p))
+			if mode == "legacy_manual_job" {
+				b.Data = json.RawMessage(`{"applied_job_id":"manual-job","reserved_bytes":512000}`)
+				require.NoError(t, s.CAS(ctx, b, &lb, nil, &p), "credit survives application clearing the active job marker")
+			}
 			a.Data = json.RawMessage(`{"reserved_bytes":0}`)
 			require.NoError(t, s.CAS(ctx, a, &la, []mc.Blob{contextBlob("public-a", "a", "public", bytes.Repeat([]byte("a"), 100<<10))}, &p))
 			b.Data = json.RawMessage(`{"reserved_bytes":0}`)

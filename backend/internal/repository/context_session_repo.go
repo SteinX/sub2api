@@ -21,6 +21,13 @@ func NewContextSessionStore(db *sql.DB) mc.Store { return &contextSessionStore{d
 
 const contextColumns = `scope,kind,id,user_id,api_key_id,account_id,revision,status,data,expires_at,cancelled`
 
+// An explicit reservation owner survives manual application clearing JobID.
+// The job fallback also understands journals created before that field existed.
+const contextReservationOperation = `CASE WHEN c.kind='operation' THEN c.id ELSE
+ COALESCE(NULLIF(c.data->>'reservation_operation_id',''),NULLIF(c.data->>'operation_id',''),
+ (SELECT j.data->>'operation_id' FROM context_records j WHERE j.scope=c.scope AND j.kind='job'
+ AND j.id=COALESCE(NULLIF(c.data->>'job_id',''),c.data->>'applied_job_id')),'') END`
+
 func scanContext(row interface{ Scan(...any) error }) (*mc.Record, error) {
 	r := new(mc.Record)
 	err := row.Scan(&r.Scope, &r.Kind, &r.ID, &r.UserID, &r.KeyID, &r.AccountID, &r.Revision, &r.Status, &r.Data, &r.ExpiresAt, &r.Cancelled)
@@ -211,11 +218,11 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 	// written for an admission's current operation consume its reservation;
 	// deriving that credit avoids changing the session revision from a late
 	// attempt writer which does not own its execution lease.
-	rows, err := tx.QueryContext(ctx, `SELECT c.scope,c.kind,c.id,c.data,
+	rows, err := tx.QueryContext(ctx, `SELECT c.scope,c.kind,c.id,c.data,`+contextReservationOperation+`,
  COALESCE((SELECT sum(h.size_bytes) FROM context_records a JOIN context_history h
  ON h.scope=a.scope AND h.id=a.data->>'response_ref'
  WHERE a.scope=c.scope AND a.kind='attempt' AND a.data->>'operation_id'=
- CASE WHEN c.kind='operation' THEN c.id ELSE c.data->>'operation_id' END),0)
+ `+contextReservationOperation+`),0)
  FROM context_records c WHERE c.user_id=$1 AND c.kind IN ('session','operation')
  AND (c.data->>'reserved_bytes')::bigint>0
  AND NOT(c.scope=$2 AND c.kind=$3 AND c.id=$4)`, v.UserID, v.Scope, v.Kind, v.ID)
@@ -224,13 +231,14 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 	}
 	type reservation struct {
 		scope, kind, id string
+		operation       string
 		data            []byte
 		consumed        int64
 	}
 	var admissions []reservation
 	for rows.Next() {
 		var admission reservation
-		if err = rows.Scan(&admission.scope, &admission.kind, &admission.id, &admission.data, &admission.consumed); err != nil {
+		if err = rows.Scan(&admission.scope, &admission.kind, &admission.id, &admission.data, &admission.operation, &admission.consumed); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -246,17 +254,16 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 	if v.Kind == "session" || v.Kind == "operation" {
 		var consumed int64
 		opID := ""
-		if v.Kind == "operation" {
-			opID = v.ID
-		} else {
-			_ = json.Unmarshal(metadata["operation_id"], &opID)
+		if err = tx.QueryRowContext(ctx, `SELECT `+contextReservationOperation+` FROM
+ (SELECT $1::text AS scope,$2::text AS kind,$3::text AS id,$4::jsonb AS data) c`, v.Scope, v.Kind, v.ID, []byte(v.Data)).Scan(&opID); err != nil {
+			return err
 		}
 		if err = tx.QueryRowContext(ctx, `SELECT COALESCE(sum(h.size_bytes),0)
  FROM context_records a JOIN context_history h ON h.scope=a.scope AND h.id=a.data->>'response_ref'
  WHERE a.scope=$1 AND a.kind='attempt' AND a.data->>'operation_id'=$2`, v.Scope, opID).Scan(&consumed); err != nil {
 			return err
 		}
-		admissions = append(admissions, reservation{v.Scope, v.Kind, v.ID, v.Data, consumed})
+		admissions = append(admissions, reservation{scope: v.Scope, kind: v.Kind, id: v.ID, operation: opID, data: v.Data, consumed: consumed})
 	}
 	var attemptOperation string
 	if v.Kind == "attempt" {
@@ -265,9 +272,8 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 	var sessionReserved int64
 	for _, admission := range admissions {
 		var data struct {
-			Reserved    int64  `json:"reserved_bytes"`
-			OperationID string `json:"operation_id"`
-			SessionID   string `json:"session_id"`
+			Reserved  int64  `json:"reserved_bytes"`
+			SessionID string `json:"session_id"`
 		}
 		if err = jsonUnmarshalContext(admission.data, &data); err != nil {
 			return err
@@ -277,10 +283,8 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 		}
 		if admission.kind == "session" {
 			data.SessionID = admission.id
-		} else {
-			data.OperationID = admission.id
 		}
-		if attemptOperation != "" && admission.scope == v.Scope && data.OperationID == attemptOperation {
+		if attemptOperation != "" && admission.scope == v.Scope && admission.operation == attemptOperation {
 			admission.consumed += incoming
 		}
 		remaining := max(data.Reserved-admission.consumed, 0)

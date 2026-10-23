@@ -317,6 +317,9 @@ func (e *Engine) Begin(ctx context.Context, owner Owner, namespace, key, fingerp
 	if key == "" || len(key) > 128 || strings.ContainsAny(key, " \t\r\n") {
 		return nil, nil, E("input_invalid", "Idempotency-Key must contain 1..128 non-space characters", 400)
 	}
+	if len(model) > 256 || len(session) > 128 || len(namespace) > 256 {
+		return nil, nil, E("input_invalid", "managed model and session identifiers exceed their metadata limits", 400)
+	}
 	if err := p.Validate(); err != nil {
 		return nil, nil, err
 	}

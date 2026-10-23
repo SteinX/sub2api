@@ -288,6 +288,7 @@ func (e *Engine) startSummary(ctx context.Context, s *Session, sr *Record, l *Le
 	// An explicit internal compact has no foreground output reservation yet.
 	if s.ReservedBytes == 0 {
 		s.ReservedBytes = int64((s.Policy.SummaryOutputTokens*(s.Policy.SummaryAttempts*2+1))*64 + 65536)
+		s.ReservationOperationID = op.ID
 		if err = e.save(ctx, sr, s, s.Status, l, nil, &s.Policy); err != nil {
 			return false, err
 		}

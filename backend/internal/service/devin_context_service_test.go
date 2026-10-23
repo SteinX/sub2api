@@ -246,6 +246,8 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 	require.Len(t, billing.commands, 1, "recovery settles known usage after rollout/account disable")
 	a.Extra[DevinContextEnabledExtra] = true
 	a.Schedulable = true
+	restrictedChannel := Channel{ID: 1, Status: StatusActive, GroupIDs: []int64{9}, RestrictModels: true, ModelPricing: []ChannelModelPricing{{Platform: PlatformDevin, Models: []string{"other-model"}}}}
+	s.channelService = newTestChannelService(makeStandardRepo(restrictedChannel, map[int64]string{9: PlatformDevin}))
 	first, err := request("first", "", body)
 	require.NoError(t, err)
 	require.Equal(t, 1, calls)
@@ -267,6 +269,10 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 	}
 	require.NotEmpty(t, callID)
 	nextBody, _ := json.Marshal(map[string]any{"model": "gpt-5.5", "previous_response_id": first.Response.ID, "input": []any{map[string]any{"type": "function_call_output", "call_id": callID, "output": "actual tool evidence"}}, "max_output_tokens": 128})
+	_, err = request("channel-blocked", first.SessionID, nextBody)
+	require.Error(t, err, "a channel edit still blocks new paid work")
+	require.Equal(t, 1, calls)
+	s.channelService = nil
 	a.Extra[DevinContextEnabledExtra] = false
 	_, err = request("blocked-second", first.SessionID, nextBody)
 	require.Error(t, err, "disabling the account blocks an existing session")
@@ -291,6 +297,25 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 			require.Contains(t, w.Header().Get("Content-Type"), "application/json")
 		}
 	}
+	compactBody, err := json.Marshal(map[string]any{"mode": "internal", "session_id": next.SessionID, "lane": "main", "expected_revision": next.Revision})
+	require.NoError(t, err)
+	compact := func() (*ContextRunResult, error) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest("POST", "/v1/context/compact", nil)
+		c.Request.Header.Set("Idempotency-Key", "internal-noop")
+		return s.RunContext(c, key, keys, compactBody, "internal", next.SessionID, next.Revision, 0)
+	}
+	manual, err := compact()
+	require.NoError(t, err)
+	require.Equal(t, "no_op", manual.Job.State)
+	a.Schedulable = false
+	s.concurrencyService = nil
+	replayedManual, err := compact()
+	require.NoError(t, err, "terminal internal jobs replay without a schedulable account or inference slots")
+	require.True(t, replayedManual.Replayed)
+	require.Equal(t, manual.Job.ID, replayedManual.Job.ID)
+	require.Equal(t, 2, calls)
+	require.Len(t, billing.commands, 2)
 	require.NoError(t, s.devin.managedEngine().Close(context.Background()))
 }
 func TestContextModelBudgetAppliesConcreteOutputConfiguration(t *testing.T) {

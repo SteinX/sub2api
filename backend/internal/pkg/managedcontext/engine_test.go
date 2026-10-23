@@ -355,6 +355,23 @@ func TestManagedToolContinuationIdempotencyAndScope(t *testing.T) {
 	_, _, err = e.LoadSession(context.Background(), "another-key", s.ID)
 	require.ErrorIs(t, err, ErrNotFound)
 }
+
+func TestOperationMetadataIdentifiersAreBoundedBeforeStorage(t *testing.T) {
+	store := newMem()
+	e := New(store)
+	for _, input := range []struct{ namespace, model, session string }{
+		{"responses:", strings.Repeat("m", 257), ""},
+		{"responses:", "model", strings.Repeat("s", 129)},
+		{strings.Repeat("n", 257), "model", ""},
+	} {
+		_, _, err := e.Begin(context.Background(), owner(), input.namespace, "key", "body", input.model, input.session, DefaultPolicy())
+		require.Error(t, err)
+	}
+	require.Empty(t, store.records, "invalid identifiers must not consume durable operation quota")
+	_, _, err := e.Begin(context.Background(), owner(), strings.Repeat("n", 256), "key", "body", strings.Repeat("m", 256), strings.Repeat("s", 128), DefaultPolicy())
+	require.NoError(t, err)
+	require.NoError(t, e.Close(context.Background()))
+}
 func TestKnownUsageRecoveryDoesNotReplayProvider(t *testing.T) {
 	store := newMem()
 	e := New(store)
@@ -548,6 +565,35 @@ func TestInternalCompactBelowTargetIsDurableNoop(t *testing.T) {
 			require.NoError(t, e.Close(context.Background()))
 		})
 	}
+}
+
+func TestManualSummaryReservationHasItsOwnOperationIdentity(t *testing.T) {
+	e := New(newMem())
+	s, op := seedSummary(t, e)
+	x := &fakeExecutor{safe: 20000}
+	observed := false
+	x.beforeReturn = func(call Call) {
+		if strings.HasPrefix(call.Purpose, "compaction") {
+			stored, _, err := e.LoadSession(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.Empty(t, stored.OperationID, "manual compact does not claim a foreground turn")
+			require.Equal(t, op.ID, stored.ReservationOperationID)
+			require.Positive(t, stored.ReservedBytes)
+			observed = true
+		}
+	}
+	_, sr, err := e.LoadSession(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	err = e.WithOperation(context.Background(), op, func(ctx context.Context, op *Operation, r *Record, l *Lease) error {
+		job, err := e.Internal(ctx, op, r, l, sr.Revision, x)
+		if err == nil {
+			require.Equal(t, "applied", job.State)
+		}
+		return err
+	})
+	require.NoError(t, err)
+	require.True(t, observed)
+	require.NoError(t, e.Close(context.Background()))
 }
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 func TestStatelessNoopAndKnownResultReplay(t *testing.T) {

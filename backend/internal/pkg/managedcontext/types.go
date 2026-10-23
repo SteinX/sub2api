@@ -72,30 +72,31 @@ type Ref struct {
 }
 type Session struct {
 	Owner
-	ID                 string                     `json:"id"`
-	Schema             int                        `json:"schema"`
-	Model              string                     `json:"model"`
-	Policy             Policy                     `json:"policy"`
-	Template           apicompat.ResponsesRequest `json:"template"`
-	Contract           string                     `json:"contract"`
-	Epoch              uint64                     `json:"epoch"`
-	Head               string                     `json:"head"`
-	Active             []Ref                      `json:"active"`
-	OperationID        string                     `json:"operation_id,omitempty"`
-	JobID              string                     `json:"job_id,omitempty"`
-	AppliedJobID       string                     `json:"applied_job_id,omitempty"`
-	AppliedJobAfter    int                        `json:"applied_job_after,omitempty"`
-	PendingCall        string                     `json:"pending_call,omitempty"`
-	Status             string                     `json:"status"`
-	HistoryBytes       int64                      `json:"history_bytes"`
-	ReservedBytes      int64                      `json:"reserved_bytes"`
-	Requests           int                        `json:"requests"`
-	LastBudget         *cc.Budget                 `json:"context_budget,omitempty"`
-	MaintenanceCostUSD float64                    `json:"maintenance_cost_usd"`
-	InferenceUsage     *apicompat.ResponsesUsage  `json:"inference_usage,omitempty"`
-	MaintenanceUsage   *apicompat.ResponsesUsage  `json:"maintenance_usage,omitempty"`
-	AccountedJobs      map[string]bool            `json:"accounted_jobs,omitempty"`
-	ExpiresAt          time.Time                  `json:"expires_at"`
+	ID                     string                     `json:"id"`
+	Schema                 int                        `json:"schema"`
+	Model                  string                     `json:"model"`
+	Policy                 Policy                     `json:"policy"`
+	Template               apicompat.ResponsesRequest `json:"template"`
+	Contract               string                     `json:"contract"`
+	Epoch                  uint64                     `json:"epoch"`
+	Head                   string                     `json:"head"`
+	Active                 []Ref                      `json:"active"`
+	OperationID            string                     `json:"operation_id,omitempty"`
+	JobID                  string                     `json:"job_id,omitempty"`
+	AppliedJobID           string                     `json:"applied_job_id,omitempty"`
+	AppliedJobAfter        int                        `json:"applied_job_after,omitempty"`
+	PendingCall            string                     `json:"pending_call,omitempty"`
+	Status                 string                     `json:"status"`
+	HistoryBytes           int64                      `json:"history_bytes"`
+	ReservedBytes          int64                      `json:"reserved_bytes"`
+	ReservationOperationID string                     `json:"reservation_operation_id,omitempty"`
+	Requests               int                        `json:"requests"`
+	LastBudget             *cc.Budget                 `json:"context_budget,omitempty"`
+	MaintenanceCostUSD     float64                    `json:"maintenance_cost_usd"`
+	InferenceUsage         *apicompat.ResponsesUsage  `json:"inference_usage,omitempty"`
+	MaintenanceUsage       *apicompat.ResponsesUsage  `json:"maintenance_usage,omitempty"`
+	AccountedJobs          map[string]bool            `json:"accounted_jobs,omitempty"`
+	ExpiresAt              time.Time                  `json:"expires_at"`
 }
 
 type Operation struct {

@@ -40,7 +40,7 @@ gateway:
 
 ## 客户端合同
 
-首次请求同时传 `X-Sub2API-Context-Mode: managed` 和 `Idempotency-Key`，以新的用户对话开始。请求体最多 2 MiB。
+首次请求同时传 `X-Sub2API-Context-Mode: managed` 和 `Idempotency-Key`，以新的用户对话开始。请求体最多 2 MiB。`Idempotency-Key` 为 1–128 个无空白字符，模型 UID 最多 256 字节，session ID 最多 128 字节；在写入操作元数据前验证这些限制。
 
 ```sh
 curl "$BASE_URL/v1/responses" \
