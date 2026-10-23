@@ -49,7 +49,7 @@ function fixture(options = {}) {
       return { data: issue };
     },
   };
-  const github = { rest: { actions: methods, repos: methods, pulls: methods, issues: methods },
+  const github = { rest: { actions: methods, repos: methods, pulls: methods, issues: methods, git: { getRef: missing } },
     paginate: async (method, args) => (await method(args)).data };
   const core = { info: message => calls.push({ name: 'info', message }), setSecret() {} };
   const context = { repo: { owner: 'SteinX', repo: 'sub2api' }, payload: options.payload || {} };
@@ -100,6 +100,55 @@ test('current conflicts reserve first and create one bounded cloud session with 
   const posts = () => f.calls.filter(call => call.name === 'api' && call.method === 'POST');
   await execute(f);
   assert.equal(posts().length, 1);
+});
+
+test('a missing release tag still dispatches a planning failure before any PR exists', async () => {
+  const f = fixture({ noPr: true });
+  const getCommit = f.github.rest.repos.getCommit;
+  f.github.rest.repos.getCommit = async args => {
+    if (args.ref === TAG) throw Object.assign(new Error(`No commit found for SHA: ${TAG}`), { status: 422 });
+    return getCommit(args);
+  };
+  await execute(f);
+  const post = f.calls.find(call => call.name === 'api' && call.method === 'POST');
+  assert.equal(post.path, 'sessions');
+  assert.match(post.body.prompt, /"frozenSha": null/);
+  assert.equal(readState(f.issue).phase, 'active');
+});
+
+test('existing lightweight and annotated release tags retain their resolved commit in repair context', async () => {
+  for (const type of ['commit', 'tag']) {
+    const f = fixture();
+    const frozenSha = 'd'.repeat(40);
+    f.github.rest.git.getRef = async args => {
+      assert.equal(args.ref, `tags/${TAG}`);
+      return { data: { object: { type, sha: type === 'tag' ? 'e'.repeat(40) : frozenSha } } };
+    };
+    const getCommit = f.github.rest.repos.getCommit;
+    f.github.rest.repos.getCommit = async args => args.ref === TAG ? { data: { sha: frozenSha } } : getCommit(args);
+    const work = await sourceWork(f, '100', f.imageCheck);
+    assert.equal(work.frozenSha, frozenSha);
+  }
+});
+
+test('tag permission, validation and service errors stop dispatch without hiding the failure', async () => {
+  for (const status of [403, 422, 500]) {
+    const f = fixture();
+    f.github.rest.git.getRef = async () => { throw Object.assign(new Error('Tag lookup failed'), { status }); };
+    await assert.rejects(execute(f), error => error.status === status);
+    assert.equal(f.issue, undefined);
+    assert.equal(f.calls.some(call => call.name === 'api'), false);
+  }
+  const f = fixture();
+  f.github.rest.git.getRef = async () => ({ data: { object: { type: 'tag', sha: HEAD } } });
+  const getCommit = f.github.rest.repos.getCommit;
+  f.github.rest.repos.getCommit = async args => {
+    if (args.ref === TAG) throw Object.assign(new Error('Tag resolution failed'), { status: 422 });
+    return getCommit(args);
+  };
+  await assert.rejects(execute(f), /Tag resolution failed/);
+  assert.equal(f.issue, undefined);
+  assert.equal(f.calls.some(call => call.name === 'api'), false);
 });
 
 test('repeated hourly failures have the same fingerprint even with different run IDs', async () => {
