@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	RoutePolicyRevision   = "devin-routes-v2-auto-fusion"
+	RoutePolicyRevision   = "devin-routes-v3-client-harness"
 	CatalogSchemaRevision = "cascade-model-info-harness-20-v1"
 
 	KindDirect         = "direct_model"
@@ -114,6 +114,23 @@ func PlanModelUID(uid string) ModelRoutePlan {
 	return p
 }
 
+// chatCompatibleHarnesses recognizes CLI-side prompt/tool harness hints whose
+// concrete model UIDs use the ordinary GetChatMessage contract. The catalog's
+// harness list is not itself a requirement to invoke a different server RPC.
+// Keep unknown hints (and Fusion's virtual harness) closed until their wire
+// behavior is checked. This does not relax ModelAssignment's separate contract.
+func chatCompatibleHarnesses(uids []string) bool {
+	for _, uid := range uids {
+		switch uid {
+		case "strawberry-pancake", "swe-1p6-exec", "swe-1p6", "swe-1p5",
+			"gpt-5p6-codex", "gpt-5p6", "gemini-3-pro", "gpt-5p4-persistent":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func PlanModel(m *pb.ClientModelConfig) ModelRoutePlan {
 	p := PlanModelUID(ModelID(m))
 	info := m.GetModelInfo()
@@ -131,7 +148,7 @@ func PlanModel(m *pb.ClientModelConfig) ModelRoutePlan {
 	if p.Mode == RouteBlocked {
 		return p
 	}
-	if len(p.HarnessUIDs) > 0 {
+	if !chatCompatibleHarnesses(p.HarnessUIDs) {
 		p.CatalogKind, p.Mode, p.DecisionCode, p.MechanismStatus = KindHarness, RouteBlocked, CodeRouteUnverified, "unverified"
 	} else if label := strings.ToLower(strings.TrimSpace(m.GetLabel())); label == "fusion" || strings.HasPrefix(label, "fusion ") || strings.HasPrefix(label, "fusion-") {
 		p.CatalogKind, p.Mode, p.DecisionCode, p.MechanismStatus = KindUnknownSpecial, RouteBlocked, CodeRouteUnverified, "unverified"

@@ -122,6 +122,10 @@ func TestFusionGatewayAcrossProtocolsAndBilling(t *testing.T) {
 						models = append(models, &pb.ClientModelConfig{ModelUid: uid, ModelInfo: &pb.ModelInfo{MaxOutputTokens: 4096, ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}}})
 					}
 					if automatic {
+						// Native catalog members carry client-side harness hints; these
+						// must not prevent pair discovery, tools or per-member billing.
+						models[0].ModelInfo.HarnessUids = []string{"gpt-5p6-codex", "gpt-5p6"}
+						models[1].ModelInfo.HarnessUids = []string{"gpt-5p4-persistent"}
 						models = append(models, &pb.ClientModelConfig{ModelUid: profile.PublicModel, ModelInfo: &pb.ModelInfo{IsModelRouter: true, HarnessUids: []string{"opaque-public-harness"}}})
 					}
 					a := &Account{ID: 7, Platform: PlatformDevin, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 2, Credentials: map[string]any{"access_token": "synthetic-token"}, Extra: devinCatalogExtra(models, "fixture")}
@@ -379,7 +383,11 @@ func TestFusionErrorBeforePublicStreamUsesJSON(t *testing.T) {
 func TestFusionAutomaticPairDiscoveryAndOptOut(t *testing.T) {
 	p := fusionTestProfile()
 	public := "fusion-" + p.LeadModel + "-sidekick-" + p.SidekickModel
-	models := []*pb.ClientModelConfig{{ModelUid: p.LeadModel}, {ModelUid: p.SidekickModel}, {ModelUid: public, ModelInfo: &pb.ModelInfo{IsModelRouter: true, HarnessUids: []string{"public-only-harness"}}}}
+	models := []*pb.ClientModelConfig{
+		{ModelUid: p.LeadModel, ModelInfo: &pb.ModelInfo{HarnessUids: []string{"gpt-5p6-codex", "gpt-5p6"}}},
+		{ModelUid: p.SidekickModel, ModelInfo: &pb.ModelInfo{HarnessUids: []string{"gpt-5p4-persistent"}}},
+		{ModelUid: public, ModelInfo: &pb.ModelInfo{IsModelRouter: true, HarnessUids: []string{"public-only-harness"}}},
+	}
 	a := &Account{Platform: PlatformDevin, Extra: devinCatalogExtra(models, "fixture")}
 	inferred := devinFusionProfile(a, public)
 	require.NotNil(t, inferred)

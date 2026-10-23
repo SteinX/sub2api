@@ -299,7 +299,7 @@ func TestFusionBudgetContextToolAndContractBoundaries(t *testing.T) {
 			x.responses = []*apicompat.ResponsesResponse{delegation("d"), r}
 		}, "parallel_tools_unsupported"},
 		{"no delegation", func(i *Input, x *scriptExecutor) {
-			x.responses = []*apicompat.ResponsesResponse{textResponse("pretend done")}
+			x.responses = []*apicompat.ResponsesResponse{textResponse("unreviewed draft"), textResponse("pretend done")}
 		}, "delegation_required"},
 		{"reserved tool", func(i *Input, x *scriptExecutor) {
 			i.Request.Tools = append(i.Request.Tools, apicompat.ResponsesTool{Type: "function", Name: DelegateTool})
@@ -501,4 +501,93 @@ func TestFusionTextOnlyClientsStillGetBothRoles(t *testing.T) {
 	require.Len(t, x.calls, 3)
 	require.Len(t, x.calls[0].Request.Tools, 1)
 	require.Empty(t, x.calls[1].Request.Tools)
+}
+
+func TestFusionLeadUsesAutoAndStableToolsAcrossHandoff(t *testing.T) {
+	for _, textOnly := range []bool{false, true} {
+		r := testRequest("analyze this design")
+		if textOnly {
+			r.Tools = nil
+			r.ToolChoice = json.RawMessage(`"none"`)
+		}
+		s := &Session{Profile: testProfile(), Role: Lead}
+		e := New(newMemoryStore())
+		planning, err := e.roleRequest(s, r)
+		require.NoError(t, err)
+		s.TurnHandoffs = 1
+		review, err := e.roleRequest(s, r)
+		require.NoError(t, err)
+		require.JSONEq(t, `"auto"`, string(planning.ToolChoice), "thinking-enabled members reject forced named tools")
+		require.Equal(t, planning.ToolChoice, review.ToolChoice)
+		require.Equal(t, planning.Instructions, review.Instructions)
+		require.Equal(t, Digest(planning.Tools), Digest(review.Tools), "changing the tool contract loses the Lead cache prefix")
+		require.Equal(t, DelegateTool, planning.Tools[len(planning.Tools)-1].Name)
+		for _, tool := range r.Tools {
+			require.NotEqual(t, DelegateTool, tool.Name, "do not mutate the caller's fixed tool set")
+		}
+	}
+}
+
+func TestFusionDelegationReminderIsBilledAndResetPerTurn(t *testing.T) {
+	store := newMemoryStore()
+	e := New(store)
+	x := &scriptExecutor{t: t}
+	for turn := 1; turn <= 2; turn++ {
+		x.responses = []*apicompat.ResponsesResponse{textResponse("unreviewed draft"), delegation("delegate"), textResponse("independent report"), textResponse("reviewed answer")}
+		in := input(testRequest("analyze this design"))
+		in.IdempotencyKey = strings.Repeat("turn", turn)
+		result, err := e.Advance(context.Background(), in, x)
+		require.NoError(t, err)
+		require.Equal(t, Completed, result.State)
+		require.Equal(t, "reviewed answer", outputText(result.Response))
+		require.Equal(t, 400, result.Response.Usage.InputTokens, "include the unpublished draft's actual usage")
+		require.Len(t, x.calls, 4*turn)
+		require.Len(t, x.settled, 4*turn)
+		s, _, err := e.Load(context.Background(), in.Scope, in.SessionID)
+		require.NoError(t, err)
+		require.Equal(t, 1, s.TurnDelegationReminders)
+		require.Equal(t, 1, s.TurnHandoffs)
+		replayed, err := New(store).Advance(context.Background(), in, x)
+		require.NoError(t, err)
+		require.True(t, replayed.Replayed)
+		require.Len(t, x.calls, 4*turn)
+	}
+}
+
+func TestFusionDelegationReminderCannotBypassTurnBudgetOrRepeat(t *testing.T) {
+	x := &scriptExecutor{t: t, responses: []*apicompat.ResponsesResponse{textResponse("first draft"), textResponse("second draft")}}
+	_, err := New(newMemoryStore()).Advance(context.Background(), input(testRequest("task")), x)
+	requireCode(t, err, "delegation_required")
+	require.Len(t, x.calls, 2, "a second draft must stop instead of prompting again")
+	require.Len(t, x.settled, 2)
+	x = &scriptExecutor{t: t, responses: []*apicompat.ResponsesResponse{textResponse("draft"), delegation("d"), textResponse("report"), textResponse("final")}}
+	in := input(testRequest("task"))
+	in.Profile.MaxRequests = 3
+	_, err = New(newMemoryStore()).Advance(context.Background(), in, x)
+	requireCode(t, err, "budget_exhausted")
+	require.Len(t, x.calls, 3, "the reminder's inference consumes the ordinary request budget")
+	require.Len(t, x.settled, 3)
+}
+
+func TestFusionDelegationReminderRecoversWithoutRepeatingDraftInference(t *testing.T) {
+	store := newMemoryStore()
+	store.failCAS = func(data []byte) bool {
+		var s Session
+		return json.Unmarshal(data, &s) == nil && s.TurnDelegationReminders == 1
+	}
+	x := &scriptExecutor{t: t, responses: []*apicompat.ResponsesResponse{textResponse("unreviewed draft"), delegation("d"), textResponse("report"), textResponse("reviewed answer")}}
+	in := input(testRequest("task"))
+	in.IdempotencyKey = "same-request-after-save-failure"
+	_, err := New(store).Advance(context.Background(), in, x)
+	require.ErrorContains(t, err, "simulated store interruption")
+	require.Len(t, x.calls, 1)
+	require.Len(t, x.settled, 1)
+	result, err := New(store).Advance(context.Background(), in, x)
+	require.NoError(t, err)
+	require.Equal(t, "reviewed answer", outputText(result.Response))
+	require.Len(t, x.calls, 4)
+	require.Len(t, x.settled, 4)
+	s, _, err := New(store).Load(context.Background(), in.Scope, in.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, 1, s.TurnDelegationReminders)
 }

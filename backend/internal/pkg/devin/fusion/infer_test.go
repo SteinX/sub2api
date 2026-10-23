@@ -71,3 +71,18 @@ func TestFusionInferenceUsesConcreteCatalogAliasAndNeverPublicHarness(t *testing
 	require.Equal(t, "concrete-lead", p.LeadModel)
 	require.Equal(t, "worker", p.SidekickModel)
 }
+
+func TestFusionInfersNativeMembersWithClientHarnessHints(t *testing.T) {
+	const public = "fusion-claude-opus-5-5-medium-sidekick-swe-2-medium"
+	models := inferenceModels("claude-opus-5-5-medium", "swe-2-medium")
+	models[0].ModelInfo.HarnessUids = []string{"strawberry-pancake"}
+	models[1].ModelInfo.HarnessUids = []string{"swe-1p6-exec", "swe-1p6", "swe-1p5"}
+	models = append(models, &pb.ClientModelConfig{ModelUid: public, ModelInfo: &pb.ModelInfo{IsModelRouter: true, HarnessUids: []string{"fusion", "strawberry-pancake"}}})
+	profile, err := InferProfile(public, models)
+	require.NoError(t, err)
+	require.Equal(t, models[0].ModelUid, profile.LeadModel)
+	require.Equal(t, models[1].ModelUid, profile.SidekickModel)
+	models[1].ModelInfo.HarnessUids = append(models[1].ModelInfo.HarnessUids, "unverified-future-harness")
+	_, err = InferProfile(public, models)
+	requireCode(t, err, "pair_unresolved")
+}

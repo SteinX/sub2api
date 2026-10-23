@@ -184,6 +184,8 @@ type Session struct {
 	AuxReservedUSD  float64                        `json:"aux_reserved_usd,omitempty"`
 	Contexts        map[Role]*RoleContext          `json:"contexts,omitempty"`
 	Maintenance     MaintenanceStats               `json:"maintenance,omitempty"`
+
+	TurnDelegationReminders int `json:"turn_delegation_reminders,omitempty"`
 }
 
 func (s *Session) Lane(role Role) *[]apicompat.ResponsesInputItem {

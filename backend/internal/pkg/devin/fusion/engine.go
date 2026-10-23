@@ -194,6 +194,7 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 		s.Turn++
 		s.TurnRequests = 0
 		s.TurnHandoffs = 0
+		s.TurnDelegationReminders = 0
 		s.TurnTools = 0
 		s.TurnCostUSD = 0
 		s.TurnStarted = e.now()
@@ -568,9 +569,9 @@ func (e *Engine) roleRequest(s *Session, base *apicompat.ResponsesRequest) (*api
 	req.ToolChoice = json.RawMessage(`"auto"`)
 	if s.Role == Lead {
 		req.Tools = append(req.Tools, apicompat.ResponsesTool{Type: "function", Name: DelegateTool, Description: "Delegate a bounded task to the persistent Sidekick and receive its report for review.", Parameters: json.RawMessage(`{"type":"object","properties":{"task":{"type":"string"},"constraints":{"type":"string"},"acceptance_criteria":{"type":"string"}},"required":["task","acceptance_criteria"],"additionalProperties":false}`)})
-		if s.TurnHandoffs == 0 {
-			req.ToolChoice = json.RawMessage(`{"type":"function","name":"sub2api_sidekick"}`)
-		}
+		// Thinking-enabled members can reject named/required tool choice. Keep
+		// auto and a stable tool set across the Lead's planning/review calls;
+		// apply still forbids a final answer before a Sidekick handoff.
 	}
 	return &req, nil
 }
@@ -641,7 +642,17 @@ func (e *Engine) apply(s *Session, r *apicompat.ResponsesResponse) error {
 		return nil
 	}
 	if s.TurnHandoffs == 0 {
-		return E("delegation_required", "Lead finished before consulting Sidekick", 502)
+		if s.TurnDelegationReminders >= 1 || strings.TrimSpace(outputText(r)) == "" {
+			return E("delegation_required", "Lead finished before consulting Sidekick", 502)
+		}
+		// Auto tool choice is required by some thinking-enabled members. An
+		// unpublished draft gets one durable reminder, then the ordinary turn
+		// admission checks bound and bill any additional inference. Never turn
+		// repeated non-delegation into an unbounded retry or a Lead-only result.
+		s.TurnDelegationReminders++
+		s.Lead = append(s.Lead, textMessage("user", "Gateway workflow reminder: before publishing this turn's answer, call sub2api_sidekick with a bounded brief and acceptance criteria, then review its report. Your previous text is an unpublished draft, not a completed answer."))
+		s.State = RunningLead
+		return nil
 	}
 	if strings.TrimSpace(outputText(r)) == "" {
 		return E("upstream_incomplete", "Lead returned no final answer", 502)

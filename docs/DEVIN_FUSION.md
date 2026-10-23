@@ -10,6 +10,8 @@ Fusion 默认开启，现有账号也立即适用，无需逐个创建 profile�
 
 公开 Fusion 条目即使包含 router/harness 元数据，仍只作为虚拟配对名称使用；不会把该条目或其 opaque harness 发给聊天接口。两个成员必须是账号可用、可直接调用的具体模型；成员自己的 router 或未知 harness 不会自动放行。这复现的是所选模型组合的网关协作机制，不证明私有官方 harness 的行为。
 
+已核验的 CLI 客户端 harness 提示不会阻止具体成员的标准聊天调用。例如 Opus 的 `strawberry-pancake` 和 SWE-2 的 `swe-1p6*` 提示可以进入现有双角色编排，仍分别使用两个具体模型 UID 和独立 Cascade 历史。支持范围及未知提示的拒绝规则见 [模型路由](DEVIN_MODEL_ROUTING.md#cli-客户端-harness-提示)；不会把整个 Fusion ID 或其 `fusion` harness 当作单模型请求发送。
+
 角色调用先将请求模型设为已固定的具体 Lead 或 Sidekick，再以 `direct_chat` 计划进入 `Prepare`，不会对公开 Fusion ID 调用 `AssignModel`。新版补充第 24.5 节报告：官方 Fusion 专用分配路径把 `assignment.model_uid` 用作 Sidekick；这不能套用普通 router 将分配结果作为唯一推理模型的规则。当前显式配对不依赖这条专用分配路径，也不从 `harness_uids` 提取 Sidekick UID；普通 router 的分配逻辑保持独立。
 
 1. 同步账号模型目录后，已解析的配对会进入模型列表，并显示 Lead / Sidekick 成员。已有目录也会按当前策略重新计算展示。
@@ -79,6 +81,8 @@ sequenceDiagram
 ```
 
 每个新用户 turn 都要求至少一次委派。Lead 可以在报告后返工或自己调用客户端工具验证；后续委派继续使用同一条 Sidekick 历史。两个角色可以选同一个真实模型，但 Cascade 身份仍独立。
+
+Lead 使用 `tool_choice=auto`，规划与审查阶段保持相同的工具声明和系统策略。部分带 thinking 的具体成员会拒绝强制指定工具，不能靠 named/required choice 保证委派。如果 Lead 尚未交接就给出文本，该文本只保留为私有草稿，每轮最多追加一次持久化的工作流提醒；再次未交接则明确失败，不发布单角色结果。提醒后的推理仍检查并消耗原有请求数、费用和耗时预算，草稿实际用量照常计费，重试不会重置提醒次数。保持工具集合稳定也避免在 Lead 恢复审查时主动改变可缓存前缀。
 
 流式请求在内部阶段只发送保活注释，形成公共工具调用或最终结果后发布一个公共 Responses 生命周期，再转换到对应协议。内部推理、Sidekick 私有文本和报告不会混入最终用户流。
 
@@ -195,4 +199,4 @@ go test -tags=unit ./internal/service ./internal/handler ./internal/server/middl
 
 `audit.devin.fusion` 记录每次推理的角色、attempt ID、真实模型和 usage 是否已观察到；日志不包含凭据、JWT、brief、工具输出或私有正文。完整角色历史只存在有 TTL 的会话/结果存储中。
 
-测试使用模拟上游及隔离 Redis。真实账号模型能力、实际任务质量，以及 Codex/Claude Code/OpenCode 等目标客户端版本的端到端验收，需用部署环境另行验证；开发中没有触发真实付费推理或部署。
+自动化测试使用模拟上游及隔离 Redis。2026-10-23 的兼容修复额外用真实上游 Opus 5.5 + SWE-2 完成了隔离的三轮计算任务，核对双角色执行、缓存读写与幂等重放；这些调用可能消耗上游额度，未写生产配置或生产账单。该验证不等同于目标客户端的端到端验收或完整生产计费验证。Codex/Claude Code/OpenCode 的真实文件/命令工具、部署配置和所有模型组合仍需单独验收。

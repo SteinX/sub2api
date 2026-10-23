@@ -252,7 +252,7 @@ func (c *Client) Prepare(ctx context.Context, token string, req *pb.GetChatMessa
 	if err := plan.Validate(); err != nil {
 		return result, err
 	}
-	if req.GetChatModelUid() != plan.ModelUID || len(plan.HarnessUIDs) > 0 {
+	if req.GetChatModelUid() != plan.ModelUID || !chatCompatibleHarnesses(plan.HarnessUIDs) {
 		return result, &RouteError{Code: CodeRouteMismatch}
 	}
 	if err := CheckModelIntent(catalog, plan.ModelUID); err != nil {
