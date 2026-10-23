@@ -42,7 +42,7 @@ func (f *refreshFake) Acquire(context.Context, CacheSnapshot) (func(), bool) {
 	return func() {}, !f.busy
 }
 func (f *refreshFake) Estimate(context.Context, CacheSnapshot) (float64, error) { return .1, nil }
-func (f *refreshFake) Refresh(_ context.Context, _ CacheSnapshot, _ string) (RefreshResult, error) {
+func (f *refreshFake) Refresh(_ context.Context, _ CacheSnapshot, _ Attempt) (RefreshResult, error) {
 	f.mu.Lock()
 	f.calls++
 	f.mu.Unlock()
@@ -52,7 +52,7 @@ func (f *refreshFake) Refresh(_ context.Context, _ CacheSnapshot, _ string) (Ref
 	}
 	return f.result, f.err
 }
-func (f *refreshFake) Settle(_ context.Context, a Attempt) (float64, error) {
+func (f *refreshFake) Settle(_ context.Context, _ CacheSnapshot, a Attempt) (float64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.billed == nil {

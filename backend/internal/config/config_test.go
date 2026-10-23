@@ -38,6 +38,20 @@ func TestLoadDefaultMinOutputTokens(t *testing.T) {
 	require.Equal(t, 128, cfg.Gateway.MinOutputTokens)
 }
 
+func TestLoadDevinFusionCacheWarmOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			resetViperWithJWTSecret(t)
+			if enabled {
+				t.Setenv("GATEWAY_DEVIN_FUSION_CACHE_WARM_ENABLED", "true")
+			}
+			cfg, err := Load()
+			require.NoError(t, err)
+			require.Equal(t, enabled, cfg.Gateway.DevinFusionCacheWarmEnabled)
+		})
+	}
+}
+
 func TestLoadMinOutputTokensFromEnv(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	t.Setenv("GATEWAY_MIN_OUTPUT_TOKENS", "16")

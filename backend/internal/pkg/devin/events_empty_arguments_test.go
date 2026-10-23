@@ -22,7 +22,7 @@ func TestNativeEmptyArgumentsOnlyNormalizeDeclaredOptionalObjects(t *testing.T) 
 		var delta strings.Builder
 		for _, event := range events {
 			if event.Type == "response.function_call_arguments.delta" {
-				delta.WriteString(event.Delta)
+				_, _ = delta.WriteString(event.Delta)
 			}
 			if event.Type == "response.function_call_arguments.done" {
 				require.Equal(t, `{}`, event.Arguments)

@@ -242,6 +242,7 @@ func (e *Engine) performCompaction(ctx context.Context, s *Session, r *compactio
 			r.Attempt.CostUSD = cost
 			r.Attempt.Settled = true
 			_ = e.writeCompaction(persist, s, r, old)
+			_ = e.settleBudget(persist, s, r.Attempt)
 		}
 	}
 }
@@ -297,6 +298,9 @@ func (e *Engine) collectCompactions(ctx context.Context, s *Session, raw *[]byte
 			if err = e.writeCompaction(ctx, s, r, old); err != nil {
 				return err
 			}
+		}
+		if err = e.settleBudget(ctx, s, r.Attempt); err != nil {
+			return err
 		}
 		j.State = r.Job.State
 		j.Accounted = true
@@ -486,6 +490,9 @@ func (e *Engine) prepareCompaction(ctx context.Context, s *Session, raw *[]byte,
 	}
 	if !validCost(estimate) || s.TurnRequests >= s.Profile.MaxRequests || s.TurnCostUSD+s.AuxReservedUSD+estimate > s.Profile.MaxCostUSD {
 		return false, E("budget_exhausted", "summary would exceed the Fusion turn budget", 409)
+	}
+	if err = e.reserveBudget(ctx, s, j.ID, Compaction, estimate); err != nil {
+		return false, err
 	}
 	j.EstimateUSD = estimate
 	c.Job = &j

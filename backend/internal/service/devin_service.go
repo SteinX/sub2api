@@ -41,6 +41,7 @@ type DevinService struct {
 	flights      singleflight.Group
 	fusionRunner *fusion.MaintenanceRunner
 	fusionCache  *fusion.CacheKeepaliveController
+	fusionWarm   *devinCacheWarmRouter
 }
 
 func NewDevinService(repo AccountRepository, proxyRepo ProxyRepository, upstream HTTPUpstream, cfg *config.Config, store devin.SessionStore) *DevinService {
@@ -54,6 +55,11 @@ func (s *DevinService) fusionEngine() *fusion.Engine {
 	}
 	if s.fusionCache == nil {
 		s.fusionCache = fusion.NewCacheKeepaliveController(s.store)
+		s.fusionWarm = &devinCacheWarmRouter{}
+		s.fusionCache.Adapter = s.fusionWarm
+		if s.cfg != nil && s.cfg.Gateway.DevinFusionCacheWarmEnabled {
+			s.fusionCache.Scheduler = fusion.NewCacheWarmScheduler(s.fusionCache, 4, 128)
+		}
 	}
 	runner, cache := s.fusionRunner, s.fusionCache
 	s.mu.Unlock()

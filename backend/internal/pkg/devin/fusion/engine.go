@@ -236,6 +236,9 @@ func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte
 		return a, err
 	}
 	if a.Status != "completed" || a.Settled {
+		if err := e.settleBudget(ctx, s, *a); err != nil {
+			return a, err
+		}
 		if a.Status != previousStatus {
 			return a, e.save(ctx, s, raw)
 		}
@@ -251,7 +254,12 @@ func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte
 	a.CostUSD = cost
 	a.Settled = true
 	s.TurnCostUSD += cost
-	_ = e.journal(ctx, s, a)
+	if err = e.journal(ctx, s, a); err != nil {
+		return a, err
+	}
+	if err = e.settleBudget(ctx, s, *a); err != nil {
+		return a, err
+	}
 	return a, e.save(ctx, s, raw)
 }
 
@@ -275,11 +283,15 @@ func (e *Engine) ReconcileUsage(ctx context.Context, scope, id string, x Executo
 	}
 	_, inferenceErr := e.reconcileInference(ctx, s, &raw, x)
 	maintenanceErr := e.collectCompactions(ctx, s, &raw, x)
+	var cacheErr error
+	if e.Cache != nil {
+		cacheErr = e.Cache.Resume(ctx, s)
+	}
 	cancelled, cancelErr := e.cancelled(ctx, s)
 	if cancelled {
 		cancelErr = e.finalizeCancellation(ctx, s, &raw)
 	}
-	return s, errors.Join(inferenceErr, maintenanceErr, cancelErr)
+	return s, errors.Join(inferenceErr, maintenanceErr, cacheErr, cancelErr)
 }
 
 func (e *Engine) finalizeCancellation(ctx context.Context, s *Session, raw *[]byte) error {
@@ -470,6 +482,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		if math.IsNaN(estimate) || math.IsInf(estimate, 0) || estimate < 0 || s.TurnCostUSD+s.AuxReservedUSD+estimate > s.Profile.MaxCostUSD {
 			return stop(E("budget_exhausted", "next inference would exceed the Fusion turn cost budget", 409), BudgetExhausted)
 		}
+		if err = e.reserveBudget(persistCtx, s, call.AttemptID, Inference, estimate); err != nil {
+			return stop(err, BudgetExhausted)
+		}
 		call.EstimateUSD = estimate
 		for i := range s.Attempts {
 			a := &s.Attempts[i]
@@ -503,6 +518,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			a.Status = "completed"
 			a.Settled = true
 			a.Applied = true
+			if err = e.settleBudget(persistCtx, s, *a); err != nil {
+				return result, err
+			}
 			if err = e.save(persistCtx, s, raw); err != nil {
 				return result, err
 			}
@@ -529,6 +547,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 				billingErr = E("billing_invalid", "invalid inference cost", 502)
 			}
 		}
+		if budgetErr := e.settleBudget(persistCtx, s, *a); budgetErr != nil {
+			return result, budgetErr
+		}
 		if err = e.save(persistCtx, s, raw); err != nil {
 			return result, err
 		}
@@ -538,7 +559,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		if a.Role == Lead && a.Status == "completed" && a.Failure == "" && e.Cache != nil {
 			// Capture the immutable request, not an invented refresh wire shape.
 			// Arming is deferred until the delegation has been applied below.
-			_ = e.Cache.Capture(persistCtx, s, req, a.ID, e.RouteIdentity)
+			_ = e.Cache.Capture(persistCtx, s, req, a.ID, e.RouteIdentity, e.CacheIdentity)
 		}
 		if outcome.ClientDisconnected {
 			e.Runner.Cancel(s.Scope, s.ID)

@@ -130,6 +130,10 @@ func (x *devinFusionExecutor) cost(ctx context.Context, model string, u UsageTok
 	return cost, nil
 }
 func (x *devinFusionExecutor) Estimate(ctx context.Context, call fusion.Call) (float64, error) {
+	return x.estimate(ctx, call, true)
+}
+
+func (x *devinFusionExecutor) estimate(ctx context.Context, call fusion.Call, eligibility bool) (float64, error) {
 	s := x.service
 	if x.key == nil || x.key.User == nil || s.billingCacheService == nil || s.usageBillingRepo == nil {
 		return 0, fusion.E("billing_unavailable", "Fusion requires durable usage billing and billing eligibility checks", 503)
@@ -146,8 +150,10 @@ func (x *devinFusionExecutor) Estimate(ctx context.Context, call fusion.Call) (f
 			return 0, fusion.E("billing_unavailable", "Fusion requires atomic inflight quota reservations", 503)
 		}
 	}
-	if err := s.billingCacheService.CheckBillingEligibility(ctx, x.key.User, x.key, x.key.Group, x.subscription, QuotaPlatform(ctx, x.key)); err != nil {
-		return 0, fusion.E("billing_denied", "balance, quota or request limit does not permit another Fusion inference", 402)
+	if eligibility {
+		if err := s.billingCacheService.CheckBillingEligibility(ctx, x.key.User, x.key, x.key.Group, x.subscription, QuotaPlatform(ctx, x.key)); err != nil {
+			return 0, fusion.E("billing_denied", "balance, quota or request limit does not permit another Fusion inference", 402)
+		}
 	}
 	if (x.key.Quota > 0 || x.key.HasRateLimits()) && x.updater == nil {
 		return 0, fusion.E("billing_unavailable", "API key quota accounting is unavailable", 503)
@@ -373,6 +379,14 @@ func (s *OpenAIGatewayService) forwardDevinFusion(ctx context.Context, c *gin.Co
 		c.Header("X-Accel-Buffering", "no")
 	}
 	engine := s.devin.fusionEngine()
+	s.devin.configureCacheWarm(s, binding.Updater)
+	engine.CacheIdentity = fusion.CacheIdentity{UserID: key.UserID, APIKeyID: key.ID, InboundEndpoint: x.inboundEndpoint}
+	if key.GroupID != nil {
+		engine.CacheIdentity.GroupID = *key.GroupID
+	}
+	if subscription != nil {
+		engine.CacheIdentity.SubscriptionID = subscription.ID
+	}
 	engine.RouteIdentity = s.devin.runtimeKey(ctx, a)
 	log := logger.FromContext(ctx)
 	engine.Observer = func(event fusion.MaintenanceEvent) {

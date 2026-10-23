@@ -299,6 +299,7 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 		return true, fusion.E("input_invalid", err.Error(), 400)
 	}
 	engine := s.devin.fusionEngine()
+	s.devin.configureCacheWarm(s, updater)
 	scope := fusion.Scope(key.UserID, key.ID)
 	id, accountID, err := engine.Resolve(ctx, scope, explicitSession, c.GetHeader("Idempotency-Key"), req)
 	if err != nil {
