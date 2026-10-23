@@ -252,7 +252,8 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
  AND (c.kind='operation' OR NULLIF(c.data->>'operation_id','') IS NULL)
  AND finished_job.id=COALESCE(NULLIF(c.data->>'job_id',''),c.data->>'applied_job_id')
  AND finished_job.data->>'operation_id'=`+contextReservationOperation+`
- AND finished_job.status IN ('failed','stale','applied','compacted','no_op'))
+ AND finished_job.status IN ('failed','stale','applied','compacted','no_op')
+ AND NOT(finished_job.status='failed' AND COALESCE(finished_job.data->>'reason','')='context_billing_pending'))
  OR c.lease_until>NOW()) OR `+contextReservationPending+`)
  AND NOT(c.scope=$2 AND c.kind=$3 AND c.id=$4)`, v.UserID, v.Scope, v.Kind, v.ID)
 	if err != nil {

@@ -21,7 +21,7 @@ import (
 )
 
 func TestContextCompactRetryRecoversWithoutInferenceAdmission(t *testing.T) {
-	for _, interruptedAt := range []string{"billing", "application", "worker_receipt", "stateless_billing"} {
+	for _, interruptedAt := range []string{"billing", "legacy_billing", "application", "worker_receipt", "stateless_billing"} {
 		t.Run(interruptedAt, func(t *testing.T) { testContextManualRecovery(t, interruptedAt) })
 	}
 }
@@ -105,16 +105,25 @@ func testContextManualRecovery(t *testing.T, interruptedAt string) {
 		}
 	} else if interruptedAt == "worker_receipt" {
 		store.fail = func(r *mc.Record) bool {
-			if !interrupted && r.Kind == "job" && r.Status == "failed" {
+			if !interrupted && r.Kind == "job" && (r.Status == "failed" || r.Status == "needs_retry") {
 				interrupted = true
 				return true
 			}
 			return false
 		}
 	}
-	_, err = run("compact", mode, sessionID, body, revision)
+	failed, err := run("compact", mode, sessionID, body, revision)
 	require.Error(t, err)
 	require.Equal(t, 3, calls)
+	if interruptedAt == "legacy_billing" {
+		r, readErr := store.Read(context.Background(), contextScope(key), "job", failed.Job.ID)
+		require.NoError(t, readErr)
+		var j mc.Job
+		require.NoError(t, json.Unmarshal(r.Data, &j))
+		j.State, j.Reason, r.Status = "failed", "context_billing_pending", "failed"
+		r.Data, _ = json.Marshal(j)
+		require.NoError(t, store.CAS(context.Background(), r, nil, nil, nil))
+	}
 	if interruptedAt != "application" {
 		require.Len(t, billing.commands, 2)
 		if interruptedAt == "worker_receipt" {
@@ -138,11 +147,10 @@ func testContextManualRecovery(t *testing.T, interruptedAt string) {
 		require.Zero(t, session.ReservedBytes)
 		require.Empty(t, session.ReservationOperationID)
 		require.Equal(t, 100, session.MaintenanceUsage.InputTokens)
-		if interruptedAt != "billing" {
-			require.Equal(t, "applied", result.Job.State)
-			require.Equal(t, uint64(1), session.Epoch)
-			require.LessOrEqual(t, result.Job.After, result.Job.Target, "recovery retains the original validated model target")
-		}
+		require.Equal(t, "applied", result.Job.State)
+		require.Empty(t, result.Job.Reason, "recovered jobs do not keep stale billing errors")
+		require.Equal(t, uint64(1), session.Epoch)
+		require.LessOrEqual(t, result.Job.After, result.Job.Target, "recovery retains the original validated model target")
 	} else {
 		require.Equal(t, "compacted", result.Compact.Status)
 		require.Less(t, result.Compact.After, result.Compact.Before)

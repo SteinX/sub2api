@@ -10,6 +10,11 @@ import (
 	"github.com/google/uuid"
 )
 
+func recoverableSummaryJob(j *Job) bool {
+	return j.State == "prepared" || j.State == "running" || j.State == "uncertain" || j.State == "needs_retry" ||
+		j.State == "failed" && j.Reason == "context_billing_pending"
+}
+
 func (e *Engine) collect(ctx context.Context, s *Session, sr *Record, l *Lease, x Executor) error {
 	if s.JobID == "" {
 		return nil
@@ -55,9 +60,11 @@ func (e *Engine) collectJob(ctx context.Context, s *Session, sr *Record, l *Leas
 	}
 	// A crashed/late worker may have persisted terminal usage before updating its
 	// job. Reconstruct only from that observed terminal result, never by replay.
-	if j.State == "running" || j.State == "prepared" || j.State == "uncertain" {
+	if recoverableSummaryJob(j) {
 		j.State = "failed"
-		if a.Error == nil && a.ResponseRef != "" {
+		if a.Error != nil {
+			j.Reason = a.Error.Code
+		} else if a.ResponseRef != "" {
 			b, readErr := e.Store.Blob(ctx, s.Scope, a.ResponseRef)
 			if readErr != nil {
 				return readErr
@@ -67,6 +74,9 @@ func (e *Engine) collectJob(ctx context.Context, s *Session, sr *Record, l *Leas
 				j.Summary, err = cc.ParseSummary(&response)
 				if err == nil {
 					j.State = "ready"
+					j.Reason = ""
+				} else {
+					j.Reason = typed(err).Code
 				}
 			}
 		}
@@ -384,6 +394,9 @@ func (e *Engine) startSummary(ctx context.Context, s *Session, sr *Record, l *Le
 		}
 		if callErr != nil {
 			j.Reason = typed(callErr).Code
+			if j.Reason == "context_billing_pending" {
+				j.State = "needs_retry"
+			}
 		}
 		j.ReservedBytes = 0
 		persist, cancel := context.WithTimeout(context.WithoutCancel(bounded), 10*time.Second)
@@ -530,7 +543,7 @@ func (e *Engine) LoadJob(ctx context.Context, scope, id string) (*Job, *Record, 
 			return j, jr, nil
 		}
 	}
-	if j.AttemptID == "" || (j.State != "prepared" && j.State != "running" && j.State != "uncertain") {
+	if j.AttemptID == "" || !recoverableSummaryJob(j) {
 		return j, jr, nil
 	}
 	a, _, err := load[Attempt](ctx, e.Store, scope, "attempt", j.AttemptID)
@@ -558,6 +571,7 @@ func (e *Engine) LoadJob(ctx context.Context, scope, id string) (*Job, *Record, 
 				j.Summary, err = cc.ParseSummary(&response)
 				if err == nil {
 					j.State = "ready"
+					j.Reason = ""
 				} else {
 					j.Reason = "context_summary_invalid"
 				}
