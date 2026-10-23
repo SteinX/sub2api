@@ -183,7 +183,10 @@ async function sourceWork({ github, core, context }, id, imageCheck) {
   // mergeability can be temporarily unknown; actual failed validation still needs work.
   if (!isRelease && pr?.mergeable === null && failures.every(job =>
     job.steps.length && job.steps.every(step => step === 'Check upstream and prepare integration PR'))) return null;
-  const frozen = await optional(() => github.rest.repos.getCommit({ ...FORK, ref: tag }));
+  // Missing refs return 404 here; getCommit(tag) instead returns 422 before the
+  // first fork tag exists. Resolve only an existing ref, including annotated tags.
+  const frozenRef = await optional(() => github.rest.git.getRef({ ...FORK, ref: `tags/${tag}` }));
+  const frozen = frozenRef ? (await github.rest.repos.getCommit({ ...FORK, ref: tag })).data : null;
   const work = { tag, upstreamTag: upstream.tag_name, kind: isRelease ? 'release' : 'sync',
     runId: run.id, runAttempt: run.run_attempt, runUrl: `https://github.com/${REPOSITORY}/actions/runs/${run.id}`,
     mainSha: main, prNumber: pr?.number || null, prSha: pr?.head.sha || null,
