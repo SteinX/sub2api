@@ -16,6 +16,50 @@ import (
 
 type virtualCacheClock struct{ ns atomic.Int64 }
 
+type failWarmJournalStore struct {
+	AtomicStore
+	fail bool
+}
+
+func (s *failWarmJournalStore) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if s.fail && strings.Contains(key, ":cache_refresh:") {
+		s.fail = false
+		return errors.New("simulated warm journal interruption")
+	}
+	return s.AtomicStore.Set(ctx, key, value, ttl)
+}
+
+func TestFusionWarmJournalPreparationFailureDoesNotStrandBudget(t *testing.T) {
+	e, s, c, clock, fake := cacheFixture(t)
+	s.Profile.MaxCostUSD = .1
+	s.ProfileRevision = s.Profile.Revision()
+	_, raw, err := e.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.NoError(t, e.save(context.Background(), s, &raw))
+	req := testRequest("lead prefix")
+	req.Model = s.Profile.LeadModel
+	require.NoError(t, c.Capture(context.Background(), s, req, "lead", "route"))
+	c.Store = &failWarmJournalStore{AtomicStore: c.Store, fail: true}
+	state, _, err := c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	clock.Advance(10 * time.Second)
+	require.ErrorContains(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID), "warm journal interruption")
+	state, _, err = c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.Empty(t, state.Pending)
+	require.Empty(t, state.InFlightID)
+	require.Zero(t, state.ReservedUSD)
+	require.Zero(t, state.Attempts)
+	require.Equal(t, "ARMED", state.State)
+	require.Zero(t, fake.calls)
+	clock.Advance(10 * time.Second)
+	require.NoError(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID))
+	require.Equal(t, 1, fake.calls, "the entire turn budget is available for the first actual send")
+	state, _, err = c.Load(context.Background(), s.Scope, s.ID)
+	require.NoError(t, err)
+	require.Empty(t, state.Pending)
+}
+
 func newCacheClock() *virtualCacheClock {
 	c := &virtualCacheClock{}
 	c.ns.Store(time.Now().UnixNano())

@@ -173,15 +173,47 @@ func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.Ca
 		return nil, fusion.E("billing_pending", "original cache refresh quota platform is unavailable", 503)
 	}
 	if admit {
+		if s.userRepo == nil {
+			return nil, fusion.E("refresh_unavailable", "cache refresh user authorization is unavailable", 503)
+		}
+		// APIKey.GetByID projects the user row without allowed_groups. Reload
+		// through UserRepository so revoked exclusive/public grants take effect.
+		user, userErr := s.userRepo.GetByID(ctx, identity.UserID)
+		if userErr != nil || user == nil || user.ID != identity.UserID || !user.IsActive() {
+			return nil, fusion.E("refresh_unavailable", "cache refresh user authorization changed", 409)
+		}
+		keyCopy := *key
+		keyCopy.User = user
+		key = &keyCopy
+		// Account model mapping has a mutable hot-path cache. Keep this fresh
+		// admission local even when a repository snapshot is shared by callers.
+		accountCopy := *account
+		account = &accountCopy
 		p := devinFusionProfile(account, profile.PublicModel)
 		if !a.Supports(snapshot) || !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() || !key.User.IsActive() || !account.IsSchedulable() || p == nil || p.Revision() != snapshot.ProfileRevision || !p.KeepalivePolicy().Enabled || s.devin.runtimeKey(ctx, account) != snapshot.RouteIdentity {
 			return nil, fusion.E("refresh_unavailable", "cache refresh authorization or route changed", 409)
 		}
-		if groupID != identity.GroupID || groupID != 0 && (key.Group == nil || !key.Group.IsActive() || !slices.Contains(account.GroupIDs, groupID)) {
+		if groupID != identity.GroupID || groupID != 0 && (key.Group == nil || !key.Group.IsActive() || key.Group.Platform != PlatformDevin && key.Group.Platform != PlatformComposite || !slices.Contains(account.GroupIDs, groupID)) {
 			return nil, fusion.E("refresh_unavailable", "cache refresh group access changed", 409)
 		}
 		if key.Group.ModelAllowlistEnabled() && (strings.TrimSpace(identity.ClientModel) == "" || !key.Group.ModelAllowlist.Allows(identity.ClientModel)) {
 			return nil, fusion.E("refresh_unavailable", "cache refresh client model is no longer allowed", 409)
+		}
+		if key.Group != nil && !key.Group.IsSubscriptionType() && !user.CanBindGroup(groupID, key.Group.IsExclusive) {
+			return nil, fusion.E("refresh_unavailable", "cache refresh user group grant changed", 409)
+		}
+		if key.Group != nil && key.Group.IsSubscriptionType() && identity.SubscriptionID == 0 {
+			return nil, fusion.E("refresh_unavailable", "cache refresh subscription binding changed", 409)
+		}
+		accountModel := identity.AccountModel
+		if accountModel == "" {
+			if len(account.GetModelMapping()) > 0 {
+				return nil, fusion.E("refresh_unavailable", "original cache refresh account model is unavailable", 409)
+			}
+			accountModel = profile.PublicModel
+		}
+		if !account.supportsDevinModel(accountModel) || account.GetMappedModel(accountModel) != profile.PublicModel {
+			return nil, fusion.E("refresh_unavailable", "cache refresh account model access changed", 409)
 		}
 	}
 	var subscription *UserSubscription

@@ -82,6 +82,7 @@ type CacheIdentity struct {
 	InboundEndpoint string `json:"inbound_endpoint"`
 	QuotaPlatform   string `json:"quota_platform,omitempty"`
 	ClientModel     string `json:"client_model,omitempty"`
+	AccountModel    string `json:"account_model,omitempty"`
 }
 
 type CacheSnapshot struct {
@@ -461,6 +462,15 @@ func (c *CacheKeepaliveController) Tick(ctx context.Context, scope, id string, e
 			_ = engine.settleBudget(cleanup, s, Attempt{ID: attemptID, Purpose: CacheRefresh, Turn: s.Turn, Settled: true})
 		}
 	}()
+	metadata := *snapshot
+	metadata.Request = nil // Recovery needs identity, never another generation.
+	r := &refreshRecord{Snapshot: metadata, Attempt: Attempt{ID: attemptID, Purpose: CacheRefresh, Role: Lead, Turn: s.Turn, Model: state.Snapshot.Model, StartedAt: c.now(), Status: "prepared", EstimateUSD: estimate}, Epoch: epoch, WindowID: window, Owner: owner}
+	// Persist preparation before publishing a pending ID. A failed initial
+	// journal write is known unsent and the deferred cleanup releases its
+	// budget without leaving an unresolvable pending lifecycle entry.
+	if err = c.writeRefresh(ctx, s, r); err != nil {
+		return err
+	}
 	state.Pending = append(state.Pending, attemptID)
 	state.State = "IN_FLIGHT"
 	state.InFlightID = attemptID
@@ -476,12 +486,6 @@ func (c *CacheKeepaliveController) Tick(ctx context.Context, scope, id string, e
 		return nil
 	}
 	claimedBudget = true
-	metadata := *snapshot
-	metadata.Request = nil // Recovery needs identity, never another generation.
-	r := &refreshRecord{Snapshot: metadata, Attempt: Attempt{ID: attemptID, Purpose: CacheRefresh, Role: Lead, Turn: s.Turn, Model: state.Snapshot.Model, StartedAt: c.now(), Status: "prepared", EstimateUSD: estimate}, Epoch: epoch, WindowID: window, Owner: owner}
-	if err = c.writeRefresh(ctx, s, r); err != nil {
-		return err
-	}
 	bounded, cancel := context.WithTimeout(ctx, time.Duration(p.TimeoutSeconds)*time.Second)
 	defer cancel()
 	c.mu.Lock()

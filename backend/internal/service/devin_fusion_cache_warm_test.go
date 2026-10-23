@@ -34,6 +34,90 @@ type warmKeys struct {
 	reads atomic.Int64
 }
 
+type warmUserRepo struct {
+	*openAIRecordUsageUserRepoStub
+	user *User
+	err  error
+}
+
+func (r *warmUserRepo) GetByID(context.Context, int64) (*User, error) {
+	return r.user, r.err
+}
+
+func TestFusionWarmRechecksHydratedUserGroupGrants(t *testing.T) {
+	for _, exclusive := range []bool{true, false} {
+		t.Run(fmt.Sprint(exclusive), func(t *testing.T) {
+			f := newWarmFixture(t)
+			groupID := int64(9)
+			f.keys.key.GroupID = &groupID
+			f.keys.key.Group = &Group{ID: groupID, Platform: PlatformDevin, Status: StatusActive, RateMultiplier: 1, IsExclusive: exclusive}
+			f.account.GroupIDs = []int64{groupID}
+			f.snapshot.Identity.GroupID = groupID
+			current := *f.keys.key.User
+			current.RestrictPublicGroups = !exclusive
+			current.AllowedGroups = []int64{groupID}
+			repo := &warmUserRepo{openAIRecordUsageUserRepoStub: &openAIRecordUsageUserRepoStub{}, user: &current}
+			f.service.userRepo = repo
+			// The API-key projection lacks allowed_groups; the hydrated user is
+			// authoritative for both admission and revocation while idle.
+			estimate, err := f.adapter.Estimate(context.Background(), f.snapshot)
+			require.NoError(t, err)
+			a := fusion.Attempt{ID: "grant-paid-warm", Turn: 1, Purpose: fusion.CacheRefresh, Role: fusion.Lead, Model: f.snapshot.Model, StartedAt: time.Now(), EstimateUSD: estimate}
+			result, err := f.adapter.Refresh(context.Background(), f.snapshot, a)
+			require.NoError(t, err)
+			current.AllowedGroups = nil
+			_, ok := f.adapter.Acquire(context.Background(), f.snapshot)
+			require.False(t, ok)
+			_, err = f.adapter.Estimate(context.Background(), f.snapshot)
+			require.ErrorContains(t, err, "user group grant changed")
+			_, err = f.adapter.Refresh(context.Background(), f.snapshot, a)
+			require.ErrorContains(t, err, "user group grant changed")
+			require.EqualValues(t, 1, f.calls.Load())
+			a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+			repo.err = errors.New("user authorization lookup unavailable")
+			_, err = f.adapter.Estimate(context.Background(), f.snapshot)
+			require.Error(t, err)
+			_, err = f.adapter.Settle(context.Background(), f.snapshot, a)
+			require.NoError(t, err, "settlement does not need a current group grant or user authorization lookup")
+			require.Len(t, f.bills.commands, 1)
+		})
+	}
+}
+
+func TestFusionWarmHonorsAccountModelWhitelistAndMapping(t *testing.T) {
+	for _, mode := range []string{"whitelist removed", "alias retargeted", "legacy missing account model"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newWarmFixture(t)
+			f.snapshot.Identity.AccountModel = "account-fusion-alias"
+			f.account.Credentials["model_mapping"] = map[string]any{"account-fusion-alias": f.session.PublicModel}
+			estimate, err := f.adapter.Estimate(context.Background(), f.snapshot)
+			require.NoError(t, err, "an allowed account alias resolves to the captured profile")
+			a := fusion.Attempt{ID: "mapping-paid-warm", Turn: 1, Purpose: fusion.CacheRefresh, Role: fusion.Lead, Model: f.snapshot.Model, StartedAt: time.Now(), EstimateUSD: estimate}
+			result, err := f.adapter.Refresh(context.Background(), f.snapshot, a)
+			require.NoError(t, err)
+			switch mode {
+			case "whitelist removed":
+				f.account.Credentials["model_mapping"] = map[string]any{"another-model": f.session.Profile.SidekickModel}
+			case "alias retargeted":
+				f.account.Credentials["model_mapping"] = map[string]any{"account-fusion-alias": f.session.Profile.SidekickModel}
+			case "legacy missing account model":
+				f.snapshot.Identity.AccountModel = ""
+			}
+			_, ok := f.adapter.Acquire(context.Background(), f.snapshot)
+			require.False(t, ok)
+			_, err = f.adapter.Estimate(context.Background(), f.snapshot)
+			require.Error(t, err)
+			_, err = f.adapter.Refresh(context.Background(), f.snapshot, a)
+			require.Error(t, err)
+			require.EqualValues(t, 1, f.calls.Load())
+			a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+			_, err = f.adapter.Settle(context.Background(), f.snapshot, a)
+			require.NoError(t, err, "model restrictions cannot erase existing fees")
+			require.Len(t, f.bills.commands, 1)
+		})
+	}
+}
+
 type warmQuotaCache struct {
 	*fusionTestBillingCache
 	quotaMu   sync.Mutex
@@ -227,6 +311,7 @@ func newWarmFixture(t *testing.T) *warmFixture {
 	f.bills = &fusionBillingRepo{}
 	f.logs = &openAIRecordUsageLogRepoStub{inserted: true}
 	s := newOpenAIRecordUsageServiceWithBillingRepoForTest(f.logs, f.bills, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	s.userRepo = &warmUserRepo{openAIRecordUsageUserRepoStub: &openAIRecordUsageUserRepoStub{}, user: f.keys.key.User}
 	cfg := &config.Config{}
 	cfg.Default.RateMultiplier = 1
 	cfg.Gateway.DevinFusionCacheWarmEnabled = true
@@ -279,7 +364,7 @@ func newWarmFixture(t *testing.T) *warmFixture {
 	f.save(t)
 	out := 512
 	req := &apicompat.ResponsesRequest{Model: p.LeadModel, Instructions: "immutable lead policy", Input: json.RawMessage(`"immutable lead input"`), MaxOutputTokens: &out, Tools: []apicompat.ResponsesTool{{Type: "function", Name: fusion.DelegateTool, Parameters: json.RawMessage(`{"type":"object"}`)}}}
-	require.NoError(t, f.controller.Capture(context.Background(), f.session, req, "original-lead", s.devin.runtimeKey(context.Background(), f.account), fusion.CacheIdentity{UserID: 33, APIKeyID: 22, InboundEndpoint: "/v1/responses", QuotaPlatform: PlatformDevin, ClientModel: p.PublicModel}))
+	require.NoError(t, f.controller.Capture(context.Background(), f.session, req, "original-lead", s.devin.runtimeKey(context.Background(), f.account), fusion.CacheIdentity{UserID: 33, APIKeyID: 22, InboundEndpoint: "/v1/responses", QuotaPlatform: PlatformDevin, ClientModel: p.PublicModel, AccountModel: p.PublicModel}))
 	state, _, err := f.controller.Load(context.Background(), f.session.Scope, f.session.ID)
 	require.NoError(t, err)
 	f.snapshot = *state.Snapshot
@@ -306,7 +391,7 @@ func (f *warmFixture) useProfile(t *testing.T, p fusion.Profile, models []*pb.Cl
 	f.session.ProfileRevision = p.Revision()
 	f.session.PublicModel = p.PublicModel
 	f.save(t)
-	require.NoError(t, f.controller.Capture(context.Background(), f.session, &request, "lead-profile-fixture", f.service.devin.runtimeKey(context.Background(), f.account), fusion.CacheIdentity{UserID: 33, APIKeyID: 22, InboundEndpoint: "/v1/responses", QuotaPlatform: PlatformDevin, ClientModel: p.PublicModel}))
+	require.NoError(t, f.controller.Capture(context.Background(), f.session, &request, "lead-profile-fixture", f.service.devin.runtimeKey(context.Background(), f.account), fusion.CacheIdentity{UserID: 33, APIKeyID: 22, InboundEndpoint: "/v1/responses", QuotaPlatform: PlatformDevin, ClientModel: p.PublicModel, AccountModel: p.PublicModel}))
 	state, _, err := f.controller.Load(context.Background(), f.session.Scope, f.session.ID)
 	require.NoError(t, err)
 	f.snapshot = *state.Snapshot
