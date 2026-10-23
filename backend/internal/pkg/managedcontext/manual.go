@@ -225,8 +225,9 @@ func (e *Engine) failCompactJob(ctx context.Context, op *Operation, id string, c
 }
 
 // RecoverInternal returns an already-terminal manual job without model discovery,
-// account slots or new inference. It also repairs a missing operation receipt.
-func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record, ol *Lease) (*Job, error) {
+// account slots or new inference. An unsettled job is returned for discovery
+// when x is nil; a settlement-only executor finishes its accounting on retry.
+func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record, ol *Lease, x Executor) (*Job, error) {
 	id := op.JobID
 	if id == "" {
 		id = "cmp_" + op.ID
@@ -259,6 +260,46 @@ func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record,
 	if j.State != "applied" && j.State != "failed" && j.State != "stale" && j.State != "no_op" {
 		return nil, nil
 	}
+	if !j.Accounted && x == nil {
+		return j, nil
+	}
+	s, _, err := e.LoadSession(ctx, op.Scope, op.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	reserved := func(s *Session) bool {
+		return s.OperationID == "" && (s.ReservationOperationID == op.ID ||
+			s.ReservationOperationID == "" && (s.JobID == j.ID || s.AppliedJobID == j.ID)) && s.ReservedBytes > 0
+	}
+	if !j.Accounted || reserved(s) {
+		ctx, sl, release, err := e.lease(ctx, op.Scope, "session", op.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		s, sr, err := e.LoadSession(ctx, op.Scope, op.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		if !j.Accounted {
+			if err = e.ReconcileKnown(ctx, op, or, ol, x); err != nil {
+				return nil, err
+			}
+			if err = e.collectJob(ctx, s, sr, &sl, j.ID, x); err != nil {
+				return nil, err
+			}
+			j, _, err = e.LoadJob(ctx, op.Scope, j.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if reserved(s) {
+			s.ReservedBytes, s.ReservationOperationID = 0, ""
+			if err = e.save(ctx, sr, s, s.Status, &sl, nil, &s.Policy); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if op.JobID != j.ID || op.State != "completed" {
 		op.JobID, op.State = j.ID, "completed"
 		if err = e.save(ctx, or, op, op.State, ol, nil, nil); err != nil {
@@ -271,7 +312,7 @@ func (e *Engine) RecoverInternal(ctx context.Context, op *Operation, or *Record,
 func (e *Engine) Internal(ctx context.Context, op *Operation, or *Record, ol *Lease, expected int64, x Executor) (*Job, error) {
 	ctx, stop := context.WithTimeout(ctx, time.Duration(op.Policy.WallSeconds)*time.Second)
 	defer stop()
-	if j, err := e.RecoverInternal(ctx, op, or, ol); j != nil || err != nil {
+	if j, err := e.RecoverInternal(ctx, op, or, ol, x); j != nil || err != nil {
 		return j, err
 	}
 	noOpID := "cmp_" + op.ID

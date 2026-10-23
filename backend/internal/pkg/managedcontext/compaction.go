@@ -14,7 +14,11 @@ func (e *Engine) collect(ctx context.Context, s *Session, sr *Record, l *Lease, 
 	if s.JobID == "" {
 		return nil
 	}
-	j, jr, err := load[Job](ctx, e.Store, s.Scope, "job", s.JobID)
+	return e.collectJob(ctx, s, sr, l, s.JobID, x)
+}
+
+func (e *Engine) collectJob(ctx context.Context, s *Session, sr *Record, l *Lease, id string, x Executor) error {
+	j, jr, err := load[Job](ctx, e.Store, s.Scope, "job", id)
 	if err != nil {
 		return err
 	}
@@ -148,6 +152,12 @@ func (e *Engine) apply(ctx context.Context, s *Session, sr *Record, l *Lease, ba
 	s.AppliedJobAfter = budget.InputEstimate
 	s.LastBudget = &budget
 	s.HistoryBytes += int64(ref.Bytes)
+	if j.Trigger == "manual" && s.ReservationOperationID == j.OperationID {
+		// Applying a manual summary and releasing its reservation are one
+		// session commit, so interruption cannot leave quota permanently held.
+		s.ReservedBytes = 0
+		s.ReservationOperationID = ""
+	}
 	if err = e.ensureLive(ctx, s); err != nil {
 		return false, err
 	}

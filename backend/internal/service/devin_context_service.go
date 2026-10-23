@@ -374,9 +374,20 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 			}
 		}
 		if mode == "internal" {
-			job, err := engine.RecoverInternal(ctx, op, r, l)
+			job, err := engine.RecoverInternal(ctx, op, r, l, nil)
 			if job != nil || err != nil {
 				out.Job, out.SessionID, out.Replayed = job, op.SessionID, true
+				if err == nil && !job.Accounted && len(op.Attempts) > 0 {
+					// Terminal job replay may still owe known usage. Settlement
+					// uses original ownership and needs neither a model client nor
+					// inference slots, including after the account was disabled.
+					recovery, recoveryErr := s.contextPhysical(ctx, key, keys, job.Owner, model, op.SessionID, policy, c, false)
+					if recoveryErr != nil {
+						return recoveryErr
+					}
+					defer recovery.physical.Close()
+					out.Job, err = engine.RecoverInternal(ctx, op, r, l, recovery)
+				}
 				return err
 			}
 		}
@@ -399,6 +410,16 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 			defer recovery.physical.Close()
 			if err = engine.ReconcileKnown(ctx, op, r, l, recovery); err != nil {
 				return err
+			}
+			if mode == "responses" {
+				result, recoveryErr := engine.RecoverInference(ctx, op, r, l, parsed, recovery)
+				if result != nil || recoveryErr != nil {
+					if result != nil {
+						out.Response, out.SessionID = result.Response, result.SessionID
+						out.Revision, out.Replayed = result.Revision, true
+					}
+					return recoveryErr
+				}
 			}
 		}
 		// A new operation must pass channel admission before ingesting input.

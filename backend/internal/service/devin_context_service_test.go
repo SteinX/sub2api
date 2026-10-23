@@ -244,12 +244,12 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 	contextMaintenancePass(context.Background(), s, s.devin, keys)
 	require.Equal(t, 1, calls)
 	require.Len(t, billing.commands, 1, "recovery settles known usage after rollout/account disable")
-	a.Extra[DevinContextEnabledExtra] = true
-	a.Schedulable = true
+	s.concurrencyService = nil
 	restrictedChannel := Channel{ID: 1, Status: StatusActive, GroupIDs: []int64{9}, RestrictModels: true, ModelPricing: []ChannelModelPricing{{Platform: PlatformDevin, Models: []string{"other-model"}}}}
 	s.channelService = newTestChannelService(makeStandardRepo(restrictedChannel, map[int64]string{9: PlatformDevin}))
 	first, err := request("first", "", body)
-	require.NoError(t, err)
+	require.NoError(t, err, "known results publish while the account is paused and inference slots are unavailable")
+	require.True(t, first.Replayed)
 	require.Equal(t, 1, calls)
 	require.Len(t, billing.commands, 1)
 	require.True(t, strings.HasPrefix(billing.commands[0].RequestID, "context:"))
@@ -273,7 +273,8 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 	require.Error(t, err, "a channel edit still blocks new paid work")
 	require.Equal(t, 1, calls)
 	s.channelService = nil
-	a.Extra[DevinContextEnabledExtra] = false
+	a.Schedulable = true
+	s.concurrencyService = NewConcurrencyService(&stubConcurrencyCacheForTest{acquireResult: true})
 	_, err = request("blocked-second", first.SessionID, nextBody)
 	require.Error(t, err, "disabling the account blocks an existing session")
 	require.Equal(t, 1, calls, "disabled accounts must not dispatch or charge")

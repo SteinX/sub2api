@@ -17,6 +17,30 @@ type Result struct {
 	Replayed  bool
 }
 
+// RecoverInference publishes an observed successful inference using only its
+// durable result. Advance skips preparation and dispatch when this evidence is
+// present, so account/model discovery and inference slots are unnecessary.
+func (e *Engine) RecoverInference(ctx context.Context, op *Operation, r *Record, l *Lease, parsed Parsed, x Executor) (*Result, error) {
+	for i := len(op.Attempts) - 1; i >= 0; i-- {
+		a, _, err := load[Attempt](ctx, e.Store, op.Scope, "attempt", op.Attempts[i])
+		if err != nil {
+			return nil, err
+		}
+		if a.Purpose != "inference" {
+			continue
+		}
+		if a.State != "terminal" || !a.Settled || a.Error != nil || a.ResponseRef == "" {
+			return nil, nil
+		}
+		result, err := e.Advance(ctx, op, r, l, parsed, x)
+		if result != nil {
+			result.Replayed = true
+		}
+		return result, err
+	}
+	return nil, nil
+}
+
 func (e *Engine) Advance(ctx context.Context, op *Operation, or *Record, ol *Lease, parsed Parsed, x Executor) (*Result, error) {
 	bounded, stop := context.WithTimeout(ctx, time.Duration(op.Policy.WallSeconds)*time.Second)
 	defer stop()

@@ -595,6 +595,66 @@ func TestManualSummaryReservationHasItsOwnOperationIdentity(t *testing.T) {
 	require.True(t, observed)
 	require.NoError(t, e.Close(context.Background()))
 }
+
+func TestInternalTerminalRecoveryReleasesOnlyItsReservation(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprint("legacy-", legacy), func(t *testing.T) {
+			store := newMem()
+			e := New(store)
+			defer func() { require.NoError(t, e.Close(context.Background())) }()
+			s, op := seedSummary(t, e)
+			x := &fakeExecutor{safe: 20000}
+			_, sr, err := e.LoadSession(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			revision := sr.Revision
+			failed := false
+			store.fail = func(r *Record) bool {
+				if !failed && r.Kind == "operation" && r.ID == op.ID && r.Status == "completed" {
+					failed = true
+					return true
+				}
+				return false
+			}
+			compact := func() error {
+				return e.WithOperation(context.Background(), op, func(ctx context.Context, op *Operation, r *Record, l *Lease) error {
+					job, err := e.Internal(ctx, op, r, l, revision, x)
+					if err == nil {
+						require.Equal(t, "applied", job.State)
+					}
+					return err
+				})
+			}
+			require.Error(t, compact(), "interrupt after the applied job but before the receipt")
+			s, sr, err = e.LoadSession(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.NotEmpty(t, s.AppliedJobID)
+			require.Zero(t, s.ReservedBytes, "application releases the reservation atomically")
+			require.Empty(t, s.ReservationOperationID)
+			// Reproduce an older journal that committed application separately
+			// from releasing its manual reservation.
+			s.ReservedBytes, s.ReservationOperationID = 123456, op.ID
+			if legacy {
+				s.ReservationOperationID = ""
+			}
+			require.NoError(t, e.save(context.Background(), sr, s, s.Status, nil, nil, &s.Policy))
+			require.NoError(t, compact())
+			s, sr, err = e.LoadSession(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.Zero(t, s.ReservedBytes)
+			require.Empty(t, s.ReservationOperationID)
+			s.OperationID, s.ReservationOperationID, s.ReservedBytes = "later-turn", "later-turn", 654321
+			require.NoError(t, e.save(context.Background(), sr, s, s.Status, nil, nil, &s.Policy))
+			require.NoError(t, compact(), "replay must not release another turn's reservation")
+			s, _, err = e.LoadSession(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.Equal(t, int64(654321), s.ReservedBytes)
+			require.Equal(t, "later-turn", s.ReservationOperationID)
+			require.Equal(t, 1, x.callCount())
+			require.Equal(t, 1, x.charges)
+		})
+	}
+}
+
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 func TestStatelessNoopAndKnownResultReplay(t *testing.T) {
 	e := New(newMem())
