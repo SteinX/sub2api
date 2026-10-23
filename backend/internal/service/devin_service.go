@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
+	mc "github.com/Wei-Shaw/sub2api/internal/pkg/managedcontext"
 	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sync/singleflight"
 )
@@ -31,17 +32,19 @@ type devinRuntime struct {
 
 // DevinService owns credential-scoped runtime caches; account scheduling stays in the gateway.
 type DevinService struct {
-	repo         AccountRepository
-	proxyRepo    ProxyRepository
-	upstream     HTTPUpstream
-	cfg          *config.Config
-	store        devin.SessionStore
-	mu           sync.Mutex
-	runtime      map[string]devinRuntime
-	flights      singleflight.Group
-	fusionRunner *fusion.MaintenanceRunner
-	fusionCache  *fusion.CacheKeepaliveController
-	fusionWarm   *devinCacheWarmRouter
+	contextStore  mc.Store
+	contextEngine *mc.Engine
+	repo          AccountRepository
+	proxyRepo     ProxyRepository
+	upstream      HTTPUpstream
+	cfg           *config.Config
+	store         devin.SessionStore
+	mu            sync.Mutex
+	runtime       map[string]devinRuntime
+	flights       singleflight.Group
+	fusionRunner  *fusion.MaintenanceRunner
+	fusionCache   *fusion.CacheKeepaliveController
+	fusionWarm    *devinCacheWarmRouter
 }
 
 func NewDevinService(repo AccountRepository, proxyRepo ProxyRepository, upstream HTTPUpstream, cfg *config.Config, store devin.SessionStore) *DevinService {

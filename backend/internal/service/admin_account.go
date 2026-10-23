@@ -495,7 +495,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		return nil, err
 	}
 
-	if err := ValidateDevinFusionExtra(input.Platform, accountExtra); err != nil {
+	if err := ValidateDevinAccountExtra(input.Platform, accountExtra); err != nil {
 		return nil, err
 	}
 	// 绑定分组
@@ -665,7 +665,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
 	}
 	if input.Extra != nil {
-		if err := ValidateDevinFusionExtra(account.Platform, normalizedExtra); err != nil {
+		if err := ValidateDevinAccountExtra(account.Platform, normalizedExtra); err != nil {
 			return nil, err
 		}
 	}
@@ -955,7 +955,7 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	}
 	_, profilesChanged := updates["devin_fusion_profiles"]
 	_, fusionEnabledChanged := updates["devin_fusion_enabled"]
-	if profilesChanged || fusionEnabledChanged {
+	if profilesChanged || fusionEnabledChanged || hasDevinContextExtra(updates) {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
 			return err
@@ -967,7 +967,7 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 		for key, value := range updates {
 			merged[key] = value
 		}
-		if err := ValidateDevinFusionExtra(account.Platform, merged); err != nil {
+		if err := ValidateDevinAccountExtra(account.Platform, merged); err != nil {
 			return err
 		}
 	}
@@ -1024,12 +1024,12 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	_, fusionProfilesChanged := input.Extra["devin_fusion_profiles"]
 	_, fusionEnabledChanged := input.Extra["devin_fusion_enabled"]
-	fusionProfilesChanged = fusionProfilesChanged || fusionEnabledChanged
+	devinSettingsChanged := fusionProfilesChanged || fusionEnabledChanged || hasDevinContextExtra(input.Extra)
 	needMixedChannelCheck := input.GroupIDs != nil && !input.SkipMixedChannelCheck
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if fusionProfilesChanged || len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
+	if devinSettingsChanged || len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1042,7 +1042,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			targetsByID[account.ID] = account
 		}
 	}
-	if fusionProfilesChanged {
+	if devinSettingsChanged {
 		for _, account := range cachedTargets {
 			if account == nil {
 				continue
@@ -1054,7 +1054,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 			for key, value := range input.Extra {
 				merged[key] = value
 			}
-			if err := ValidateDevinFusionExtra(account.Platform, merged); err != nil {
+			if err := ValidateDevinAccountExtra(account.Platform, merged); err != nil {
 				return nil, err
 			}
 		}

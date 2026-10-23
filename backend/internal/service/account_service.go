@@ -254,7 +254,7 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		account.AutoPauseOnExpired = true
 	}
 
-	if err := ValidateDevinFusionExtra(account.Platform, account.Extra); err != nil {
+	if err := ValidateDevinAccountExtra(account.Platform, account.Extra); err != nil {
 		return nil, err
 	}
 	if err := s.accountRepo.Create(ctx, account); err != nil {
@@ -381,7 +381,7 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 		}
 	}
 
-	if err := ValidateDevinFusionExtra(account.Platform, account.Extra); err != nil {
+	if err := ValidateDevinAccountExtra(account.Platform, account.Extra); err != nil {
 		return nil, err
 	}
 	// 执行更新

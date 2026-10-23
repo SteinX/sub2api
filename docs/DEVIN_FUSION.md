@@ -129,6 +129,8 @@ Redis 推进锁有有限租期，持久会话使用整份状态 CAS/revision；�
 
 ## 双角色上下文压缩
 
+预算阈值、前缀选择、受保护项、摘要构造/校验和来源快照检查已提取到 `internal/pkg/contextcompact`，供平台其他上下文管理模式复用。Fusion 适配层继续管理原有角色策略、任务账本、CAS、归档、取消、计费和 Lead 缓存失效；持久格式与 `fusion-summary-v1` 策略保持兼容。
+
 网关压缩默认开启，可在每个配对的「角色上下文压缩」中关闭或配置独立阈值。省略 `compaction` 也使用上述默认值。Lead 与 Sidekick 分别使用本角色的具体模型做摘要；摘要没有执行工具权限，不是客户端 `/compact`，也不会重置客户端公共历史。
 
 摘要复用正常 Devin 请求构造、鉴权、准备与计费流程，使用独立摘要会话，工具列表为空且 `tool_choice=none`；返回工具调用会使摘要失败。新版补充第 24.4 节报告官方 `file_compactor.compact` 也走共用推理构造器，支持这一实现方向，无需引入假定的专用 compact RPC。该内部 query label 不直接作为未经核验的上游字段发送。
@@ -236,3 +238,5 @@ go test -tags=unit ./internal/service ./internal/handler ./internal/server/middl
 另有一项受控的真实上游批返回用例：仅在测试中显式允许并要求 Sidekick 同批返回 `write_file` 和 `run_tests`，网关逐个发布，两次客户端工具执行之间没有新增物理推理，随后 Sidekick 报告、Lead 独立复测和最终断言均通过。该兼容用例不计入上述 12 题成绩，也没有改变生产请求禁用并行工具的策略。
 
 数据源固定为 [HumanEval](https://github.com/openai/human-eval/tree/463c980b59e818ace59f6f9803cd92c749ceae61) 和 [MBPP sanitized](https://github.com/google-research/google-research/blob/f82046ba5aabbbb427dbfd38a254d26bff08b533/mbpp/sanitized-mbpp.json)。题目 ID、数据哈希、角色工具轨迹、初轮失败及复测、缓存干预用量和被废弃的实验对照均保留在本次验证报告中；没有将账号凭据或原始认证报文提交到仓库。
+
+普通模型的显式托管会话和平台手动 compact 见 [Devin 平台托管上下文](DEVIN_CONTEXT.md)。Fusion 的旧会话继续使用原格式；新普通会话使用独立的 PostgreSQL engine。托管上下文的自动测试不代替其真实模型质量验收。

@@ -26,7 +26,7 @@ func (x *devinFusionExecutor) reserve(ctx context.Context, amount float64, attem
 	}
 	r := &InflightReservation{userID: x.key.UserID, requestID: uuid.NewString(), amount: amount, ttl: time.Duration(x.profile.MaxWallSeconds+120) * time.Second, scopeCache: sc}
 	if len(attemptIDs) > 0 {
-		r.requestID = "fusion:" + attemptIDs[0]
+		r.requestID = x.attemptKey(attemptIDs[0])
 	}
 	r.refs.Store(1)
 	fail := func(err error) (*InflightReservation, error) { r.Release(); return nil, err }
@@ -103,9 +103,17 @@ func (x *devinFusionExecutor) releaseSettledReservation(a fusion.Attempt) {
 	if !ok {
 		return
 	}
-	r := &InflightReservation{cache: rc, scopeCache: sc, userID: x.key.UserID, requestID: "fusion:" + a.ID, scopes: []string{inflightAPIKeyScope(x.key.ID)}}
+	r := &InflightReservation{cache: rc, scopeCache: sc, userID: x.key.UserID, requestID: x.attemptKey(a.ID), scopes: []string{inflightAPIKeyScope(x.key.ID)}}
 	if x.subscription != nil {
 		r.scopes = append(r.scopes, inflightSubscriptionScope(x.subscription.ID))
 	}
 	r.Release()
+}
+
+func (x *devinFusionExecutor) attemptKey(id string) string {
+	prefix := x.attemptPrefix
+	if prefix == "" {
+		prefix = "fusion"
+	}
+	return prefix + ":" + id
 }

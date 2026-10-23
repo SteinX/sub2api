@@ -1,6 +1,18 @@
 export default {
     accounts: {
       devin: {
+        contextTitle: 'Managed context compaction (Compactor)',
+        contextInherit: 'Use global configuration (off by default)',
+        contextOn: 'Enable for this account',
+        contextOff: 'Disable for this account',
+        contextAuto: 'Automatically compact conversation history',
+        contextManual: 'Allow manual compact',
+        contextModeHint: {
+          inherit: 'Use platform switches and rollout allowlists.',
+          enabled: 'Enable this account independently. Platform shutdown settings and configured rollout restrictions still apply. Automatic and manual compaction default to on.',
+          disabled: 'Saving blocks subsequent managed inference and compaction for this account. Existing history and incurred charges are retained.'
+        },
+        contextUsageHint: 'For ordinary Devin models using Responses managed mode or context/compact; clients must explicitly opt in. Summaries are billed by actual usage. Configure Fusion compaction separately under collaboration settings.',
         fusionAutoEnabled: 'Enable Fusion (on by default, infer pairs from model IDs)',
         fusionOverride: 'Override settings',
         fusionDisablePair: 'Disable this pair',

@@ -565,3 +565,47 @@ func TestFusionLateCancelledSummaryOnlySettlesUsage(t *testing.T) {
 	require.Equal(t, before, Digest(s.Sidekick))
 	require.InDelta(t, .1, x.charged, .00001)
 }
+
+func TestFusionCompactionV1RequestAndJournalCompatibility(t *testing.T) {
+	// Frozen canonical identities of the pre-extraction v1 profile/scope.
+	require.Equal(t, "e626a13d6699ca400344bfac68fc767e0207081099d2d5d91ed8fe2ba41c7a6d", testProfile().Revision())
+	require.Equal(t, "49a64717d5d4cb19952e6eac2946415cf6879adacf9908e7d872332d32c6e684", Scope(1, 2))
+	e, s, raw, base := summarySession(t, Sidekick)
+	cap := 128
+	base.MaxOutputTokens = &cap
+	request := summaryRequest(s, Sidekick, base, 2)
+	require.Equal(t, "worker-real", request.Model)
+	require.Equal(t, 128, *request.MaxOutputTokens)
+	require.Equal(t, "fusion-summary-v1", summaryPolicy)
+	// The v1 adapter keeps the historical job/summary JSON readable after the
+	// summary struct and deterministic logic move to the shared package.
+	cut := safeSummaryPrefix(s, Sidekick, s.Profile.MaxContextBytes/2)
+	legacy := []byte(fmt.Sprintf(`{
+		"job":{"id":"legacy-job","role":"sidekick","turn":1,"epoch":0,
+			"profile_revision":%q,"prefix_count":%d,"prefix_digest":%q,
+			"state":"ready","policy":"fusion-summary-v1"},
+		"attempt":{"id":"legacy-job","purpose":"compaction","role":"sidekick",
+			"turn":1,"model":"worker-real","status":"completed","settled":true},
+		"summary":{"goal":"Keep public API","current_state":"Old work complete",
+			"decisions":[],"changes":[],"evidence":["Actual result"],"checks":[],
+			"open_questions":[],"next_steps":[],"files":[]}
+	}`, s.ProfileRevision, cut, Digest(s.Sidekick[:cut])))
+	require.NoError(t, e.Store.Set(context.Background(), compactKey(s, "legacy-job"), legacy, time.Hour))
+	var journal compactionRecord
+	require.NoError(t, json.Unmarshal(legacy, &journal))
+	journal.Job.Accounted = true
+	s.roleContext(Sidekick).Job = &journal.Job
+	require.NoError(t, e.save(context.Background(), s, &raw))
+	x := &summaryExecutor{}
+	ok, err := e.applyCompaction(context.Background(), s, &raw, Sidekick, base, x)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Empty(t, x.calls)
+	require.Zero(t, x.charged)
+	require.Contains(t, string(mustJSON(s.Sidekick)), "summary_fusion_legacy-job")
+	_, err = parseSummary(nil)
+	var typed *Error
+	require.ErrorAs(t, err, &typed)
+	require.Equal(t, "devin_fusion_compaction_failed", typed.Code)
+	require.Equal(t, 502, typed.Status)
+}

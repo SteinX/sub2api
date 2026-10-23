@@ -208,6 +208,13 @@ func RegisterGatewayRoutes(
 		// Single-model discovery never selects the Codex client_version manifest.
 		gateway.GET("/models/:model", h.Gateway.Models)
 		gateway.GET("/usage", h.Gateway.Usage)
+		gateway.POST("/context/compact", textBodyLimit, h.OpenAIGateway.ContextCompact)
+		gateway.GET("/context/sessions/:id", h.OpenAIGateway.ContextSession)
+		gateway.POST("/context/sessions/:id/cancel", h.OpenAIGateway.ContextSession)
+		gateway.GET("/context/sessions/:id/history", h.OpenAIGateway.ContextSession)
+		gateway.GET("/context/sessions/:id/history/:message_id", h.OpenAIGateway.ContextSession)
+		gateway.GET("/context/compactions/:job_id", h.OpenAIGateway.ContextJob)
+
 		gateway.POST("/live", h.OpenAIGateway.Live)
 		gateway.GET("/live/:call_id", h.OpenAIGateway.LiveSideband)
 		// OpenAI Responses API: auto-route based on group platform

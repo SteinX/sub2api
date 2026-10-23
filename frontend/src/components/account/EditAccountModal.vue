@@ -30,6 +30,7 @@
         <p class="text-sm text-gray-600 dark:text-gray-300">{{ t(account.type === 'apikey' ? 'admin.accounts.devin.autoRecover' : 'admin.accounts.devin.reloginRequired') }}</p>
         <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.devin.credentialsEditHint') }}</p>
         <DevinModelRoutes :routes="devinModelRoutes" :model-mappings="modelMappings" />
+        <DevinContextSettings v-model="devinContextSettings" />
         <DevinFusionProfiles v-model="devinFusionProfiles" v-model:enabled="devinFusionEnabled" :models="devinConcreteModels" :inferred-profiles="devinInferredProfiles" />
         <div v-if="account.type === 'oauth'">
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
@@ -3275,6 +3276,8 @@ import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
 import DevinModelRoutes from '@/components/account/DevinModelRoutes.vue'
 import DevinFusionProfiles from '@/components/account/DevinFusionProfiles.vue'
+import DevinContextSettings from '@/components/account/DevinContextSettings.vue'
+import { devinContextExtra, readDevinContextSettings } from '@/utils/devinContext'
 import { readDevinFusionProfiles, inferredDevinFusionProfile, type DevinFusionProfile } from '@/utils/devinFusion'
 import { readDevinModelRoutes, isDevinFusionCandidate } from '@/utils/devinModelRoutes'
 import QuotaLimitCard from '@/components/account/QuotaLimitCard.vue'
@@ -4199,6 +4202,7 @@ const defaultBaseUrl = computed(() => {
 const devinModelRoutes = computed(() => readDevinModelRoutes(props.account?.extra?.devin_model_catalog))
 const devinFusionProfiles = ref<DevinFusionProfile[]>([])
 const devinFusionEnabled = ref(true)
+const devinContextSettings = ref(readDevinContextSettings())
 const devinInferredProfiles = computed(() => devinModelRoutes.value
   .filter(route => route.route_mode === 'gateway_fusion' && route.pair_source === 'model_id' && route.lead_model_uid && route.sidekick_model_uid && !devinFusionProfiles.value.some(profile => profile.public_model === route.model_uid))
   .map(route => inferredDevinFusionProfile(route.model_uid, route.lead_model_uid!, route.sidekick_model_uid!)))
@@ -4361,6 +4365,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	const extra = newAccount.extra as Record<string, unknown> | undefined
   devinFusionProfiles.value = readDevinFusionProfiles(extra?.devin_fusion_profiles)
   devinFusionEnabled.value = extra?.devin_fusion_enabled !== false
+  devinContextSettings.value = readDevinContextSettings(extra)
 	mixedScheduling.value = extra?.mixed_scheduling === true
 	allowOverages.value = extra?.allow_overages === true
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
@@ -5723,7 +5728,13 @@ const handleSubmit = async () => {
     }
 
     if (props.account.platform === 'devin') {
-      updatePayload.extra = { ...props.account.extra, ...(updatePayload.extra as Record<string, unknown> | undefined), devin_fusion_profiles: devinFusionProfiles.value, devin_fusion_enabled: devinFusionEnabled.value }
+      updatePayload.extra = {
+        ...props.account.extra,
+        ...(updatePayload.extra as Record<string, unknown> | undefined),
+        ...devinContextExtra(devinContextSettings.value),
+        devin_fusion_profiles: devinFusionProfiles.value,
+        devin_fusion_enabled: devinFusionEnabled.value
+      }
       const credentials: Record<string, unknown> = {
         ...props.account.credentials,
         base_url: editBaseUrl.value.trim() || defaultBaseUrl.value
