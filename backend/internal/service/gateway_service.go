@@ -1449,7 +1449,26 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		}
 
 		mapping := acc.GetModelMapping()
+		if acc.Platform == PlatformDevin && len(mapping) == 0 {
+			ids := append([]string(nil), acc.devinModelIDs()...)
+			profiles, _ := devinFusionProfiles(&acc)
+			for _, profile := range profiles {
+				if profile.Enabled {
+					ids = append(ids, profile.PublicModel)
+				}
+			}
+			for _, id := range ids {
+				if !acc.supportsDevinModel(id) {
+					continue
+				}
+				modelSet[id] = struct{}{}
+				hasAnyMapping = true
+			}
+		}
 		for model := range mapping {
+			if acc.Platform == PlatformDevin && !acc.supportsDevinModel(model) {
+				continue
+			}
 			// Accounts pulled in through mixed scheduling only contribute the
 			// models that belong to the listing platform (e.g. an antigravity
 			// account's claude-* mappings must not surface on a gemini group).

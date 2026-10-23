@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -1776,6 +1778,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
+	if pinned := devinFusionBoundAccount(ctx); pinned > 0 && account.ID != pinned {
+		return false, "fusion_account_bound"
+	}
 	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {
 		if publicModel, modelOK := RequestedPublicModelFromContext(ctx); modelOK && !explicitModelMappingClaims(*account, publicModel) {
 			return false, "account_model_not_owned"
@@ -2515,6 +2520,15 @@ func (s *OpenAIGatewayService) isOpenAIAccountTransportCompatible(account *Accou
 func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Account, model string, success bool, firstTokenMs *int, observedErr ...error) bool {
 	if account == nil {
 		return false
+	}
+	if account.Platform == PlatformDevin && !success {
+		for _, err := range observedErr {
+			var routeErr *devin.RouteError
+			var fusionErr *fusion.Error
+			if errors.As(err, &routeErr) || errors.As(err, &fusionErr) {
+				return false
+			}
+		}
 	}
 	accountID := account.ID
 	healthTripped := false

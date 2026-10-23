@@ -86,6 +86,28 @@ class ReleaseMatrixTest(unittest.TestCase):
                 else:
                     self.assertEqual(data['checksum']['extra_files'], data['release']['extra_files'])
 
+    def test_fork_binary_updates_from_its_build_repository(self):
+        with patch.dict(os.environ, {'GITHUB_REPOSITORY': 'SteinX/sub2api'}):
+            release.generate_config(argparse.Namespace(mode='build', simple=False, goos='linux', goarch='amd64', output='fork.yaml'))
+        data = yaml.safe_load(Path('fork.yaml').read_text())
+        self.assertIn('-X github.com/Wei-Shaw/sub2api/internal/service.githubRepo=SteinX/sub2api', data['builds'][0]['ldflags'])
+
+    def test_stx_release_is_discoverable_as_latest_in_both_modes(self):
+        for simple in (False, True):
+            with self.subTest(simple=simple), patch.dict(os.environ, {
+                'GITHUB_REPOSITORY': 'SteinX/sub2api', 'RELEASE_TAG': 'v0.2.17-stx.1',
+            }):
+                release.generate_config(argparse.Namespace(mode='publish', simple=simple, output='fork.yaml'))
+                self.assertIs(yaml.safe_load(Path('fork.yaml').read_text())['release']['prerelease'], False)
+
+    def test_other_prereleases_keep_their_channel(self):
+        for repository, tag in [('Wei-Shaw/sub2api', 'v0.2.17-stx.1'), ('SteinX/sub2api', 'v0.2.18-rc.1')]:
+            with self.subTest(repository=repository, tag=tag), patch.dict(os.environ, {
+                'GITHUB_REPOSITORY': repository, 'RELEASE_TAG': tag,
+            }):
+                release.generate_config(argparse.Namespace(mode='publish', simple=False, output='preview.yaml'))
+                self.assertEqual(yaml.safe_load(Path('preview.yaml').read_text())['release']['prerelease'], 'auto')
+
     def test_collect_and_verify_hash_and_source_binding(self):
         args = self.fixture_artifacts()
         release.verify(args)

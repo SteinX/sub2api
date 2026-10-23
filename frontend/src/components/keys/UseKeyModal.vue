@@ -133,6 +133,28 @@
           </nav>
         </div>
 
+        <div v-if="platform === 'devin'" class="space-y-2">
+          <label class="input-label" for="devin-client-model">{{ t('keys.useKeyModal.devin.model') }}</label>
+          <select
+            id="devin-client-model"
+            v-model="devinSelectedModel"
+            data-testid="devin-client-model"
+            class="input"
+            :disabled="codexModelManifestState !== 'ready' || !codexCatalogModelSlugs.length"
+          >
+            <option value="" disabled>{{ t('keys.useKeyModal.devin.selectModel') }}</option>
+            <option v-for="model in codexCatalogModelSlugs" :key="model" :value="model">{{ model }}</option>
+          </select>
+          <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.useKeyModal.devin.description') }}</p>
+          <button
+            v-if="devinSelectedModel && (activeClientTab === 'codex' || activeClientTab === 'claude')"
+            type="button"
+            class="btn btn-secondary btn-sm"
+            data-testid="devin-ccswitch-import"
+            @click="emit('ccswitchImport', { clientType: activeClientTab === 'codex' ? 'codex' : 'claude', model: devinSelectedModel })"
+          >{{ t('keys.useKeyModal.devin.import') }}</button>
+        </div>
+
         <!-- Code Blocks (Stacked for multi-file platforms) -->
         <div class="space-y-4">
           <div
@@ -293,6 +315,7 @@ interface Props {
 
 interface Emits {
   (e: 'close'): void
+  (e: 'ccswitchImport', config: { clientType: 'codex' | 'claude'; model: string }): void
 }
 
 interface TabConfig {
@@ -321,6 +344,7 @@ type CodexAuthMode = 'legacy' | 'api-key'
 const codexAuthMode = ref<CodexAuthMode>('legacy')
 type CodexModelManifestState = 'idle' | 'loading' | 'ready' | 'error'
 const codexModelManifestState = ref<CodexModelManifestState>('idle')
+const devinSelectedModel = ref('')
 const codexModelManifestContent = ref('')
 const codexModelManifestModelCount = ref(0)
 const codexModelCatalogMode = ref<'remote' | 'file'>('remote')
@@ -335,7 +359,7 @@ let codexModelManifestRequestID = 0
 
 const showCodexModelCatalog = computed(() =>
   props.show &&
-  (activeClientTab.value === 'codex' ||
+  (props.platform === 'devin' || activeClientTab.value === 'codex' ||
     (props.platform === 'openai' && activeClientTab.value === 'codex-ws'))
 )
 
@@ -359,6 +383,7 @@ const defaultClientTab = computed(() => {
   if (props.claudeCodeOnly) return 'claude'
   switch (props.platform) {
     case 'openai':
+    case 'devin':
       return 'codex'
     case 'grok':
       return 'grok'
@@ -662,6 +687,7 @@ function resetCodexModelManifest() {
   codexModelManifestContent.value = ''
   codexModelManifestModelCount.value = 0
   codexModelManifestResponseBytes.value = 0
+  devinSelectedModel.value = ''
 }
 
 async function loadCodexModelManifest() {
@@ -681,6 +707,10 @@ async function loadCodexModelManifest() {
     codexModelManifestResponseBytes.value = result.responseBytes
     if (codexModelCatalogOversized.value) codexModelCatalogMode.value = 'file'
     codexModelManifestState.value = 'ready'
+    if (props.platform === 'devin') {
+      const slugs = parseCodexCatalogModels(result.content).map(model => model.slug)
+      if (!slugs.includes(devinSelectedModel.value)) devinSelectedModel.value = slugs[0] || ''
+    }
   } catch (error) {
     const errorName = error && typeof error === 'object' && 'name' in error
       ? String((error as { name?: unknown }).name || '')
@@ -710,6 +740,10 @@ function selectCodexCatalogModel(preferredModel: string): string {
   if (codexCatalogModelSlugs.value.includes(preferredModel)) return preferredModel
   return codexCatalogModelSlugs.value[0] || preferredModel
 }
+
+watch(() => props.show && props.platform === 'devin' ? `${props.baseUrl}|${props.apiKey}` : '', context => {
+  if (context) void loadCodexModelManifest()
+}, { immediate: true })
 
 function codexReasoningEffortTomlLine(modelSlug: string): string {
   return formatCodexReasoningEffortTomlLine(
@@ -744,6 +778,7 @@ const currentFiles = computed((): FileConfig[] => {
     return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`
   }
   const apiBase = ensureV1(baseRoot)
+  if (props.platform === 'devin' && (!devinSelectedModel.value || codexModelManifestState.value !== 'ready')) return []
   const antigravityBase = ensureV1(`${baseRoot}/antigravity`)
   const antigravityGeminiBase = (() => {
     const trimmed = `${baseRoot}/antigravity`.replace(/\/+$/, '')
@@ -769,6 +804,20 @@ const currentFiles = computed((): FileConfig[] => {
         ]
       case 'grok':
         return [generateOpenCodeConfig('grok', apiBase, apiKey)]
+      case 'devin':
+        return [{
+          path: 'opencode.json',
+          content: JSON.stringify({
+            $schema: 'https://opencode.ai/config.json',
+            model: `devin/${devinSelectedModel.value}`,
+            provider: { devin: {
+              npm: '@ai-sdk/openai-compatible',
+              name: 'Devin via Sub2API',
+              options: { baseURL: apiBase, apiKey },
+              models: Object.fromEntries(codexCatalogModelSlugs.value.map(id => [id, { name: id }]))
+            } }
+          }, null, 2)
+        }]
       default:
         return [generateOpenCodeConfig('openai', apiBase, apiKey)]
     }
@@ -802,12 +851,16 @@ const currentFiles = computed((): FileConfig[] => {
       return generateAnthropicFiles(`${baseUrl}/antigravity`, apiKey)
     case 'grok':
       if (activeClientTab.value === 'claude') {
-        return generateGrokClaudeFiles(baseRoot, apiKey)
+        return generateModelClaudeFiles(baseRoot, apiKey, 'grok-4.5')
       }
       if (activeClientTab.value === 'codex') {
         return generateGrokCodexFiles(apiBase, apiKey)
       }
       return generateGrokFiles(apiBase, apiKey)
+    case 'devin':
+      return activeClientTab.value === 'codex'
+        ? generateRoutedCodexFiles(apiBase, apiKey, 'devin')
+        : generateModelClaudeFiles(baseRoot, apiKey, devinSelectedModel.value)
     case 'deepseek':
       if (activeClientTab.value === 'codex') {
         return generateRoutedCodexFiles(apiBase, apiKey, 'deepseek')
@@ -922,16 +975,16 @@ $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
   ]
 }
 
-function generateGrokClaudeFiles(baseUrl: string, apiKey: string): FileConfig[] {
+function generateModelClaudeFiles(baseUrl: string, apiKey: string, model: string): FileConfig[] {
   const environment = {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: apiKey,
-    ANTHROPIC_MODEL: 'grok-4.5',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'grok-4.5',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: 'grok-4.5',
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'grok-4.5',
-    ANTHROPIC_DEFAULT_FABLE_MODEL: 'grok-4.5',
-    CLAUDE_CODE_SUBAGENT_MODEL: 'grok-4.5',
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    ANTHROPIC_DEFAULT_FABLE_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
   }
   let path: string
@@ -941,7 +994,7 @@ function generateGrokClaudeFiles(baseUrl: string, apiKey: string): FileConfig[] 
     case 'unix':
       path = 'Terminal'
       content = Object.entries(environment)
-        .map(([name, value]) => `export ${name}="${value}"`)
+        .map(([name, value]) => `export ${name}="${value.replace(/[\\"$`]/g, '\\$&')}"`)
         .join('\n')
       break
     case 'cmd':
@@ -953,7 +1006,7 @@ function generateGrokClaudeFiles(baseUrl: string, apiKey: string): FileConfig[] 
     case 'powershell':
       path = 'PowerShell'
       content = Object.entries(environment)
-        .map(([name, value]) => `$env:${name}="${value}"`)
+        .map(([name, value]) => `$env:${name}="${value.replace(/[`"$]/g, '`$&')}"`)
         .join('\n')
       break
     default:
@@ -1322,7 +1375,7 @@ function generateRoutedCodexFiles(
     composite: 'gpt-5.5'
   }
   const preferredModel = preferredModels[platform] || ''
-  const model = selectCodexCatalogModel(preferredModel)
+  const model = platform === 'devin' ? devinSelectedModel.value : selectCodexCatalogModel(preferredModel)
   const labels: Record<GroupPlatform, string> = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
@@ -1337,6 +1390,7 @@ function generateRoutedCodexFiles(
     typesafe: 'TypeSafe / Jev',
     command_code: 'Command Code',
     cline: 'Cline',
+    devin: 'Devin',
     composite: 'Composite'
   }
   const label = labels[platform]
@@ -1346,8 +1400,8 @@ function generateRoutedCodexFiles(
 
   const configContent = `# Codex CLI -> Sub2API ${label} group
 model_provider = "sub2api"
-model = "${model}"
-review_model = "${model}"
+model = "${escapeTomlBasicString(model)}"
+review_model = "${escapeTomlBasicString(model)}"
 disable_response_storage = true
 ${codexLocalCatalogToml.value}
 [model_providers.sub2api]

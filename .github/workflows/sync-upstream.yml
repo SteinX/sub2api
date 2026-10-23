@@ -1,0 +1,90 @@
+name: Sync upstream release
+run-name: Sync upstream release
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [synchronize, reopened]
+
+concurrency:
+  group: sync-upstream-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+
+jobs:
+  sync:
+    if: github.repository == 'SteinX/sub2api' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'sync/upstream-')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Verify and preserve synchronization tooling
+        run: |
+          node --test .github/test-sync-upstream.cjs
+          cp .github/sync-upstream.cjs "$RUNNER_TEMP/sync-upstream.cjs"
+      - name: Check upstream and prepare integration PR
+        id: plan
+        uses: actions/github-script@v8
+        with:
+          script: |
+            await require(process.env.RUNNER_TEMP + '/sync-upstream.cjs').plan({github, context, core});
+      - uses: actions/checkout@v6
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          ref: ${{ steps.plan.outputs.sha }}
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          version: 9
+      - uses: actions/setup-node@v6
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: actions/setup-go@v6
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Install frontend dependencies
+        if: steps.plan.outputs.publish == 'true'
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Validate frontend
+        if: steps.plan.outputs.publish == 'true'
+        run: make test-frontend
+      - name: Validate backend
+        if: steps.plan.outputs.publish == 'true'
+        working-directory: backend
+        run: |
+          make test-unit
+          make test-integration
+      - name: Tag tested commit and start fork release
+        if: steps.plan.outputs.publish == 'true'
+        uses: actions/github-script@v8
+        env:
+          SYNC_SHA: ${{ steps.plan.outputs.sha }}
+          SYNC_TAG: ${{ steps.plan.outputs.tag }}
+          UPSTREAM_TAG: ${{ steps.plan.outputs.upstream_tag }}
+          SYNC_PR: ${{ steps.plan.outputs.pr_number }}
+          SYNC_BASE_SHA: ${{ steps.plan.outputs.base_sha }}
+        with:
+          script: |
+            await require(process.env.RUNNER_TEMP + '/sync-upstream.cjs').publishOrWait(
+              {github, context, core},
+              {sha: process.env.SYNC_SHA, tag: process.env.SYNC_TAG, upstreamTag: process.env.UPSTREAM_TAG,
+               prNumber: process.env.SYNC_PR, baseSha: process.env.SYNC_BASE_SHA}
+            );

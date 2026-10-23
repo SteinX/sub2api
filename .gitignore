@@ -140,8 +140,13 @@ docs/*
 !docs/BATCH_IMAGE_MVP.md
 !docs/COMPOSITE_GROUPS.md
 !docs/PLUGIN_DEVELOPMENT.md
+!docs/DEVIN_UPSTREAM_REPAIR.md
+!docs/DEVIN_CLIENT_IDENTITY.md
+!docs/DEVIN_FUSION.md
+!docs/DEVIN_MODEL_ROUTING.md
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/codex-credits.md
+!docs/devin-usage.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/
@@ -161,3 +166,7 @@ issues/
 .vite/
 # 本地闭源插件开发目录及构建产物不进入 Sub2API 仓库
 /plugins/
+
+# Python login helper tests
+__pycache__/
+*.py[cod]

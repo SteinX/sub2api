@@ -377,6 +377,7 @@ type ResponsesResponse struct {
 	Status      string            `json:"status"` // "completed" | "incomplete" | "failed"
 	Output      []ResponsesOutput `json:"output"`
 	Usage       *ResponsesUsage   `json:"usage,omitempty"`
+	Store       *bool             `json:"store,omitempty"`
 	ServiceTier string            `json:"service_tier,omitempty"` // upstream tier, echoed back verbatim
 
 	// incomplete_details is present when status="incomplete"
@@ -693,14 +694,15 @@ type ChatStreamOptions struct {
 
 // ChatMessage is a single message in the Chat Completions conversation.
 type ChatMessage struct {
-	Role             string          `json:"role"` // "system" | "user" | "assistant" | "tool" | "function"
-	Content          json.RawMessage `json:"content,omitempty"`
-	Refusal          string          `json:"refusal,omitempty"`
-	ReasoningContent string          `json:"reasoning_content,omitempty"`
-	Reasoning        string          `json:"reasoning,omitempty"`
-	Name             string          `json:"name,omitempty"`
-	ToolCalls        []ChatToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	Role               string          `json:"role"` // "system" | "user" | "assistant" | "tool" | "function"
+	Content            json.RawMessage `json:"content,omitempty"`
+	Refusal            string          `json:"refusal,omitempty"`
+	ReasoningContent   string          `json:"reasoning_content,omitempty"`
+	ReasoningSignature string          `json:"reasoning_signature,omitempty"`
+	Reasoning          string          `json:"reasoning,omitempty"`
+	Name               string          `json:"name,omitempty"`
+	ToolCalls          []ChatToolCall  `json:"tool_calls,omitempty"`
+	ToolCallID         string          `json:"tool_call_id,omitempty"`
 
 	// Legacy function calling
 	FunctionCall *ChatFunctionCall `json:"function_call,omitempty"`
@@ -834,12 +836,13 @@ type ChatChunkChoice struct {
 
 // ChatDelta carries incremental content in a streaming chunk.
 type ChatDelta struct {
-	Role             string         `json:"role,omitempty"`
-	Content          *string        `json:"content,omitempty"` // pointer: omit when not present, null vs "" matters
-	Refusal          *string        `json:"refusal,omitempty"`
-	ReasoningContent *string        `json:"reasoning_content,omitempty"`
-	Reasoning        *string        `json:"reasoning,omitempty"`
-	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
+	Role               string         `json:"role,omitempty"`
+	Content            *string        `json:"content,omitempty"` // pointer: omit when not present, null vs "" matters
+	Refusal            *string        `json:"refusal,omitempty"`
+	ReasoningContent   *string        `json:"reasoning_content,omitempty"`
+	ReasoningSignature *string        `json:"reasoning_signature,omitempty"`
+	Reasoning          *string        `json:"reasoning,omitempty"`
+	ToolCalls          []ChatToolCall `json:"tool_calls,omitempty"`
 }
 
 func (m ChatMessage) reasoningText() string {

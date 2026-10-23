@@ -127,8 +127,9 @@ export default {
       anthropic: 'Choose an available Anthropic / Claude group',
       openai: 'Choose an available OpenAI / GPT group',
       domestic: 'Includes DeepSeek, Kimi, Zhipu GLM and MiniMax',
-      other: 'Includes Gemini, Grok, Antigravity, OpenCode and mixed groups'
+      other: 'Includes Devin, Gemini, Grok, Antigravity, OpenCode and mixed groups'
     },
+    providerGroupsUnavailable: 'No groups are available in this category. Ask an administrator to bind the account to a group and grant you access. Adding an account does not automatically grant group access.',
     selectGroup: 'Select a group',
     statusLabel: 'Status',
     selectStatus: 'Select status',
@@ -157,6 +158,12 @@ export default {
     useKey: 'Use Key',
     useKeyModal: {
       title: 'Use API Key',
+      devin: {
+        model: 'Devin model',
+        selectModel: 'Choose an available model',
+        description: 'Models come from this key’s group. The selected model is used in every generated client configuration, including Fusion models.',
+        import: 'Import selected model to CC Switch'
+      },
       description:
         'Add the following environment variables to your terminal profile or run directly in terminal to configure API access.',
       copy: 'Copy',

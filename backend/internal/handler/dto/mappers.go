@@ -237,7 +237,7 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		return nil
 	}
 	redactedCreds, credsStatus := RedactCredentials(a.Credentials)
-	extra := redactAccountManagedExtra(a.Extra)
+	extra := redactAccountManagedExtra(service.DevinExtraForView(a))
 	var ollamaCloudUsage *service.OllamaCloudUsageState
 	if state := service.OllamaCloudUsageStateFromAccount(a); state.Eligible {
 		ollamaCloudUsage = state

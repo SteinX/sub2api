@@ -484,6 +484,24 @@ export default {
         saved: 'OpenCode Go 用量刷新设置已保存',
         saveFailed: '保存 OpenCode Go 用量刷新设置失败'
       },
+      devinClientIdentity: {
+        title: 'Devin 客户端信息',
+        description: '独立更新聊天、模型发现和凭据兑换的客户端标识，无需重新发布或重启服务。',
+        effective: '当前来源：{source} · 配置版本：{revision} · 聊天：{chat} · 模型发现：{discovery} · 凭据兑换：{exchange}',
+        sources: { builtin: '内置', remote: '远程同步', manual: '手动固定' },
+        sourceURL: '独立配置包 URL（公共 HTTPS JSON）',
+        autoSync: '自动同步远程配置',
+        syncHint: '有请求时每分钟在后台检查一次远程配置，请求继续使用当前有效配置；失败保留旧配置。请使用你维护的配置发布地址。',
+        manual: '手动固定客户端信息（优先于远程配置）',
+        profile: '客户端配置 JSON',
+        manualHint: '可分别调整名称、版本、系统和语言。关闭手动固定后恢复远程配置；清空发布地址后恢复内置配置。',
+        save: '保存 Devin 配置', syncNow: '立即同步', refresh: '刷新当前配置',
+        saveFirst: '有未保存的修改，请先保存再同步或刷新。',
+        syncedAt: '最近成功同步：{time}',
+        saved: 'Devin 配置已保存，新请求立即生效。', synced: 'Devin 配置已同步。',
+        syncFailed: '同步失败，继续使用最近一次有效配置。',
+        invalidJSON: '请输入有效的 JSON 配置对象。', failed: 'Devin 配置操作失败。'
+      },
       gatewayForwarding: {
         title: '请求转发行为',
         description: '控制请求转发到上游 OAuth 账号时的行为',

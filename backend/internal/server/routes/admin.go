@@ -20,6 +20,9 @@ func RegisterAdminRoutes(
 	settingService *service.SettingService,
 	panelRateLimiter *middleware.PanelRateLimiter,
 ) {
+	if h.Admin.Devin != nil {
+		v1.POST("/devin/auth-sessions/:id/callback", middleware.RequestBodyLimit(16<<10), h.Admin.Devin.Callback)
+	}
 	// 插件 UI 使用短时能力 URL，仅提供经过安装校验的静态资源。
 	v1.GET("/plugin-ui/:token/*path", h.Admin.Plugin.ServeUIAsset)
 
@@ -60,6 +63,15 @@ func RegisterAdminRoutes(
 
 		// Grok OAuth
 		registerGrokOAuthRoutes(admin, h)
+		if h.Admin.Devin != nil {
+			d := admin.Group("/devin/auth-sessions")
+			d.Use(middleware.RequestBodyLimit(2 << 20))
+			d.POST("", h.Admin.Devin.Start)
+			d.GET("/:id", h.Admin.Devin.Status)
+			d.POST("/:id/complete", h.Admin.Devin.Complete)
+			d.POST("/:id/commit", h.Admin.Devin.Commit)
+			d.DELETE("/:id", h.Admin.Devin.Cancel)
+		}
 
 		// 国产供应商（kimi/zhipu/deepseek）额度与余额
 		registerCNProviderRoutes(admin, h)
@@ -569,6 +581,9 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	{
 		adminSettings.GET("", h.Admin.Setting.GetSettings)
 		adminSettings.PUT("", h.Admin.Setting.UpdateSettings)
+		adminSettings.GET("/devin-client-identity", h.Admin.Setting.GetDevinClientIdentity)
+		adminSettings.PUT("/devin-client-identity", h.Admin.Setting.UpdateDevinClientIdentity)
+		adminSettings.POST("/devin-client-identity/sync", h.Admin.Setting.SyncDevinClientIdentity)
 		adminSettings.POST("/test-smtp", h.Admin.Setting.TestSMTPConnection)
 		adminSettings.POST("/send-test-email", h.Admin.Setting.SendTestEmail)
 		adminSettings.GET("/email-templates", h.Admin.Setting.ListEmailTemplates)

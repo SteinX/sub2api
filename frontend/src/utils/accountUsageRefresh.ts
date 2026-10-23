@@ -1,4 +1,24 @@
-import type { Account } from '@/types'
+import type { Account, AccountUsageInfo } from '@/types'
+
+export const isAccountUsageCacheFresh = (
+  account: Pick<Account, 'platform'>,
+  entry: { data: AccountUsageInfo; ts: number },
+  defaultTTL: number,
+  now = Date.now()
+): boolean => {
+  if (account.platform !== 'devin') return now - entry.ts < defaultTTL
+
+  const ttl = entry.data.error_code || entry.data.error ? 60_000 : 180_000
+  let expiresAt = entry.ts + ttl
+  // A backend cache hit must not start another full frontend cache lifetime.
+  const updatedAt = Date.parse(entry.data.updated_at ?? '')
+  if (Number.isFinite(updatedAt)) expiresAt = Math.min(expiresAt, updatedAt + ttl)
+  for (const window of [entry.data.daily, entry.data.seven_day]) {
+    const resetAt = Date.parse(window?.resets_at ?? '')
+    if (Number.isFinite(resetAt)) expiresAt = Math.min(expiresAt, resetAt)
+  }
+  return now < expiresAt
+}
 
 const normalizeUsageRefreshValue = (value: unknown): string => {
   if (value == null) return ''

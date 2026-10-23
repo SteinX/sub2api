@@ -436,6 +436,14 @@
       </div>
     </template>
 
+    <DevinUsageCell
+      v-else-if="account.platform === 'devin'"
+      :usage="usageInfo"
+      :loading="loading"
+      :error="error"
+      @refresh="loadUsage({ source: 'active', bypassCache: true })"
+    />
+
     <!-- Multi-protocol API-key providers (CN vendors, OpenCode, Command Code):
          coding-plan / subscription quota windows or balance -->
     <template v-else-if="isMultiProtocolApiKeyPlatform(account.platform)">
@@ -703,7 +711,7 @@ import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from 'v
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
-import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
+import { buildOpenAIUsageRefreshKey, isAccountUsageCacheFresh } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import { isOfficialGeminiBaseUrl } from '@/utils/geminiExplicitCache'
@@ -713,6 +721,7 @@ import AccountQuotaInfo from './AccountQuotaInfo.vue'
 import ClaudeResetCreditsCell from './ClaudeResetCreditsCell.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
+import DevinUsageCell from './DevinUsageCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
 import CNProviderBalanceCell from './CNProviderBalanceCell.vue'
 import OllamaCloudUsageCell from './OllamaCloudUsageCell.vue'
@@ -723,7 +732,7 @@ import {
 } from './credentialsBuilder'
 import OpenCodeGoUsageCell from './OpenCodeGoUsageCell.vue'
 
-// Module-level cache shared across all AccountUsageCell instances
+// Cache repeated usage loads within this cell instance.
 const _usageCache = new Map<number, { data: AccountUsageInfo; ts: number }>()
 const USAGE_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
@@ -792,6 +801,7 @@ const isGeminiVertex = computed(() => {
 
 // Show usage windows for OAuth and Setup Token accounts
 const showUsageWindows = computed(() => {
+  if (props.account.platform === 'devin') return true
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
   // 第三方上游 API Key 没有模拟配额，按普通 Key 账号展示今日统计与额度进度条。
   if (props.account.platform === 'gemini') return !isGeminiThirdPartyApiKey.value
@@ -804,6 +814,7 @@ const showUsageWindows = computed(() => {
 })
 
 const shouldFetchUsage = computed(() => {
+  if (props.account.platform === 'devin') return true
   if (props.account.platform === 'anthropic') {
     return props.account.type === 'oauth' || props.account.type === 'setup-token'
   }
@@ -1461,7 +1472,7 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
   // Check cache
   if (!options?.bypassCache) {
     const cached = _usageCache.get(props.account.id)
-    if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL) {
+    if (cached && isAccountUsageCacheFresh(props.account, cached, USAGE_CACHE_TTL)) {
       usageInfo.value = cached.data
       loading.value = false
       return
@@ -1725,6 +1736,16 @@ watch(openAIUsageRefreshKey, (nextKey, prevKey) => {
   _usageCache.delete(props.account.id)
   requestAutoLoad()
 })
+
+watch(
+  () => [props.account.id, props.account.extra?.devin_auth_session_id, props.account.proxy_id, props.account.credentials?.base_url] as const,
+  ([id, session, proxy, baseURL], [previousID, previousSession, previousProxy, previousBaseURL]) => {
+    if (props.account.platform !== 'devin' || id !== previousID) return
+    if (session === previousSession && proxy === previousProxy && baseURL === previousBaseURL) return
+    _usageCache.delete(id)
+    void loadUsage({ source: 'active', bypassCache: true })
+  }
+)
 
 watch(
   () => props.manualRefreshToken,

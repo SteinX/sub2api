@@ -89,6 +89,11 @@ def generate_config(args):
             build['goos'], build['goarch'], build['ignore'] = [args.goos], [args.goarch], []
             build['ldflags'] = [re.sub(r'{{\s*\.Date\s*}}', '{{ .Env.RELEASE_DATE }}', flag)
                                 for flag in build.get('ldflags', [])]
+            repository = os.environ.get('GITHUB_REPOSITORY', 'Wei-Shaw/sub2api')
+            if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
+                raise ValueError('invalid release repository')
+            build['ldflags'].append(
+                '-X github.com/Wei-Shaw/sub2api/internal/service.githubRepo=' + repository)
     else:
         # Artifacts are supplied through the OSS extra_files mechanism. No build
         # is repeated on the publishing runner, and release templates stay intact.
@@ -101,6 +106,12 @@ def generate_config(args):
         else:
             data['release']['extra_files'] = extra
             data['checksum'] = {'name_template': 'checksums.txt', 'algorithm': 'sha256', 'extra_files': extra}
+        # stx is a fork build identifier, rather than a testing channel. Keep
+        # these releases discoverable by the installer/updater's /latest API.
+        if (os.environ.get('GITHUB_REPOSITORY') == 'SteinX/sub2api'
+                and re.fullmatch(r'v\d+\.\d+\.\d+-stx\.\d+', os.environ.get('RELEASE_TAG', ''))):
+            data['release']['prerelease'] = False
+            data['release']['name_template'] += ' (SteinX fork)'
     Path(args.output).write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 

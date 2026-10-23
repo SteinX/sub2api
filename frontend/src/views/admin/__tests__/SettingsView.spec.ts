@@ -8,6 +8,10 @@ import zhCommon from "@/i18n/locales/zh/common";
 import zhSettings from "@/i18n/locales/zh/admin/settings";
 import SettingsView from "../SettingsView.vue";
 
+vi.mock('../settings/DevinClientIdentitySettings.vue', () => ({
+  default: { template: '<div data-testid="devin-client-identity-settings" />' },
+}));
+
 const {
   getSettings,
   updateSettings,

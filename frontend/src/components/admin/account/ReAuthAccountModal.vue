@@ -14,18 +14,21 @@
           <div
             :class="[
               'flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br',
-              isOpenAILike
-                ? 'from-green-500 to-green-600'
-                : isGemini
-                  ? 'from-blue-500 to-blue-600'
-                  : isAntigravity
-                    ? 'from-purple-500 to-purple-600'
-                    : isGrok
-                      ? 'from-zinc-700 to-zinc-900'
-                      : 'from-orange-500 to-orange-600'
+              isDevin
+                ? 'from-sky-500 to-sky-600'
+                : isOpenAILike
+                  ? 'from-green-500 to-green-600'
+                  : isGemini
+                    ? 'from-blue-500 to-blue-600'
+                    : isAntigravity
+                      ? 'from-purple-500 to-purple-600'
+                      : isGrok
+                        ? 'from-zinc-700 to-zinc-900'
+                        : 'from-orange-500 to-orange-600'
             ]"
           >
-            <Icon name="sparkles" size="md" class="text-white" />
+            <PlatformIcon v-if="isDevin" platform="devin" size="lg" class="text-white" />
+            <Icon v-else name="sparkles" size="md" class="text-white" />
           </div>
           <div>
             <span class="block font-semibold text-gray-900 dark:text-white">{{
@@ -33,15 +36,17 @@
             }}</span>
             <span class="text-sm text-gray-500 dark:text-gray-400">
               {{
-                isOpenAI
-                  ? t('admin.accounts.openaiAccount')
-                  : isGemini
-                    ? t('admin.accounts.geminiAccount')
-                    : isAntigravity
-                      ? t('admin.accounts.antigravityAccount')
-                      : isGrok
-                        ? t('admin.accounts.grokAccount')
-                        : t('admin.accounts.claudeCodeAccount')
+                isDevin
+                  ? t('admin.accounts.devin.account')
+                  : isOpenAI
+                    ? t('admin.accounts.openaiAccount')
+                    : isGemini
+                      ? t('admin.accounts.geminiAccount')
+                      : isAntigravity
+                        ? t('admin.accounts.antigravityAccount')
+                        : isGrok
+                          ? t('admin.accounts.grokAccount')
+                          : t('admin.accounts.claudeCodeAccount')
               }}
             </span>
           </div>
@@ -120,7 +125,15 @@
         </div>
       </div>
 
+      <DevinConnectionFlow
+        v-if="isDevin"
+        :account-id="account.id"
+        :proxy-id="account.proxy_id"
+        :settings="{ name: account.name }"
+        @connected="emit('reauthorized'); handleClose()"
+      />
       <OAuthAuthorizationFlow
+        v-else
         ref="oauthFlowRef"
         :add-method="addMethod"
         :auth-url="currentAuthUrl"
@@ -152,7 +165,7 @@
           {{ t('common.cancel') }}
         </button>
         <button
-          v-if="isManualInputMethod"
+          v-if="!isDevin && isManualInputMethod"
           type="button"
           :disabled="!canExchangeCode"
           class="btn btn-primary"
@@ -206,6 +219,8 @@ import { useGrokOAuth } from '@/composables/useGrokOAuth'
 import type { Account } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
+import PlatformIcon from '@/components/common/PlatformIcon.vue'
+import DevinConnectionFlow from '@/components/account/DevinConnectionFlow.vue'
 import OAuthAuthorizationFlow from '@/components/account/OAuthAuthorizationFlow.vue'
 
 // Type for exposed OAuthAuthorizationFlow component
@@ -227,7 +242,7 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{
   close: []
-  reauthorized: [account: Account]
+  reauthorized: [account?: Account]
 }>()
 
 const appStore = useAppStore()
@@ -254,6 +269,7 @@ const isGemini = computed(() => props.account?.platform === 'gemini')
 const isAnthropic = computed(() => props.account?.platform === 'anthropic')
 const isAntigravity = computed(() => props.account?.platform === 'antigravity')
 const isGrok = computed(() => props.account?.platform === 'grok')
+const isDevin = computed(() => props.account?.platform === 'devin')
 
 /**
  * Grok reauth default tab (password auth is hidden):

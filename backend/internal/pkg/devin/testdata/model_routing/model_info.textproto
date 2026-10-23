@@ -1,0 +1,5 @@
+model_uid: "opaque-catalog-entry"
+max_output_tokens: 4096
+harness_uids: "fusion"
+harness_uids: "synthetic-secondary-harness"
+is_model_router: true

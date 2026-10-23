@@ -51,6 +51,8 @@ func CORS(cfg config.CORSConfig) gin.HandlerFunc {
 		allowedSet[origin] = struct{}{}
 	}
 	allowHeaders := []string{
+		"X-Sub2API-Fusion-Session", "X-Sub2API-Fusion-Cancel", "Idempotency-Key",
+		"X-Session-Id", "X-OpenCode-Session", "X-Claude-Code-Session-Id",
 		"Content-Type", "Content-Length", "Accept-Encoding", "X-CSRF-Token", "Authorization",
 		"accept", "origin", "Cache-Control", "X-Requested-With", "X-API-Key", "X-Admin-UI-Request", "X-User-UI-Request",
 	}
@@ -83,7 +85,7 @@ func CORS(cfg config.CORSConfig) gin.HandlerFunc {
 			}
 			c.Writer.Header().Set("Access-Control-Allow-Headers", allowHeadersValue)
 			c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
-			c.Writer.Header().Set("Access-Control-Expose-Headers", "ETag, Server-Timing")
+			c.Writer.Header().Set("Access-Control-Expose-Headers", "ETag, Server-Timing, X-Sub2API-Fusion-Session, X-Sub2API-Fusion-State, X-Sub2API-Request-Id")
 			c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 		}
 		// 处理预检请求

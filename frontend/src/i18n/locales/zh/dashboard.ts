@@ -127,8 +127,9 @@ export default {
       anthropic: '选择 Anthropic / Claude 的可用分组',
       openai: '选择 OpenAI / GPT 的可用分组',
       domestic: '包含 DeepSeek、Kimi、智谱 GLM、MiniMax',
-      other: '包含 Gemini、Grok、Antigravity、OpenCode 和混合分组'
+      other: '包含 Devin、Gemini、Grok、Antigravity、OpenCode 和混合分组'
     },
+    providerGroupsUnavailable: '此分类暂无可用分组。请管理员将对应账号绑定到分组，并确认当前用户有权使用该分组；添加账号后不会自动开放访问权限。',
     selectGroup: '选择分组',
     statusLabel: '状态',
     selectStatus: '选择状态',
@@ -157,6 +158,12 @@ export default {
     useKey: '使用密钥',
     useKeyModal: {
       title: '使用 API 密钥',
+      devin: {
+        model: 'Devin 模型',
+        selectModel: '选择可用模型',
+        description: '模型来自当前密钥的分组，生成的各客户端配置统一使用所选模型，包含可用的 Fusion 模型。',
+        import: '将所选模型导入 CC Switch'
+      },
       description: '将以下环境变量添加到您的终端配置文件或直接在终端中运行。',
       copy: '复制',
       copied: '已复制',

@@ -1,7 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import AccountUsageCell from '../AccountUsageCell.vue'
-import type { Account } from '@/types'
+import DevinUsageCell from '../DevinUsageCell.vue'
+import UsageProgressBar from '../UsageProgressBar.vue'
+import type { Account, AccountUsageInfo } from '@/types'
 
 const { getUsage } = vi.hoisted(() => ({
   getUsage: vi.fn()
@@ -128,6 +130,99 @@ describe('AccountUsageCell', () => {
         dispatchEvent: vi.fn(),
       }))
     })
+  })
+
+  it.each(['oauth', 'apikey'] as const)('loads Devin %s daily and weekly usage and forces a refresh', async (type) => {
+    const usage: AccountUsageInfo = {
+      updated_at: '2026-10-22T00:00:00Z', five_hour: null, seven_day_sonnet: null,
+      daily: { utilization: 25, resets_at: '2026-10-23T00:00:00Z', remaining_seconds: 3600 },
+      seven_day: { utilization: 80, resets_at: '2026-10-25T00:00:00Z', remaining_seconds: 7200 },
+      devin_usage: { plan_name: 'Teams', available_prompt_credits: 0, available_flex_credits: 12.5 }
+    }
+    getUsage.mockResolvedValue(usage)
+    const account = makeAccount({ id: type === 'oauth' ? 9301 : 9302, platform: 'devin', type })
+    const wrapper = mount(AccountUsageCell, {
+      props: { account }, global: { stubs: { UsageProgressBar: true } }
+    })
+    await flushPromises()
+    expect(getUsage).toHaveBeenCalledWith(account.id)
+    expect(wrapper.text()).toContain('Teams')
+    const bars = wrapper.findAllComponents(UsageProgressBar)
+    expect(bars.map(bar => bar.props('utilization'))).toEqual([25, 80])
+    expect(bars.map(bar => bar.props('resetsAt'))).toEqual(['2026-10-23T00:00:00Z', '2026-10-25T00:00:00Z'])
+    expect(wrapper.text()).toContain('admin.accounts.devin.promptCredits: 0')
+    await wrapper.getComponent(DevinUsageCell).get('button').trigger('click')
+    await flushPromises()
+    expect(getUsage).toHaveBeenLastCalledWith(account.id, 'active', true)
+    wrapper.unmount()
+  })
+
+  it('refetches Devin usage on a revisit after a quota reset', async () => {
+    const start = Date.parse('2026-10-22T12:00:00Z')
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start)
+    const account = makeAccount({ id: 9350, platform: 'devin', type: 'apikey' })
+    getUsage.mockResolvedValue({
+      updated_at: new Date(start).toISOString(),
+      daily: { utilization: 100, resets_at: new Date(start + 60_000).toISOString() }
+    })
+    const mountCell = () => mount(AccountUsageCell, { props: { account }, global: { stubs: { UsageProgressBar: true } } })
+    try {
+      let wrapper = mountCell()
+      await flushPromises()
+      wrapper.unmount()
+      expect(getUsage).toHaveBeenCalledTimes(1)
+      clock.mockReturnValue(start + 60_000)
+      getUsage.mockResolvedValue({
+        updated_at: new Date(start + 60_000).toISOString(),
+        daily: { utilization: 0, resets_at: new Date(start + 86_460_000).toISOString() }
+      })
+      wrapper = mountCell()
+      await flushPromises()
+      expect(getUsage).toHaveBeenCalledTimes(2)
+      expect(wrapper.getComponent(UsageProgressBar).props('utilization')).toBe(0)
+      wrapper.unmount()
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  it('uses the batch loader for Devin and distinguishes missing quota from query failures', async () => {
+    const requestBatchedUsage = vi.fn()
+    const account = makeAccount({ id: 9303, platform: 'devin', type: 'apikey' })
+    const usage: AccountUsageInfo = {
+      updated_at: null, five_hour: null, seven_day: null, seven_day_sonnet: null,
+      devin_usage: { plan_name: 'Pro' }
+    }
+    const wrapper = mount(AccountUsageCell, {
+      props: { account, batchedUsage: usage, requestBatchedUsage },
+      global: { stubs: { UsageProgressBar: true } }
+    })
+    await flushPromises()
+    expect(getUsage).not.toHaveBeenCalled()
+    expect(requestBatchedUsage).toHaveBeenCalledWith(account, undefined)
+    expect(wrapper.findAllComponents(UsageProgressBar)).toHaveLength(0)
+    expect(wrapper.text()).toContain('admin.accounts.devin.quotaUnavailable')
+    await wrapper.getComponent(DevinUsageCell).get('button').trigger('click')
+    expect(requestBatchedUsage).toHaveBeenLastCalledWith(account, { force: true })
+    const reauthorized = { ...account, extra: { devin_auth_session_id: 'new-authorization' } }
+    await wrapper.setProps({ account: reauthorized })
+    expect(requestBatchedUsage).toHaveBeenLastCalledWith(reauthorized, { force: true })
+    const changedEndpoint = { ...reauthorized, credentials: { base_url: 'https://cascade.example' } }
+    await wrapper.setProps({ account: changedEndpoint })
+    expect(requestBatchedUsage).toHaveBeenLastCalledWith(changedEndpoint, { force: true })
+    for (const [errorCode, label] of [
+      ['unauthenticated', 'admin.accounts.needsReauth'],
+      ['forbidden', 'admin.accounts.devin.usageForbidden'],
+      ['rate_limited', 'admin.accounts.devin.usageRateLimited'],
+      ['network_error', 'admin.accounts.devin.usageFailed']
+    ]) {
+      await wrapper.setProps({ batchedUsage: {
+        ...usage, error_code: errorCode, error: 'private diagnostic', needs_reauth: errorCode === 'unauthenticated'
+      } })
+      expect(wrapper.text()).toContain(label)
+      expect(wrapper.text()).not.toContain('private diagnostic')
+    }
+    wrapper.unmount()
   })
 
   it('renders eligible Ollama Cloud state and forwards query updates', async () => {
