@@ -47,6 +47,25 @@ func TestContextCompactValidationAndDefaultDisabled(t *testing.T) {
 		})
 	}
 }
+
+func TestManagedResponsesPreserveCompositeEndpointGate(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"claude-opus-4-5","input":"hello"}`))
+	c.Request.Header.Set(mc.HeaderMode, "managed")
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{ID: 2, UserID: 1, User: &service.User{ID: 1}, Group: &service.Group{Platform: service.PlatformComposite}})
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 1})
+	h := &OpenAIGatewayHandler{
+		cfg:                 &config.Config{},
+		gatewayService:      &service.OpenAIGatewayService{},
+		billingCacheService: &service.BillingCacheService{},
+		apiKeyService:       &service.APIKeyService{},
+		concurrencyHelper:   NewConcurrencyHelper(service.NewConcurrencyService(nil), SSEPingFormatNone, 0),
+	}
+	h.Responses(c)
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "composite groups")
+}
 func TestContextErrorsAreBoundedAndHideStorageDetails(t *testing.T) {
 	for _, tt := range []struct {
 		err  error

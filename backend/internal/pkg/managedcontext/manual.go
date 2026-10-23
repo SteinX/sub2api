@@ -227,12 +227,25 @@ func (e *Engine) failCompactJob(ctx context.Context, op *Operation, id string, c
 func (e *Engine) Internal(ctx context.Context, op *Operation, or *Record, ol *Lease, expected int64, x Executor) (*Job, error) {
 	ctx, stop := context.WithTimeout(ctx, time.Duration(op.Policy.WallSeconds)*time.Second)
 	defer stop()
+	noOpID := "cmp_" + op.ID
+	if op.JobID == "" {
+		// A no-op job may have committed before its operation receipt. Recover
+		// that immutable result even if another turn has since moved the head.
+		j, _, err := load[Job](ctx, e.Store, op.Scope, "job", noOpID)
+		if err == nil && j.OperationID == op.ID && j.State == "no_op" {
+			op.JobID, op.State = j.ID, "completed"
+			return j, e.save(ctx, or, op, op.State, ol, nil, nil)
+		}
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+	}
 	if op.JobID != "" {
 		j, _, err := e.LoadJob(ctx, op.Scope, op.JobID)
 		if err != nil {
 			return nil, err
 		}
-		if j.State == "applied" || j.State == "failed" || j.State == "stale" {
+		if j.State == "applied" || j.State == "failed" || j.State == "stale" || j.State == "no_op" {
 			return j, nil
 		}
 	}
@@ -278,6 +291,14 @@ func (e *Engine) Internal(ctx context.Context, op *Operation, or *Record, ol *Le
 		m, err := x.Measure(requestWith(&base, items))
 		if err != nil {
 			return nil, err
+		}
+		if m.InputEstimate <= m.SafeInput/2 {
+			j := &Job{Model: s.Model, Owner: s.Owner, ID: noOpID, OperationID: op.ID, SessionID: s.ID, State: "no_op", Trigger: "manual", Before: m.InputEstimate, After: m.InputEstimate, Target: m.SafeInput / 2, Accounted: true}
+			if _, err = e.Store.Create(ctx, record(j.Owner, "job", j.ID, j.State, j, or.ExpiresAt), nil); err != nil {
+				return nil, err
+			}
+			op.JobID, op.State = j.ID, "completed"
+			return j, e.save(ctx, or, op, op.State, ol, nil, nil)
 		}
 		started, err := e.startSummary(ctx, s, sr, &lease, op, or, ol, &base, x, false, "manual", m.SafeInput/2)
 		if err != nil {

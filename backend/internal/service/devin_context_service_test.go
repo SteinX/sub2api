@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
 	mc "github.com/Wei-Shaw/sub2api/internal/pkg/managedcontext"
@@ -228,6 +229,7 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.ClientRequestID, keyID))
 		c.Request.Header.Set(mc.HeaderMode, "managed")
 		c.Request.Header.Set("Idempotency-Key", keyID)
 		return s.RunContext(c, key, keys, body, "responses", session, 0, 0)

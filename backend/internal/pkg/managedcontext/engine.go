@@ -567,7 +567,7 @@ func (e *Engine) call(ctx context.Context, op *Operation, opRecord *Record, opLe
 // ReplayableAttempt retrieves a terminal result without issuing a provider call.
 func (e *Engine) replayableAttempt(ctx context.Context, op *Operation, purpose string, x Executor) (*Attempt, *apicompat.ResponsesResponse, error) {
 	for i := len(op.Attempts) - 1; i >= 0; i-- {
-		a, r, err := load[Attempt](ctx, e.Store, op.Scope, "attempt", op.Attempts[i])
+		a, _, err := load[Attempt](ctx, e.Store, op.Scope, "attempt", op.Attempts[i])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -577,11 +577,10 @@ func (e *Engine) replayableAttempt(ctx context.Context, op *Operation, purpose s
 		if err = e.ReconcileAttempt(ctx, op.Scope, a.ID, x); err != nil {
 			return nil, nil, err
 		}
-		a, r, err = load[Attempt](ctx, e.Store, op.Scope, "attempt", a.ID)
+		a, r, err := load[Attempt](ctx, e.Store, op.Scope, "attempt", a.ID)
 		if err != nil {
 			return nil, nil, err
 		}
-		_ = r
 		if a.State == "prepared" {
 			a.State = "terminal"
 			a.Settled = true

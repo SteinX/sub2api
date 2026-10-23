@@ -123,7 +123,22 @@ func (x *contextExecutor) settings(ctx context.Context) (devinContextSettings, e
 	if a.GetMappedModel(x.physical.publicModel) != x.physical.publicModel || !a.supportsDevinModel(x.physical.publicModel) {
 		return devinContextSettings{}, mc.E("model_unavailable", "bound account no longer grants the concrete model", 409)
 	}
-	return s.checkContextAccountAccess(key, a, x.physical.publicModel, x.manual)
+	settings, err := s.checkContextAccountAccess(key, a, x.physical.publicModel, x.manual)
+	if err != nil {
+		return settings, err
+	}
+	return settings, s.checkContextChannelAccess(ctx, key, x.physical.publicModel)
+}
+
+func (s *OpenAIGatewayService) checkContextChannelAccess(ctx context.Context, key *APIKey, model string) error {
+	mapping, _ := s.ResolveChannelMappingAndRestrict(ctx, key.GroupID, model)
+	if mapping.Mapped && mapping.MappedModel != model {
+		return mc.E("model_unavailable", "managed context requires a concrete model without channel remapping", 400)
+	}
+	if s.checkChannelPricingRestriction(ctx, key.GroupID, model) {
+		return mc.E("model_unavailable", "model is restricted by this channel", 403)
+	}
+	return nil
 }
 func (x *contextExecutor) check(ctx context.Context, purpose string) error {
 	settings, err := x.settings(ctx)
@@ -291,6 +306,9 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 		model = parsed.Request.Model
 	}
 	if err = s.CheckContextAccess(key, model); err != nil {
+		return nil, err
+	}
+	if err = s.checkContextChannelAccess(ctx, key, model); err != nil {
 		return nil, err
 	}
 	if devin.PlanModelUID(model).Mode != devin.RouteDirect {

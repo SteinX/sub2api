@@ -39,6 +39,16 @@ func TestIsForcedUsageBillingRequestID(t *testing.T) {
 	require.False(t, isForcedUsageBillingRequestID("resp_abc"))
 }
 
+func TestContextBillingAttemptsKeepTheirIDsAcrossIngressAndRecovery(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "shared-turn")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, "local-turn")
+	for _, id := range []string{"context:summary-attempt", "context:inference-attempt"} {
+		require.True(t, isForcedUsageBillingRequestID(id))
+		require.Equal(t, id, resolveUsageBillingRequestID(ctx, id))
+		require.Equal(t, id, resolveUsageBillingRequestID(context.Background(), id), "recovery keeps the original physical money event")
+	}
+}
+
 func TestGeminiCachedContentUsageRequestIDs(t *testing.T) {
 	t.Parallel()
 	publicID, err := NewGeminiCachedContentPublicID()

@@ -207,27 +207,89 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 			incoming += int64(len(b.Data))
 		}
 	}
-	// Only owners of admission records may create/resize reservations. An
-	// attempt's late terminal write is bounded by actual stored bytes instead.
-	if v.Kind == "session" || v.Kind == "operation" {
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(sum(COALESCE((data->>'reserved_bytes')::bigint,0)),0) FROM context_records WHERE user_id=$1 AND kind IN ('session','operation') AND expires_at>NOW() AND NOT(scope=$2 AND kind=$3 AND id=$4)`, v.UserID, v.Scope, v.Kind, v.ID).Scan(&reserved); err != nil {
+	// Keep every unrelated promise of storage. The physical results already
+	// written for an admission's current operation consume its reservation;
+	// deriving that credit avoids changing the session revision from a late
+	// attempt writer which does not own its execution lease.
+	rows, err := tx.QueryContext(ctx, `SELECT c.scope,c.kind,c.id,c.data,
+ COALESCE((SELECT sum(h.size_bytes) FROM context_records a JOIN context_history h
+ ON h.scope=a.scope AND h.id=a.data->>'response_ref'
+ WHERE a.scope=c.scope AND a.kind='attempt' AND a.data->>'operation_id'=
+ CASE WHEN c.kind='operation' THEN c.id ELSE c.data->>'operation_id' END),0)
+ FROM context_records c WHERE c.user_id=$1 AND c.kind IN ('session','operation')
+ AND (c.data->>'reserved_bytes')::bigint>0
+ AND NOT(c.scope=$2 AND c.kind=$3 AND c.id=$4)`, v.UserID, v.Scope, v.Kind, v.ID)
+	if err != nil {
+		return err
+	}
+	type reservation struct {
+		scope, kind, id string
+		data            []byte
+		consumed        int64
+	}
+	var admissions []reservation
+	for rows.Next() {
+		var admission reservation
+		if err = rows.Scan(&admission.scope, &admission.kind, &admission.id, &admission.data, &admission.consumed); err != nil {
+			_ = rows.Close()
 			return err
 		}
-		var own int64
-		if b := metadata["reserved_bytes"]; len(b) > 0 {
-			if err := json.Unmarshal(b, &own); err != nil {
-				return err
-			}
+		admissions = append(admissions, admission)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if v.Kind == "session" || v.Kind == "operation" {
+		var consumed int64
+		opID := ""
+		if v.Kind == "operation" {
+			opID = v.ID
+		} else {
+			_ = json.Unmarshal(metadata["operation_id"], &opID)
 		}
-		if own < 0 {
+		if err = tx.QueryRowContext(ctx, `SELECT COALESCE(sum(h.size_bytes),0)
+ FROM context_records a JOIN context_history h ON h.scope=a.scope AND h.id=a.data->>'response_ref'
+ WHERE a.scope=$1 AND a.kind='attempt' AND a.data->>'operation_id'=$2`, v.Scope, opID).Scan(&consumed); err != nil {
+			return err
+		}
+		admissions = append(admissions, reservation{v.Scope, v.Kind, v.ID, v.Data, consumed})
+	}
+	var attemptOperation string
+	if v.Kind == "attempt" {
+		_ = json.Unmarshal(metadata["operation_id"], &attemptOperation)
+	}
+	var sessionReserved int64
+	for _, admission := range admissions {
+		var data struct {
+			Reserved    int64  `json:"reserved_bytes"`
+			OperationID string `json:"operation_id"`
+			SessionID   string `json:"session_id"`
+		}
+		if err = jsonUnmarshalContext(admission.data, &data); err != nil {
+			return err
+		}
+		if data.Reserved < 0 {
 			return mc.E("policy_invalid", "invalid storage reservation", 503)
 		}
-		reserved += own
-		if sessionID != "" && sessionBytes+incoming+own > p.MaxHistoryBytes {
-			return mc.E("history_limit", "managed session storage budget reached", 413)
+		if admission.kind == "session" {
+			data.SessionID = admission.id
+		} else {
+			data.OperationID = admission.id
+		}
+		if attemptOperation != "" && admission.scope == v.Scope && data.OperationID == attemptOperation {
+			admission.consumed += incoming
+		}
+		remaining := max(data.Reserved-admission.consumed, 0)
+		reserved += remaining
+		if sessionID != "" && admission.scope == v.Scope && data.SessionID == sessionID {
+			sessionReserved += remaining
 		}
 	}
-	if total+incoming+reserved > p.MaxUserHistoryBytes || sessionID != "" && sessionBytes+incoming > p.MaxHistoryBytes {
+	if total+incoming+reserved > p.MaxUserHistoryBytes || sessionID != "" && sessionBytes+incoming+sessionReserved > p.MaxHistoryBytes {
 		return mc.E("history_limit", "managed history storage budget reached", 413)
 	}
 	if v.Kind == "session" {
@@ -503,7 +565,11 @@ func (r *contextSessionStore) Cleanup(ctx context.Context, limit int) (int64, er
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	res, err := tx.ExecContext(ctx, `DELETE FROM context_history WHERE seq IN (SELECT seq FROM context_history WHERE expires_at<NOW() ORDER BY expires_at LIMIT $1)`, limit)
+	res, err := tx.ExecContext(ctx, `DELETE FROM context_history WHERE seq IN (SELECT h.seq FROM context_history h WHERE h.expires_at<NOW()
+ AND NOT EXISTS (SELECT 1 FROM context_records a WHERE a.scope=h.scope AND a.kind='attempt'
+ AND ((a.data->>'session_id'<>'' AND a.data->>'session_id'=h.session_id) OR a.data->>'response_ref'=h.id OR EXISTS(SELECT 1 FROM context_records o WHERE o.scope=a.scope AND o.kind='operation' AND o.id=a.data->>'operation_id' AND o.data->>'response_ref'=h.id))
+ AND (COALESCE((a.data->>'settled')::boolean,FALSE)=FALSE OR a.updated_at>NOW()-interval '24 hours'))
+ ORDER BY h.expires_at LIMIT $1)`, limit)
 	if err != nil {
 		return 0, err
 	}
@@ -511,7 +577,7 @@ func (r *contextSessionStore) Cleanup(ctx context.Context, limit int) (int64, er
 	if err != nil {
 		return 0, err
 	}
-	_, err = tx.ExecContext(ctx, `DELETE FROM context_records WHERE (scope,kind,id) IN (SELECT scope,kind,id FROM context_records WHERE expires_at<NOW() AND (lease_until IS NULL OR lease_until<NOW()) AND (kind<>'attempt' OR status='prepared' OR COALESCE((data->>'settled')::boolean,FALSE)=TRUE) AND NOT EXISTS (SELECT 1 FROM context_records a WHERE a.scope=context_records.scope AND a.kind='attempt' AND ((context_records.kind='session' AND a.data->>'session_id'=context_records.id) OR (context_records.kind='operation' AND a.data->>'operation_id'=context_records.id)) AND COALESCE((a.data->>'settled')::boolean,FALSE)=FALSE) ORDER BY expires_at LIMIT $1)`, limit)
+	_, err = tx.ExecContext(ctx, `DELETE FROM context_records WHERE (scope,kind,id) IN (SELECT scope,kind,id FROM context_records WHERE expires_at<NOW() AND (lease_until IS NULL OR lease_until<NOW()) AND (kind<>'attempt' OR status='prepared' OR (COALESCE((data->>'settled')::boolean,FALSE)=TRUE AND updated_at<NOW()-interval '24 hours')) AND NOT EXISTS (SELECT 1 FROM context_records a WHERE a.scope=context_records.scope AND a.kind='attempt' AND ((context_records.kind='session' AND a.data->>'session_id'=context_records.id) OR (context_records.kind='operation' AND a.data->>'operation_id'=context_records.id)) AND (COALESCE((a.data->>'settled')::boolean,FALSE)=FALSE OR a.updated_at>NOW()-interval '24 hours')) ORDER BY expires_at LIMIT $1)`, limit)
 	if err != nil {
 		return 0, err
 	}

@@ -51,10 +51,11 @@ func (w *ContextMaintenance) Stop() {
 	w.once.Do(w.stop)
 	<-w.done
 	if w.engine != nil {
-		ctx, stop := context.WithTimeout(context.Background(), 50*time.Second)
-		defer stop()
-		if err := w.engine.Close(ctx); err != nil {
-			logger.FromContext(ctx).Warn("devin.context_drain", zap.Error(err))
+		// Upstream cancellation drains late usage for up to 90 seconds and
+		// then persists/settles it. Keep dependencies alive until all tracked
+		// work has finished its bounded provider and persistence windows.
+		if err := w.engine.Close(context.Background()); err != nil {
+			logger.L().Warn("devin.context_drain", zap.Error(err))
 		}
 	}
 }

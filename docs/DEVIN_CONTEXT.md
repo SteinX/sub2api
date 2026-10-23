@@ -105,7 +105,7 @@ curl "$BASE_URL/v1/responses" \
 
 成功或已创建 job 的失败响应通过 `X-Sub2API-Context-Compaction` 提供 job ID；stateless 摘要失败时也保留可查询的已知用量。`needs_retry` 表示需要客户端用原键恢复。
 
-同键重试读取同一 job。`ready` 表示已生成；`applied` 才表示已经替换活动视图。摘要不可达目标时返回失败状态/原因，仍结算已经发生的真实 usage。
+同键重试读取同一 job。会话已低于手动目标时返回持久化的 `no_op` job，不调用模型、不增加费用。`ready` 表示已生成；`applied` 才表示已经替换活动视图。摘要不可达目标时返回失败状态/原因，仍结算已经发生的真实 usage。
 
 ## 状态、历史和取消
 
@@ -155,9 +155,11 @@ prepared 超时标记未发送；dispatching 超时且无终态证据进入 unkn
 | maintenance | 每 session 10 USD，每 user 跨 key 滚动 24 小时 50 USD，每 turn 最多 2 次摘要 |
 | 保留 operation 元数据 | 每 key 最多 min(max_requests × max_sessions_per_key, 16,384)，每 user 最多 min(max_requests × max_sessions_per_user, 65,536) |
 
-付费前预留历史输出空间和余额/额度；实际保留字节由 SQL 事务核算，取消/过期数据在真正清理前仍占保留配额。若上游返回异常大的内容，尽量保留终态 usage 并停止发布，不能为保存 body 而丢弃账务。未结算 attempt 不因 TTL 直接删除；关联 session 和 operation 元数据也保留，避免 unknown 的原幂等键过期后被当作新请求再次派发。未决调用积压达到 key/user 有界阈值后拒绝新的 operation/session，原键读取和恢复仍可用。
+付费前预留历史输出空间和余额/额度；实际保留字节由 SQL 事务核算，取消/过期数据在真正清理前仍占保留配额。若上游返回异常大的内容，尽量保留终态 usage 并停止发布，不能为保存 body 而丢弃账务。响应写入会消耗本轮自己的预留容量，并继续保护其他会话与 stateless 操作的预留容量。未结算 attempt 及其响应、来源历史不因 TTL 直接删除；结算后保留至少 24 小时恢复窗口；关联 session 和 operation 元数据也保留，避免 unknown 的原幂等键过期后被当作新请求再次派发。未决调用积压达到 key/user 有界阈值后拒绝新的 operation/session，原键读取和恢复仍可用。
 
 ## 运维与灰度
+
+正常关闭会等待已跟踪的调用完成迟到响应排空、落盘和结算，再关闭计费与存储依赖。部署环境的终止宽限期需覆盖上游最多 90 秒排空及后续持久化、结算时间，建议至少 150 秒。
 
 日志事件：`devin.context_attempt`（物理调用）、`devin.context_event`（summary_started/ready/applied/failed/uncertain 等）、`devin.context_counters`（实例内累计次数与后台活动数）、`devin.context_settlement_pending` / `*_owner_unavailable` / `*_account_unavailable`（需核对）。事件标签不放正文、摘要或 session ID；账务日志沿用已有 attempt/账号审计。
 

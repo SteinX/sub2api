@@ -62,6 +62,98 @@ func contextRecord(kind, id string, user, key int64) *mc.Record {
 func contextBlob(id, session, visibility string, data []byte) mc.Blob {
 	return mc.Blob{ID: id, SessionID: session, Visibility: visibility, Kind: "message", Data: data, ExpiresAt: time.Now().Add(time.Hour)}
 }
+
+func TestContextStorePostgresReservationsSurvivePhysicalWrites(t *testing.T) {
+	for _, stateless := range []bool{false, true} {
+		t.Run(map[bool]string{false: "session", true: "stateless"}[stateless], func(t *testing.T) {
+			ctx := context.Background()
+			db := contextTestDB(t)
+			s := NewContextSessionStore(db)
+			p := mc.DefaultPolicy()
+			p.MaxHistoryBytes, p.MaxUserHistoryBytes = 1<<20, 1500<<10
+			a := contextRecord("session", "a", 1, 2)
+			a.Data = json.RawMessage(`{"operation_id":"op-a","reserved_bytes":921600}`)
+			_, err := s.Create(ctx, a, &p)
+			require.NoError(t, err)
+			la, err := s.Acquire(ctx, a.Scope, a.Kind, a.ID, "owner-a", time.Minute)
+			require.NoError(t, err)
+			require.NoError(t, s.CAS(ctx, a, &la, nil, &p))
+			b := contextRecord("session", "b", 1, 3)
+			b.Data = json.RawMessage(`{"operation_id":"op-b","reserved_bytes":512000}`)
+			bSession := "b"
+			if stateless {
+				b.Kind, b.ID, bSession = "operation", "op-b", ""
+			}
+			_, err = s.Create(ctx, b, &p)
+			require.NoError(t, err)
+			lb, err := s.Acquire(ctx, b.Scope, b.Kind, b.ID, "owner-b", time.Minute)
+			require.NoError(t, err)
+			require.NoError(t, s.CAS(ctx, b, &lb, nil, &p))
+			attemptB := contextRecord("attempt", "attempt-b", 1, 3)
+			attemptB.Data, _ = json.Marshal(map[string]any{"operation_id": "op-b", "session_id": bSession, "response_ref": "result-b"})
+			_, err = s.Create(ctx, attemptB, nil)
+			require.NoError(t, err)
+			err = s.CAS(ctx, attemptB, nil, []mc.Blob{contextBlob("result-b", bSession, "private", bytes.Repeat([]byte("b"), 800<<10))}, &p)
+			require.Error(t, err, "oversized result cannot spend another turn's reservation")
+			_, err = s.Blob(ctx, attemptB.Scope, "result-b")
+			require.ErrorIs(t, err, mc.ErrNotFound, "rejected result is rolled back")
+			attemptA := contextRecord("attempt", "attempt-a", 1, 2)
+			attemptA.Data = json.RawMessage(`{"operation_id":"op-a","session_id":"a","response_ref":"result-a"}`)
+			_, err = s.Create(ctx, attemptA, nil)
+			require.NoError(t, err)
+			require.NoError(t, s.CAS(ctx, attemptA, nil, []mc.Blob{contextBlob("result-a", "a", "private", bytes.Repeat([]byte("a"), 800<<10))}, &p))
+			require.NoError(t, s.CAS(ctx, a, &la, nil, &p), "persisted physical bytes are credited against their own promise")
+			require.NoError(t, s.CAS(ctx, attemptB, nil, []mc.Blob{contextBlob("result-b", bSession, "private", bytes.Repeat([]byte("b"), 400<<10))}, &p))
+			a.Data = json.RawMessage(`{"reserved_bytes":0}`)
+			require.NoError(t, s.CAS(ctx, a, &la, []mc.Blob{contextBlob("public-a", "a", "public", bytes.Repeat([]byte("a"), 100<<10))}, &p))
+			b.Data = json.RawMessage(`{"reserved_bytes":0}`)
+			require.NoError(t, s.CAS(ctx, b, &lb, []mc.Blob{contextBlob("public-b", bSession, "public", bytes.Repeat([]byte("b"), 100<<10))}, &p))
+		})
+	}
+}
+
+func TestContextStorePostgresRetainsUnsettledBodiesAndRecoveryWindow(t *testing.T) {
+	ctx := context.Background()
+	db := contextTestDB(t)
+	s := NewContextSessionStore(db)
+	for _, r := range []*mc.Record{contextRecord("session", "s", 1, 2), contextRecord("operation", "op", 1, 2)} {
+		_, err := s.Create(ctx, r, nil)
+		require.NoError(t, err)
+	}
+	a := contextRecord("attempt", "late", 1, 2)
+	a.Status = "terminal"
+	a.Data = json.RawMessage(`{"session_id":"s","operation_id":"op","response_ref":"result-late","settled":false}`)
+	_, err := s.Create(ctx, a, nil)
+	require.NoError(t, err)
+	require.NoError(t, s.CAS(ctx, a, nil, []mc.Blob{contextBlob("result-late", "s", "private", []byte("observed provider result")), contextBlob("source", "s", "public", []byte("original input"))}, nil))
+	_, err = db.Exec(`UPDATE context_history SET expires_at=NOW()-interval '1 day'`)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE context_records SET expires_at=NOW()-interval '1 day',lease_until=NULL`)
+	require.NoError(t, err)
+	_, err = s.Cleanup(ctx, 100)
+	require.NoError(t, err)
+	for _, id := range []string{"result-late", "source"} {
+		_, err = s.Blob(ctx, a.Scope, id)
+		require.NoError(t, err, "unsettled recovery keeps both response and source history")
+	}
+	a, err = s.Read(ctx, a.Scope, a.Kind, a.ID)
+	require.NoError(t, err)
+	a.Data = json.RawMessage(`{"session_id":"s","operation_id":"op","response_ref":"result-late","settled":true}`)
+	require.NoError(t, s.CAS(ctx, a, nil, nil, nil))
+	_, err = s.Cleanup(ctx, 100)
+	require.NoError(t, err)
+	_, err = s.Blob(ctx, a.Scope, "result-late")
+	require.NoError(t, err, "settlement leaves a recovery window for the paid result")
+	_, err = db.Exec(`UPDATE context_records SET updated_at=NOW()-interval '25 hours'`)
+	require.NoError(t, err)
+	_, err = s.Cleanup(ctx, 100)
+	require.NoError(t, err)
+	_, err = s.Blob(ctx, a.Scope, "result-late")
+	require.ErrorIs(t, err, mc.ErrNotFound)
+	_, err = s.Read(ctx, a.Scope, "operation", "op")
+	require.ErrorIs(t, err, mc.ErrNotFound)
+}
+
 func TestContextStorePostgres(t *testing.T) {
 	ctx := context.Background()
 	t.Run("quotas_and_scopes", func(t *testing.T) {

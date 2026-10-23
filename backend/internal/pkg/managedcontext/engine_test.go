@@ -494,6 +494,61 @@ func TestCurrentAccountAutoSwitchOverridesSessionSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, e.Close(context.Background()))
 }
+
+func TestInternalCompactBelowTargetIsDurableNoop(t *testing.T) {
+	for _, loseReceipt := range []bool{false, true} {
+		t.Run(fmt.Sprint("lost-receipt-", loseReceipt), func(t *testing.T) {
+			store := newMem()
+			e := New(store)
+			x := &fakeExecutor{}
+			first, err := run(t, e, x, "first", "", parsed(t, "Keep the API", ""))
+			require.NoError(t, err)
+			s, sr, err := e.LoadSession(context.Background(), owner().Scope, first.SessionID)
+			require.NoError(t, err)
+			revision := sr.Revision
+			op, _, err := e.Begin(context.Background(), owner(), "internal:"+s.ID, "noop", "body", s.Model, s.ID, s.Policy)
+			require.NoError(t, err)
+			failed := false
+			store.fail = func(r *Record) bool {
+				if loseReceipt && !failed && r.Kind == "operation" && r.ID == op.ID && r.Status == "completed" {
+					failed = true
+					return true
+				}
+				return false
+			}
+			compact := func() (*Job, error) {
+				var job *Job
+				err := e.WithOperation(context.Background(), op, func(ctx context.Context, op *Operation, r *Record, l *Lease) error {
+					var err error
+					job, err = e.Internal(ctx, op, r, l, revision, x)
+					return err
+				})
+				return job, err
+			}
+			job, err := compact()
+			if loseReceipt {
+				require.Error(t, err)
+				_, err = run(t, e, x, "next", s.ID, parsed(t, "Continue", first.Response.ID))
+				require.NoError(t, err)
+				job, err = compact()
+			}
+			require.NoError(t, err)
+			require.Equal(t, "no_op", job.State)
+			require.Equal(t, job.Before, job.After)
+			require.True(t, job.Accounted)
+			replayed, err := compact()
+			require.NoError(t, err)
+			require.Equal(t, job.ID, replayed.ID)
+			expected := 1
+			if loseReceipt {
+				expected++
+			}
+			require.Equal(t, expected, x.callCount(), "no extra provider calls for internal compact")
+			require.Equal(t, expected, x.charges)
+			require.NoError(t, e.Close(context.Background()))
+		})
+	}
+}
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 func TestStatelessNoopAndKnownResultReplay(t *testing.T) {
 	e := New(newMem())

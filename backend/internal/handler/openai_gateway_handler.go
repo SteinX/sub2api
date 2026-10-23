@@ -474,6 +474,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	reqModel := modelResult.String()
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if service.DevinContextIntent(c) {
+		if !openAICompatibleTextTargetAllowed(c, apiKey, reqModel) {
+			h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
+			return
+		}
 		if legacyCompact || nativeV2 {
 			h.errorResponse(c, 400, "invalid_request_error", "Use /v1/context/compact for managed contexts")
 			return

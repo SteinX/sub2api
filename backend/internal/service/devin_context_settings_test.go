@@ -107,6 +107,34 @@ func TestDevinContextNewSessionsRequireEnabledAccount(t *testing.T) {
 	require.Error(t, err, "explicit disable is effective for new sessions too")
 }
 
+func TestDevinContextPaidCallsRespectChannelRestrictions(t *testing.T) {
+	cfg, key := contextEnabledFixture()
+	a := &Account{ID: 7, Platform: PlatformDevin, Status: StatusActive, Schedulable: true, GroupIDs: []int64{9}, Extra: devinCatalogExtra([]*pb.ClientModelConfig{{ModelUid: "gpt-5.5"}}, "fixture")}
+	s := &OpenAIGatewayService{cfg: cfg, accountRepo: &fusionAccountRepo{account: a}}
+	x := &contextExecutor{physical: &devinFusionExecutor{service: s, publicModel: "gpt-5.5"}, keys: &APIKeyService{apiKeyRepo: &apiKeyRepoStub{apiKey: key}}, owner: mc.Owner{UserID: 33, KeyID: 22, AccountID: 7, GroupID: 9}}
+	ctx := context.Background()
+	for _, allowed := range []bool{false, true} {
+		model := "other-model"
+		if allowed {
+			model = "gpt-5.5"
+		}
+		channel := Channel{ID: 1, Status: StatusActive, GroupIDs: []int64{9}, RestrictModels: true, ModelPricing: []ChannelModelPricing{{Platform: PlatformDevin, Models: []string{model}}}}
+		s.channelService = newTestChannelService(makeStandardRepo(channel, map[int64]string{9: PlatformDevin}))
+		if allowed {
+			require.NoError(t, s.checkContextChannelAccess(ctx, key, "gpt-5.5"))
+			require.NoError(t, x.check(ctx, "inference"))
+		} else {
+			require.Error(t, s.checkContextChannelAccess(ctx, key, "gpt-5.5"))
+			for _, manual := range []bool{false, true} {
+				x.manual = manual
+				o, err := x.Execute(ctx, mc.Call{Purpose: "compaction"})
+				require.Error(t, err)
+				require.True(t, o.NotStarted)
+			}
+		}
+	}
+}
+
 func TestDevinContextSettingsValidationAndAccountSavePaths(t *testing.T) {
 	for _, field := range devinContextExtraKeys {
 		for _, valid := range []any{true, false, nil} {

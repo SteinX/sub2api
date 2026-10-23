@@ -61,7 +61,7 @@ func (e *Engine) Advance(ctx context.Context, op *Operation, or *Record, ol *Lea
 			return nil, createErr
 		}
 		if !created {
-			s, sr, err = e.LoadSession(ctx, op.Scope, s.ID)
+			s, _, err = e.LoadSession(ctx, op.Scope, s.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -71,7 +71,7 @@ func (e *Engine) Advance(ctx context.Context, op *Operation, or *Record, ol *Lea
 			return nil, err
 		}
 	} else {
-		s, sr, err = e.LoadSession(ctx, op.Scope, op.SessionID)
+		s, _, err = e.LoadSession(ctx, op.Scope, op.SessionID)
 		if err != nil {
 			return nil, err
 		}

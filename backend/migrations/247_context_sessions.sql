@@ -22,6 +22,7 @@ CREATE INDEX IF NOT EXISTS context_records_owner_idx ON context_records(user_id,
 CREATE INDEX IF NOT EXISTS context_records_pending_idx ON context_records(kind,status,updated_at);
 CREATE INDEX IF NOT EXISTS context_records_expiry_idx ON context_records(expires_at);
 CREATE INDEX IF NOT EXISTS context_records_attempt_session_idx ON context_records(scope,(data->>'session_id')) WHERE kind='attempt';
+CREATE INDEX IF NOT EXISTS context_records_attempt_operation_idx ON context_records(scope,(data->>'operation_id')) WHERE kind='attempt';
 CREATE TABLE IF NOT EXISTS context_history (
  seq BIGSERIAL PRIMARY KEY,
  scope VARCHAR(64) NOT NULL,
