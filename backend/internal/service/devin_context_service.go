@@ -421,6 +421,15 @@ func (s *OpenAIGatewayService) RunContext(c *gin.Context, key *APIKey, keys *API
 					return recoveryErr
 				}
 			}
+			if mode == "internal" {
+				// Reconciliation may turn a worker's interrupted running receipt
+				// into a ready job. Recover it before requiring fresh admission.
+				job, recoveryErr := engine.RecoverInternal(ctx, op, r, l, recovery)
+				if job != nil || recoveryErr != nil {
+					out.Job, out.SessionID, out.Replayed = job, op.SessionID, true
+					return recoveryErr
+				}
+			}
 		}
 		// A new operation must pass channel admission before ingesting input.
 		// Existing attempts may only need to settle/publish their known result;

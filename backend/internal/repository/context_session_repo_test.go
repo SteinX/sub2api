@@ -167,6 +167,69 @@ func TestContextStorePostgresRetainsUnsettledBodiesAndRecoveryWindow(t *testing.
 	require.ErrorIs(t, err, mc.ErrNotFound)
 }
 
+func TestContextStorePostgresRetiresInactiveReservationsAfterDrain(t *testing.T) {
+	for _, inactive := range []string{"cancelled", "expired"} {
+		for _, completion := range []string{"terminal", "drained", "not_started"} {
+			t.Run(inactive+"/"+completion, func(t *testing.T) {
+				ctx := context.Background()
+				db := contextTestDB(t)
+				s := NewContextSessionStore(db)
+				p := mc.DefaultPolicy()
+				p.MaxHistoryBytes, p.MaxUserHistoryBytes = 1<<20, 1500<<10
+				a := contextRecord("session", "a", 1, 2)
+				a.Data = json.RawMessage(`{"reservation_operation_id":"op-a","reserved_bytes":921600}`)
+				_, err := s.Create(ctx, a, &p)
+				require.NoError(t, err)
+				attemptA := contextRecord("attempt", "attempt-a", 1, 2)
+				attemptA.Status = "dispatching"
+				attemptData := map[string]any{"operation_id": "op-a", "session_id": "a", "deadline": time.Now().Add(time.Minute), "settled": false}
+				attemptA.Data, _ = json.Marshal(attemptData)
+				if completion != "not_started" {
+					_, err = s.Create(ctx, attemptA, nil)
+					require.NoError(t, err)
+				}
+				if inactive == "cancelled" {
+					require.NoError(t, s.Cancel(ctx, a.Scope, a.ID))
+				} else {
+					_, err = db.Exec(`UPDATE context_records SET expires_at=NOW()-interval '1 day' WHERE kind='session' AND id='a'`)
+					require.NoError(t, err)
+				}
+				b := contextRecord("session", "b", 1, 3)
+				b.Data = json.RawMessage(`{"reservation_operation_id":"op-b","reserved_bytes":512000}`)
+				_, err = s.Create(ctx, b, &p)
+				require.NoError(t, err)
+				lb, err := s.Acquire(ctx, b.Scope, b.Kind, b.ID, "owner-b", time.Minute)
+				require.NoError(t, err)
+				require.NoError(t, s.CAS(ctx, b, &lb, nil, &p))
+				attemptB := contextRecord("attempt", "attempt-b", 1, 3)
+				attemptB.Data = json.RawMessage(`{"operation_id":"op-b","session_id":"b","response_ref":"result-b"}`)
+				_, err = s.Create(ctx, attemptB, nil)
+				require.NoError(t, err)
+				result := []mc.Blob{contextBlob("result-b", "b", "private", bytes.Repeat([]byte("b"), 800<<10))}
+				if completion != "not_started" {
+					require.Error(t, s.CAS(ctx, attemptB, nil, result, &p), "in-flight late-result capacity remains protected")
+					if completion == "terminal" {
+						attemptA.Status = "terminal"
+						attemptData["response_ref"] = "result-a"
+						attemptA.Data, _ = json.Marshal(attemptData)
+						require.NoError(t, s.CAS(ctx, attemptA, nil, []mc.Blob{contextBlob("result-a", "a", "private", bytes.Repeat([]byte("a"), 400<<10))}, &p), "cancellation/expiry still permits the reserved late physical result")
+					} else {
+						attemptA.Status = "unknown"
+						attemptData["deadline"] = time.Now().Add(-121 * time.Second)
+						attemptA.Data, _ = json.Marshal(attemptData)
+						require.NoError(t, s.CAS(ctx, attemptA, nil, nil, nil))
+					}
+				}
+				require.NoError(t, s.CAS(ctx, attemptB, nil, result, &p), "inactive reservations retire without waiting for session TTL cleanup")
+				if completion == "terminal" {
+					_, err = s.Blob(ctx, a.Scope, "result-a")
+					require.NoError(t, err, "observed unsettled usage and its body remain retained")
+				}
+			})
+		}
+	}
+}
+
 func TestContextStorePostgres(t *testing.T) {
 	ctx := context.Background()
 	t.Run("quotas_and_scopes", func(t *testing.T) {

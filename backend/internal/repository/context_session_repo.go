@@ -218,6 +218,9 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
 	// written for an admission's current operation consume its reservation;
 	// deriving that credit avoids changing the session revision from a late
 	// attempt writer which does not own its execution lease.
+	// Cancelled/expired admissions cannot publish new logical output. Retain
+	// their promise only while an attempt could still persist a late result:
+	// its execution deadline plus the 90s provider drain and 30s persistence.
 	rows, err := tx.QueryContext(ctx, `SELECT c.scope,c.kind,c.id,c.data,`+contextReservationOperation+`,
  COALESCE((SELECT sum(h.size_bytes) FROM context_records a JOIN context_history h
  ON h.scope=a.scope AND h.id=a.data->>'response_ref'
@@ -225,6 +228,11 @@ func checkContextQuota(ctx context.Context, tx *sql.Tx, v *mc.Record, blobs []mc
  `+contextReservationOperation+`),0)
  FROM context_records c WHERE c.user_id=$1 AND c.kind IN ('session','operation')
  AND (c.data->>'reserved_bytes')::bigint>0
+ AND (NOT c.cancelled AND c.expires_at>NOW() OR EXISTS(
+ SELECT 1 FROM context_records a WHERE a.scope=c.scope AND a.kind='attempt'
+ AND a.data->>'operation_id'=`+contextReservationOperation+`
+ AND a.status IN ('prepared','dispatching','unknown')
+ AND (a.data->>'deadline')::timestamptz+interval '120 seconds'>NOW()))
  AND NOT(c.scope=$2 AND c.kind=$3 AND c.id=$4)`, v.UserID, v.Scope, v.Kind, v.ID)
 	if err != nil {
 		return err

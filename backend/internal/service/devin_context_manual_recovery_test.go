@@ -21,7 +21,7 @@ import (
 )
 
 func TestContextManualRetrySettlesKnownUsageWithoutInferenceAdmission(t *testing.T) {
-	for _, interruptedAt := range []string{"billing", "application"} {
+	for _, interruptedAt := range []string{"billing", "application", "worker_receipt"} {
 		t.Run(interruptedAt, func(t *testing.T) { testContextManualRecovery(t, interruptedAt) })
 	}
 }
@@ -87,7 +87,7 @@ func testContextManualRecovery(t *testing.T, interruptedAt string) {
 	second, err := run("second", "responses", first.SessionID, body, 0)
 	require.NoError(t, err)
 	body, _ = json.Marshal(map[string]any{"mode": "internal", "session_id": second.SessionID, "lane": "main", "expected_revision": second.Revision})
-	billing.fail = interruptedAt == "billing"
+	billing.fail = interruptedAt != "application"
 	interrupted := false
 	if interruptedAt == "application" {
 		store.fail = func(r *mc.Record) bool {
@@ -98,12 +98,23 @@ func testContextManualRecovery(t *testing.T, interruptedAt string) {
 			}
 			return false
 		}
+	} else if interruptedAt == "worker_receipt" {
+		store.fail = func(r *mc.Record) bool {
+			if !interrupted && r.Kind == "job" && r.Status == "failed" {
+				interrupted = true
+				return true
+			}
+			return false
+		}
 	}
 	_, err = run("compact", "internal", second.SessionID, body, second.Revision)
 	require.Error(t, err)
 	require.Equal(t, 3, calls)
-	if interruptedAt == "billing" {
+	if interruptedAt != "application" {
 		require.Len(t, billing.commands, 2)
+		if interruptedAt == "worker_receipt" {
+			require.True(t, interrupted)
+		}
 	} else {
 		require.True(t, interrupted)
 		require.Len(t, billing.commands, 3)
@@ -121,7 +132,7 @@ func testContextManualRecovery(t *testing.T, interruptedAt string) {
 	require.Zero(t, session.ReservedBytes)
 	require.Empty(t, session.ReservationOperationID)
 	require.Equal(t, 100, session.MaintenanceUsage.InputTokens)
-	if interruptedAt == "application" {
+	if interruptedAt != "billing" {
 		require.Equal(t, "applied", result.Job.State)
 		require.Equal(t, uint64(1), session.Epoch)
 		require.LessOrEqual(t, result.Job.After, result.Job.Target, "recovery retains the original validated model target")
