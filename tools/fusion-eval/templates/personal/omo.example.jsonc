@@ -1,0 +1,156 @@
+// Candidate only: resolve actual model/tool mappings before a paid run.
+{
+  "model_fallback": false,
+  "runtime_fallback": false,
+  "agents": {
+    "build": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "plan": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "sisyphus": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "hephaestus": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "sisyphus-junior": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "OpenCode-Builder": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "prometheus": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "metis": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "momus": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "oracle": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "librarian": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "explore": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "multimodal-looker": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "atlas": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "athena": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "athena-junior": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "council-member": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      }
+    },
+    "fusion-worker": {
+      "mode": "subagent",
+      "model": "sub2api-fusion/fusion-personal-worker",
+      "compaction": {
+        "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+      },
+      "tools": {
+        "task": false,
+        "delegate_task": false,
+        "call_omo_agent": false,
+        "background_task": false,
+        "agent": false
+      },
+      "permission": {
+        "*": "deny",
+        "read": "allow",
+        "edit": "allow",
+        "bash": "allow",
+        "task": "deny"
+      }
+    }
+  },
+  "categories": {
+    "visual-engineering": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+    },
+    "ultrabrain": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+    },
+    "deep": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+    },
+    "artistry": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+    },
+    "quick": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+    },
+    "unspecified-low": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+    },
+    "unspecified-high": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+    },
+    "writing": {
+      "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID"
+    }
+  }
+}

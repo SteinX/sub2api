@@ -350,13 +350,40 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			}
 			return result, maintenanceErr
 		}
+		if pendingAttempt == nil && len(s.Attempts) > 0 {
+			last := &s.Attempts[len(s.Attempts)-1]
+			if last.Turn == s.Turn && last.Role == s.Role && last.NotStarted && last.Applied && last.Failure == "" {
+				pendingAttempt = last
+			}
+		}
+		var recovery *Attempt
+		var recoveryKind RejectionKind
+		var authRecoveryUsed bool
 		// Both usage streams have been reconciled before applying any result.
 		if pendingAttempt != nil {
 			a := pendingAttempt
 			if a.Status == "started" || a.Status == "unknown" {
 				return stop(E("attempt_uncertain", "provider outcome is unknown; inference will not be repeated automatically", 409), Uncertain)
 			}
-			if a.Failure != "" {
+			if recoverableAttempt(a) {
+				var recoveryErr error
+				recoveryKind, authRecoveryUsed, recoveryErr = e.prepareRecovery(ctx, persistCtx, s, raw, a)
+				if recoveryErr != nil {
+					var typed *Error
+					if errors.As(recoveryErr, &typed) {
+						switch typed.Code {
+						case "devin_fusion_cancelled":
+							return stop(recoveryErr, Cancelled)
+						case "devin_fusion_budget_exhausted":
+							return stop(recoveryErr, BudgetExhausted)
+						case "devin_fusion_recovery_exhausted", "devin_fusion_auth_recovery_exhausted":
+							return stop(recoveryErr, Failed)
+						}
+					}
+					return result, recoveryErr
+				}
+				recovery = a
+			} else if a.Failure != "" {
 				a.Applied = true
 				if a.Error != nil {
 					state := Failed
@@ -367,38 +394,39 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 				}
 				return stop(E("upstream_failed", "a physical inference failed; usage was retained", 502), Failed)
 			}
-			cancelled, err := e.cancelled(persistCtx, s)
-			if err != nil {
-				return result, err
-			}
-			if cancelled {
-				a.Applied = true
-				return stop(E("cancelled", "Fusion session was cancelled", 409), Cancelled)
-			}
-			if s.TurnCostUSD > s.Profile.MaxCostUSD {
-				a.Applied = true
-				return stop(E("budget_exhausted", "actual inference cost exceeded the Fusion budget", 409), BudgetExhausted)
-			}
-			if err := validateOutputTools(a.Response, base); err != nil {
-				a.Applied = true
-				return stop(err, Failed)
-			}
-			if err := e.apply(s, a.Response); err != nil {
-				a.Applied = true
-				var typed *Error
-				if errors.As(err, &typed) && typed.Code == "devin_fusion_budget_exhausted" {
-					return stop(err, BudgetExhausted)
+			if recovery == nil {
+				cancelled, err := e.cancelled(persistCtx, s)
+				if err != nil {
+					return result, err
 				}
-				return stop(err, Failed)
+				if cancelled {
+					a.Applied = true
+					return stop(E("cancelled", "Fusion session was cancelled", 409), Cancelled)
+				}
+				if s.TurnCostUSD > s.Profile.MaxCostUSD {
+					a.Applied = true
+					return stop(E("budget_exhausted", "actual inference cost exceeded the Fusion budget", 409), BudgetExhausted)
+				}
+				if err := validateOutputTools(a.Response, base); err != nil {
+					a.Applied = true
+					return stop(err, Failed)
+				}
+				if err := e.apply(s, a.Response); err != nil {
+					a.Applied = true
+					var typed *Error
+					if errors.As(err, &typed) && typed.Code == "devin_fusion_budget_exhausted" {
+						return stop(err, BudgetExhausted)
+					}
+					return stop(err, Failed)
+				}
+				if e.Cache != nil {
+					_ = e.Cache.Observe(persistCtx, s)
+				}
+				a.Applied = true
+				if err := e.save(persistCtx, s, raw); err != nil {
+					return result, err
+				}
 			}
-			if e.Cache != nil {
-				_ = e.Cache.Observe(persistCtx, s)
-			}
-			a.Applied = true
-			if err := e.save(persistCtx, s, raw); err != nil {
-				return result, err
-			}
-
 		}
 		// Publication can be resumed independently after a crash following apply.
 		if (s.State == WaitingTool || s.State == Completed) && s.ActiveRequest >= 0 && len(s.Attempts) > 0 {
@@ -466,6 +494,11 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			return stop(E("cancelled", "Fusion session was cancelled", 409), Cancelled)
 		}
 		call := Call{AttemptID: uuid.NewString(), Purpose: Inference, Role: s.Role, Request: req, LaneScope: s.LaneScope(s.Role), PricingAt: e.now()}
+		if recovery != nil {
+			call.RetryOf = recovery.ID
+			call.RecoveryKind = recoveryKind
+			call.AuthRecoveryUsed = authRecoveryUsed
+		}
 		if ctx.Err() != nil {
 			continue
 		}
@@ -494,7 +527,12 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 				a.Response = &copy
 			}
 		}
-		s.Attempts = append(s.Attempts, Attempt{ID: call.AttemptID, Purpose: Inference, Role: s.Role, Turn: s.Turn, Model: req.Model, StartedAt: call.PricingAt, Status: "started", EstimateUSD: estimate})
+		if recovery != nil {
+			// Retire the refusal only in the snapshot that also records its
+			// replacement. A crash between these two facts must not reset the chain.
+			recovery.Applied = true
+		}
+		s.Attempts = append(s.Attempts, Attempt{ID: call.AttemptID, Purpose: Inference, Role: s.Role, Turn: s.Turn, Model: req.Model, StartedAt: call.PricingAt, Status: "started", EstimateUSD: estimate, RetryOf: call.RetryOf, RecoveryKind: call.RecoveryKind})
 		s.TurnRequests++
 		if err = e.save(persistCtx, s, raw); err != nil {
 			// Execute was never entered. A store error may have happened after
@@ -514,6 +552,11 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		a := &s.Attempts[len(s.Attempts)-1]
 		a.Response = outcome.Response
 		a.BillingModel = outcome.BillingModel
+		a.NotStarted = outcome.NotStarted && (outcome.Response == nil || outcome.Response.Usage == nil && len(outcome.Response.Output) == 0)
+		a.Rejection = acceptedRejection(outcome, runErr)
+		if a.Rejection != nil {
+			a.RetryNotBefore = e.now().Add(a.Rejection.RetryAfter)
+		}
 		if outcome.Response != nil && outcome.Response.Usage != nil {
 			a.Status = "completed"
 		} else if outcome.KnownFailure {
@@ -522,17 +565,16 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		} else {
 			a.Status = "unknown"
 		}
-		if outcome.NotStarted && ctx.Err() != nil {
+		if a.NotStarted && ctx.Err() != nil {
 			a.Status = "completed"
 			a.Settled = true
 			a.Applied = true
-			if err = e.settleBudget(persistCtx, s, *a); err != nil {
-				return result, err
-			}
-			if err = e.save(persistCtx, s, raw); err != nil {
-				return result, err
-			}
-			return result, ctx.Err()
+			// Either durable outcome copy can retain the no-send proof when the
+			// other store operation fails; do not abandon the snapshot early.
+			journalErr := e.journal(persistCtx, s, a)
+			budgetErr := e.settleBudget(persistCtx, s, *a)
+			saveErr := e.save(persistCtx, s, raw)
+			return result, errors.Join(ctx.Err(), journalErr, budgetErr, saveErr)
 		}
 		if runErr != nil {
 			a.Failure = "upstream_failed"
@@ -541,7 +583,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 				a.Error = typed
 			}
 		}
-		_ = e.journal(persistCtx, s, a)
+		journalErr := e.journal(persistCtx, s, a)
 		var billingErr error
 		if a.Status == "completed" && !a.Settled {
 			var cost float64
@@ -560,6 +602,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		}
 		if err = e.save(persistCtx, s, raw); err != nil {
 			return result, err
+		}
+		if journalErr != nil {
+			return result, journalErr
 		}
 		if billingErr != nil {
 			return result, E("billing_pending", "usage settlement is pending; retry exactly the same request", 503)

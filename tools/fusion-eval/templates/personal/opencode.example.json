@@ -1,0 +1,58 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+  "small_model": "sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID",
+  "provider": {
+    "sub2api-direct": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Sub2API (configured on your machine)",
+      "options": {
+        "baseURL": "https://YOUR-SUB2API.invalid/v1",
+        "apiKey": "{env:SUB2API_API_KEY}"
+      },
+      "models": {
+        "REPLACE_WITH_CONCRETE_MODEL_UID": {
+          "name": "Concrete direct model"
+        }
+      }
+    },
+    "sub2api-fusion": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Sub2API Fusion worker",
+      "options": {
+        "baseURL": "https://YOUR-SUB2API.invalid/v1",
+        "apiKey": "{env:SUB2API_API_KEY}"
+      },
+      "models": {
+        "fusion-personal-worker": {
+          "name": "Personal Fusion worker"
+        }
+      }
+    }
+  },
+  "agent": {
+    "fusion-worker": {
+      "mode": "subagent",
+      "model": "sub2api-fusion/fusion-personal-worker",
+      "description": "Explicit opt-in execution worker; candidate configuration awaiting local acceptance",
+      "tools": {
+        "task": false,
+        "delegate_task": false,
+        "call_omo_agent": false,
+        "background_task": false,
+        "agent": false
+      },
+      "permission": {
+        "*": "deny",
+        "read": "allow",
+        "edit": "allow",
+        "bash": "allow",
+        "task": "deny"
+      },
+      "prompt": "Complete the assigned execution task and report validation results."
+    }
+  },
+  "plugin": [
+    "oh-my-opencode@5.1.44"
+  ]
+}

@@ -1,0 +1,33 @@
+# Candidate only: replace the concrete UID and verify resolved role mappings locally.
+modelRoles:
+  default: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  smol: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  slow: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  vision: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  plan: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  commit: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  tiny: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  memory: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  task: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  advisor: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+  widget: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+compaction:
+  enabled: false
+contextPromotion:
+  enabled: false
+# Keep provider/model selection fixed while validating gateway recovery.
+# Client-side retries and model fallback are a separate acceptance experiment.
+retry:
+  enabled: false
+  modelFallback: false
+  fallbackChains:
+    default: []
+task:
+  agentModelOverrides:
+    task: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+    scout: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+    reviewer: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+    security-reviewer: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+    seance: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+    sonic: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
+    fusion-worker: sub2api-fusion/fusion-personal-worker

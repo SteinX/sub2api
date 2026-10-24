@@ -289,10 +289,9 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 	// Native client headers correlate ordinary model requests too. Adopt them
 	// only after identifying Fusion intent; they must not opt normal tool turns
 	// into Fusion's separate tool ownership and session validation.
-	if explicitSession == "" {
-		if clientSession := ExtractClientSessionID(c); clientSession != "" {
-			explicitSession = "client_" + fusion.Digest(clientSession)[:48]
-		}
+	explicitSession, err := devinFusionRequestSessionID(c)
+	if err != nil {
+		return true, err
 	}
 	req, _, err := parseDevinFusionRequest(body, protocol)
 	if err != nil {

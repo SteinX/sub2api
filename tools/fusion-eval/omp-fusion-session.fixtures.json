@@ -1,0 +1,8 @@
+[
+  { "name": "parent-first-turn", "sessionId": "fixture-parent-001", "promptCacheKey": "shared-cache", "expectedSessionId": "fixture-parent-001" },
+  { "name": "parent-tool-result-and-retry", "sessionId": "fixture-parent-001", "promptCacheKey": "changed-cache", "expectedSessionId": "fixture-parent-001" },
+  { "name": "worker-a", "sessionId": "fixture-worker-a", "promptCacheKey": "shared-cache", "expectedSessionId": "fixture-worker-a" },
+  { "name": "worker-b", "sessionId": "fixture-worker-b", "promptCacheKey": "shared-cache", "expectedSessionId": "fixture-worker-b" },
+  { "name": "parent-after-workers", "sessionId": "fixture-parent-001", "promptCacheKey": "shared-cache", "expectedSessionId": "fixture-parent-001" },
+  { "name": "new-conversation", "sessionId": "fixture-parent-002", "promptCacheKey": "shared-cache", "expectedSessionId": "fixture-parent-002" }
+]

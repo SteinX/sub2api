@@ -1,0 +1,14 @@
+modelRoles:
+  default: local-fusion/fusion-probe
+  smol: local-fusion/fusion-probe
+  slow: local-fusion/fusion-probe
+  vision: local-fusion/fusion-probe
+  plan: local-fusion/fusion-probe
+  commit: local-fusion/fusion-probe
+  tiny: local-fusion/fusion-probe
+  memory: local-fusion/fusion-probe
+  task: local-fusion/fusion-probe
+  advisor: local-fusion/fusion-probe
+  widget: local-fusion/fusion-probe
+memory:
+  backend: off

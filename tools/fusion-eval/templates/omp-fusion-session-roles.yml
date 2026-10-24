@@ -1,0 +1,44 @@
+# OMP 18.12.6 config.yml shape. Planning template, NOT a ready-to-run paid config.
+# Replace every placeholder with an already authenticated model from your catalog.
+# Load ../omp-fusion-session.ts separately with -e and its documented environment.
+modelRoles:
+  default: DIRECT_PROVIDER/STRONG_MODEL
+  smol: DIRECT_PROVIDER/FAST_MODEL
+  slow: DIRECT_PROVIDER/STRONG_MODEL
+  vision: DIRECT_PROVIDER/VISION_MODEL
+  plan: DIRECT_PROVIDER/STRONG_MODEL
+  commit: DIRECT_PROVIDER/FAST_MODEL
+  tiny: DIRECT_PROVIDER/FAST_MODEL
+  memory: DIRECT_PROVIDER/FAST_MODEL
+  task: DIRECT_PROVIDER/STRONG_MODEL
+  advisor: DIRECT_PROVIDER/STRONG_MODEL
+  widget: DIRECT_PROVIDER/FAST_MODEL
+
+task:
+  # Match your actually loaded agents; an explicit task request model wins over
+  # this map. Capture the resulting provider/model for every enabled worker.
+  agentModelOverrides:
+    task: DIRECT_PROVIDER/STRONG_MODEL
+    scout: DIRECT_PROVIDER/FAST_MODEL
+    sonic: DIRECT_PROVIDER/FAST_MODEL
+    reviewer: DIRECT_PROVIDER/STRONG_MODEL
+    security-reviewer: DIRECT_PROVIDER/STRONG_MODEL
+    # This map does not create the agent. Install personal/fusion-worker.md in
+    # the synthetic project's .omp/agents/ before starting the parent session.
+    fusion-worker: sub2api-fusion/FUSION_MODEL
+
+# Early short smoke only. Daily-use /compact and /fork remain unaccepted.
+compaction:
+  enabled: false
+
+# This setting disables automatic context promotion to another model.
+contextPromotion:
+  enabled: false
+
+# Gateway attempts own bounded recovery in the initial smoke. OMP otherwise
+# enables up to ten retries and model fallback independently of promotion.
+retry:
+  enabled: false
+  modelFallback: false
+  fallbackChains:
+    default: []
