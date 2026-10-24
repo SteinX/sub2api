@@ -56,3 +56,5 @@ Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以
 ## Fusion 协作
 
 网关 Fusion 默认开启，按 `fusion-<lead>-sidekick-<sidekick>` model ID 和账号目录推断配对，账号编辑支持覆盖或关闭配对，为 Responses、Chat Completions、Anthropic Messages 提供统一的 Lead 委派、Sidekick 工具执行和 Lead 审查。会话固定账号和角色模型，工具由接入客户端执行，两个模型按各次实际用量计费。配置、会话关联、取消与验收边界见 [网关 Fusion](DEVIN_FUSION.md)。
+
+面向个人使用 OMO / OMP 的本期范围、客户端会话适配、上游恢复，以及质量／时间／费用对照方案见 [Fusion 接入与评测计划](DEVIN_FUSION_OMO_OMP_PLAN.md)。其中记录实施进度与证据边界；本地客户端探针不代表真实 Fusion 或日常长任务已经验收。

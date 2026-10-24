@@ -262,7 +262,7 @@ func (e *Engine) recoverAttempt(ctx context.Context, s *Session, a *Attempt) err
 		return err
 	}
 	var saved Attempt
-	if json.Unmarshal(b, &saved) != nil || saved.ID != a.ID || saved.Role != a.Role || saved.Model != a.Model || saved.Turn != a.Turn {
+	if json.Unmarshal(b, &saved) != nil || saved.ID != a.ID || saved.Role != a.Role || saved.Model != a.Model || saved.Turn != a.Turn || saved.RetryOf != a.RetryOf || saved.RecoveryKind != a.RecoveryKind {
 		return E("session_corrupt", "physical usage journal failed validation", 503)
 	}
 	if saved.Status == "completed" {

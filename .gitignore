@@ -146,6 +146,7 @@ docs/*
 !docs/DEVIN_CONTEXT.md
 !docs/DEVIN_COMPACTION_MIGRATION.md
 !docs/DEVIN_COMPACTION_IMPLEMENTATION_PLAN.md
+!docs/DEVIN_FUSION_OMO_OMP_PLAN.md
 !docs/DEVIN_MODEL_ROUTING.md
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/codex-credits.md

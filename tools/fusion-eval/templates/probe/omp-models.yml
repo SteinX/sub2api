@@ -1,0 +1,17 @@
+providers:
+  local-fusion:
+    api: openai-completions
+    baseUrl: http://127.0.0.1:8765/v1
+    apiKey: local-probe-only
+    models:
+      - id: fusion-probe
+        name: Local Fusion Probe
+        reasoning: false
+        input: [text]
+        contextWindow: 131072
+        maxTokens: 1024
+        cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0}
+        compat:
+          sessionHeader: x-litellm-session-id
+          supportsStore: false
+          supportsDeveloperRole: false

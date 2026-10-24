@@ -275,11 +275,22 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 		return result, err
 	}
 	defer x.Close()
+	if err = a.service.devin.waitFusionAdmission(ctx, x.account, snapshot.Model, fusion.CacheRefresh); err != nil {
+		return result, err
+	}
+	recordCooldown := func(cause error) error {
+		var upstream *devin.Error
+		if !errors.As(cause, &upstream) || upstream.RejectionKind != devin.RejectionRateLimit && upstream.RejectionKind != devin.RejectionModelCapacity {
+			return cause
+		}
+		_, recordErr := x.recordFusionRejection(ctx, fusion.Call{Purpose: fusion.CacheRefresh, Request: &apicompat.ResponsesRequest{Model: snapshot.Model}}, cause)
+		return errors.Join(cause, recordErr)
+	}
 	// Force grant discovery before each physical refresh; never reuse a stale
 	// foreground token/client/catalog or retry a generation after ambiguity.
 	x.models, err = a.service.devin.Models(ctx, x.account, true)
 	if err != nil {
-		return result, err
+		return result, recordCooldown(err)
 	}
 	if err = validateDevinFusionMembers(x.profile, x.models); err != nil {
 		return result, err
@@ -328,16 +339,21 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 		}
 	}
 	if err != nil {
-		return result, err
+		return result, recordCooldown(err)
 	}
 	if err = ctx.Err(); err != nil {
+		return result, err
+	}
+	if err = a.service.devin.waitFusionAdmission(ctx, x.account, snapshot.Model, fusion.CacheRefresh); err != nil {
 		return result, err
 	}
 	d := devin.NewEventDecoder(snapshot.Model, func(apicompat.ResponsesStreamEvent) error { return nil }, wire.Tools...)
 	stop := pb.StopReason_STOP_REASON_UNSPECIFIED
 	visible := false
+	executionObserved := false
 	mismatch := false
 	err = x.client.Chat(ctx, prepared.BaseURL, token, wire, func(m *pb.GetChatMessageResponse) error {
+		executionObserved = executionObserved || devin.HasExecutionEvidence(m)
 		if m.StopReason != pb.StopReason_STOP_REASON_UNSPECIFIED {
 			stop = m.StopReason
 		}
@@ -360,9 +376,10 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	result.Outcome = fusion.Outcome{Response: &d.Response, BillingModel: billingModel}
 	if err != nil {
 		var upstream *devin.Error
-		if errors.As(err, &upstream) && !visible && d.Response.Usage == nil {
+		if errors.As(err, &upstream) && !executionObserved {
 			status := upstream.HTTPStatus()
-			result.Outcome.KnownFailure = status == 400 || status == 401 || status == 403 || status == 429
+			result.Outcome.KnownFailure = status == 400 || status == 401 || status == 403 || status == 429 || upstream.RetryableRejection()
+			err = recordCooldown(err)
 		}
 	}
 	if d.Response.Usage != nil || !result.Outcome.KnownFailure {

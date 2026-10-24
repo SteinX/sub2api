@@ -1,0 +1,61 @@
+{
+  "opencode_version": "1.19.4",
+  "omo_version": "5.1.44",
+  "opencode_cli_agent_list_exit_code": 0,
+  "fusion_worker_registered_as": "subagent",
+  "cli_validation_note": "Verified agent configuration using the installed OMO plugin file; final personal template selects the same fixed version through its official npm package specifier. No real model request was sent.",
+  "candidate_permission_rules": {
+    "*": [
+      "allow",
+      "deny",
+      "deny"
+    ],
+    "read": [
+      "allow",
+      "ask",
+      "ask",
+      "allow",
+      "allow",
+      "allow"
+    ],
+    "edit": [
+      "allow"
+    ],
+    "bash": [
+      "allow"
+    ],
+    "task": [
+      "deny",
+      "deny"
+    ],
+    "delegate_task": [
+      "deny"
+    ],
+    "call_omo_agent": [
+      "deny"
+    ],
+    "background_task": [
+      "deny"
+    ],
+    "agent": [
+      "deny"
+    ]
+  },
+  "scope": "Schema/configuration loading only. Delegation, final tool list, permission enforcement, compaction and worker session isolation still need runtime acceptance.",
+  "omo_published_package_schema": {
+    "version": "5.1.44",
+    "result": "zero validation errors; custom fusion-worker preserved by AgentOverridesSchema.catchall"
+  },
+  "omp_published_package_parsers": {
+    "version": "18.12.6",
+    "result": "parseAgent, Settings.isolated, cfgTaskAgentModelOverrides, resolveAgentModelPatterns passed",
+    "worker_tools": [
+      "read",
+      "write",
+      "edit",
+      "bash"
+    ],
+    "worker_spawns": null,
+    "resolved_worker_model": "sub2api-fusion/fusion-personal-worker"
+  }
+}
