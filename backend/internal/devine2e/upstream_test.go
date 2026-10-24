@@ -21,6 +21,7 @@ import (
 )
 
 const fixtureModel = "swe-2-max"
+const fixtureSidekick = "e2e-sidekick"
 
 // This server speaks native Connect/protobuf over a real socket. The gateway,
 // scheduler, authentication, repositories and billing are the production binary.
@@ -39,6 +40,9 @@ type nativeFixture struct {
 	failStream          atomic.Bool
 	mu                  sync.Mutex
 	chats               []*pb.GetChatMessageRequest
+	agentMode           atomic.Bool
+	agentRead           atomic.Bool
+	probePath           string // guarded by mu
 }
 
 func newNativeFixture(t *testing.T) *nativeFixture {
@@ -103,14 +107,19 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid synthetic model discovery authentication", 401)
 			return
 		}
-		writeProto(&pb.GetCliModelConfigsResponse{ClientModelConfigs: []*pb.ClientModelConfig{
+		models := []*pb.ClientModelConfig{
 			{ModelUid: "e2e-expensive", CreditMultiplier: 8, ModelInfo: &pb.ModelInfo{MaxOutputTokens: 32000}},
 			{ModelUid: "e2e-opaque-cheap", CreditMultiplier: .01, ModelInfo: &pb.ModelInfo{HarnessUids: []string{"unknown-harness"}, MaxOutputTokens: 32000}},
 			{
 				ModelUid: fixtureModel, Label: "E2E synthetic model", MaxTokens: 200000, CreditMultiplier: 1,
 				ModelInfo: &pb.ModelInfo{ModelUid: fixtureModel, MaxOutputTokens: 32000,
 					ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}},
-			}}})
+			}}
+		if f.agentMode.Load() {
+			models = append(models, &pb.ClientModelConfig{ModelUid: fixtureSidekick, CreditMultiplier: 2, MaxTokens: 200000,
+				ModelInfo: &pb.ModelInfo{MaxOutputTokens: 32000, ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}}})
+		}
+		writeProto(&pb.GetCliModelConfigsResponse{ClientModelConfigs: models})
 	case devin.UserJWTPath:
 		if f.rejectJWT.Swap(false) {
 			w.Header().Set("Content-Type", "application/json")
@@ -122,7 +131,7 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case devin.ChatPath:
 		_, body, err := devin.ReadFrame(r.Body)
 		var request pb.GetChatMessageRequest
-		if err != nil || proto.Unmarshal(body, &request) != nil || request.GetMetadata().GetUserJwt() != "fixture-user-jwt" || request.ChatModelUid != fixtureModel {
+		if err != nil || proto.Unmarshal(body, &request) != nil || request.GetMetadata().GetUserJwt() != "fixture-user-jwt" || (request.ChatModelUid != fixtureModel && !(f.agentMode.Load() && request.ChatModelUid == fixtureSidekick)) {
 			http.Error(w, "invalid native request", 400)
 			return
 		}
@@ -173,6 +182,9 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			reply.DeltaText = ""
 			reply.DeltaToolCalls = []*pb.ChatToolCall{{Id: "call_e2e", Name: "e2e_echo", ArgumentsJson: `{"value":"E2E_TOOL_RESULT"}`}}
 			reply.StopReason = pb.StopReason_STOP_REASON_FUNCTION_CALL
+		}
+		if f.agentMode.Load() {
+			f.agentReply(&request, reply)
 		}
 		b, _ := proto.Marshal(reply)
 		writeFrame(w, 0, b)

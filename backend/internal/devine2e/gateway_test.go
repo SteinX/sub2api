@@ -124,7 +124,13 @@ func (a *application) start(t *testing.T) {
 	if a.trustFile != "" {
 		a.command.Env = append(a.command.Env, "SSL_CERT_FILE="+a.trustFile)
 	}
-	a.redactor = &redactedLog{destination: a.log}
+	if a.redactor == nil {
+		a.redactor = &redactedLog{destination: a.log}
+	} else {
+		a.redactor.mu.Lock()
+		a.redactor.destination = a.log
+		a.redactor.mu.Unlock()
+	}
 	for _, secret := range []string{a.password, os.Getenv("DEVIN_E2E_DB_PASSWORD"), os.Getenv("DEVIN_E2E_PAT"), os.Getenv("DEVIN_E2E_CREDENTIAL")} {
 		a.redactor.addSecret(secret)
 	}
@@ -184,6 +190,7 @@ func (a *application) stop(t *testing.T) {
 
 func request(t *testing.T, a *application, method, path, token string, body any, status int) []byte {
 	t.Helper()
+	a.redactor.addSecret(token)
 	var encoded []byte
 	var err error
 	if body != nil {
@@ -259,6 +266,10 @@ func TestOpaqueCredentialReferenceUsesKeyOnboarding(t *testing.T) {
 }
 
 func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
+	runDevinCloudGatewaySuite(t, mode, fixture, false)
+}
+
+func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture, agents bool) {
 	t.Helper()
 	require.Contains(t, []string{"mock", "plan", "live"}, mode, "select mock, plan or live explicitly")
 	pat := "cog_e2e_fixture"
@@ -300,7 +311,7 @@ func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
 		// Synthetic, explicit prices make reservation/billing checks independent
 		// of remote price catalogs. Never override real prices in live mode.
 		groupInput["model_pricing"] = []any{map[string]any{
-			"platform": "devin", "models": []string{fixtureModel}, "billing_mode": "token",
+			"platform": "devin", "models": []string{fixtureModel, fixtureSidekick}, "billing_mode": "token",
 			"input_price": 0.000001, "output_price": 0.000002,
 			"cache_write_price": 0.000001, "cache_read_price": 0.0000001,
 		}}
@@ -354,7 +365,9 @@ func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
 	require.NoError(t, err)
 	selection.PaidAllowed = mode == "live"
 	selection.Mode = mode
-	saveSmokePlan(t, selection)
+	if !agents {
+		saveSmokePlan(t, selection)
+	}
 	model := selection.Model
 	userPassword := randomID()
 	a.redactor.addSecret(userPassword)
@@ -363,12 +376,20 @@ func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
 		"concurrency": 4, "allowed_groups": []int64{groupID},
 	})
 	user := login(t, a, "user@devin-e2e.invalid", userPassword)
-	keyData := api(t, a, "POST", "/keys", user, map[string]any{"name": "e2e-key", "group_id": groupID})
+	keyInput := map[string]any{"name": "e2e-key", "group_id": groupID}
+	if agents {
+		quota := 0.25
+		if mode == "mock" || os.Getenv("DEVIN_E2E_AGENT_BATCH") == "matrix" {
+			quota = 1
+		}
+		keyInput["quota"] = quota
+	}
+	keyData := api(t, a, "POST", "/keys", user, keyInput)
 	key := keyData.Get("key").String()
 	require.NotEmpty(t, key, "public API key creation")
 	a.redactor.addSecret(key)
 	keyID := keyData.Get("id").Int()
-	if mode == "mock" {
+	if mode == "mock" && !agents {
 		t.Run("administrator_probe", func(t *testing.T) {
 			body := request(t, a, "POST", fmt.Sprintf("/api/v1/admin/accounts/%d/test", accountID), admin,
 				map[string]string{"model_id": model, "prompt": "Reply with E2E_OK only."}, 200)
@@ -388,6 +409,10 @@ func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
 		require.True(t, found, "selected Devin model absent from public key's group catalog")
 	}) {
 		t.Fatal("public model grant validation failed before inference")
+	}
+	if agents {
+		runAgentCases(t, a, fixture, mode, admin, user, key, keyID, accountID, catalog.Models)
+		return
 	}
 	if mode == "plan" {
 		t.Log("PAT onboarding, account persistence and public model discovery completed; no inference requested")

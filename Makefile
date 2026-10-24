@@ -78,3 +78,13 @@ test-devin-plan:
 # Explicit opt-in: uses a dedicated Devin account and consumes upstream credits.
 test-devin-live:
 	@bash deploy/devin-e2e.sh live
+
+.PHONY: test-devin-agent-e2e test-devin-agent-plan test-devin-agent-live
+test-devin-agent-e2e:
+	@bash deploy/devin-agent-e2e.sh mock
+
+test-devin-agent-plan:
+	@bash deploy/devin-agent-e2e.sh plan
+
+test-devin-agent-live:
+	@bash deploy/devin-agent-e2e.sh live

@@ -48,7 +48,7 @@ export DEVIN_E2E_PG_PORT DEVIN_E2E_REDIS_PORT
 DEVIN_E2E_PG_PORT="$("${compose[@]}" port postgres 5432 | awk -F: '{print $NF}')"
 DEVIN_E2E_REDIS_PORT="$("${compose[@]}" port redis 6379 | awk -F: '{print $NF}')"
 cd "$repo_dir/backend"
-go build -mod=readonly -o "$DEVIN_E2E_BINARY" ./cmd/server
+timeout --kill-after=10s 5m go build -mod=readonly -o "$DEVIN_E2E_BINARY" ./cmd/server
 {
   printf 'mode=%s\n' "$mode"
   printf 'commit=%s\n' "$(git rev-parse HEAD)"
@@ -57,4 +57,4 @@ go build -mod=readonly -o "$DEVIN_E2E_BINARY" ./cmd/server
   sha256sum "$DEVIN_E2E_BINARY"
 } > "$DEVIN_E2E_ARTIFACTS/provenance.txt"
 echo "Running Devin $mode E2E; private artifacts: $DEVIN_E2E_ARTIFACTS"
-go test -mod=readonly -count=1 -tags=devine2e -json -timeout=10m ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"
+timeout --kill-after=15s 15m go test -mod=readonly -count=1 -tags=devine2e -run "${DEVIN_E2E_RUN:-.}" -json -timeout=10m ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"
