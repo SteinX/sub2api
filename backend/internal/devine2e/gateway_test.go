@@ -246,10 +246,25 @@ func TestPATPlanStopsBeforeInference(t *testing.T) {
 	require.Positive(t, fixture.mints.Load(), "plan must still validate and onboard the PAT")
 }
 
+func TestOpaqueCredentialReferenceUsesKeyOnboarding(t *testing.T) {
+	if os.Getenv("DEVIN_E2E_MODE") != "mock" {
+		t.Skip("synthetic binding regression runs only in mock mode")
+	}
+	fixture := newNativeFixtureWithReference(t, "synthetic.runtime.reference")
+	runDevinCloudGateway(t, "plan", fixture)
+	require.Positive(t, fixture.referenceExchanges.Load(), "opaque reference must reach the native key exchange unchanged")
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	require.Empty(t, fixture.chats, "reference onboarding must not start inference")
+}
+
 func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
 	t.Helper()
 	require.Contains(t, []string{"mock", "plan", "live"}, mode, "select mock, plan or live explicitly")
 	pat := "cog_e2e_fixture"
+	if fixture != nil && fixture.credentialReference != "" {
+		pat = fixture.credentialReference
+	}
 	maxOutputTokens := 1024
 	if raw := os.Getenv("DEVIN_E2E_MAX_OUTPUT_TOKENS"); raw != "" {
 		var err error
@@ -263,7 +278,8 @@ func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
 		if pat == "" {
 			pat = os.Getenv("DEVIN_E2E_CREDENTIAL")
 		}
-		require.True(t, strings.HasPrefix(pat, "cog_") && !strings.ContainsAny(pat, " \t\r\n"), "supply a supported cog_ Devin PAT securely; legacy API and CLI session credentials are not interchangeable")
+		require.NotEmpty(t, pat, "runtime credential reference unavailable; inspect the active binding/version without exporting the secret")
+		require.False(t, strings.ContainsAny(pat, "\r\n"), "credential reference must not contain newline characters")
 		if mode == "live" {
 			require.Equal(t, "true", os.Getenv("DEVIN_E2E_ALLOW_PAID"), "explicit paid-test authorization is required before transmitting the PAT")
 		}

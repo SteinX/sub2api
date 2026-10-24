@@ -8,9 +8,8 @@ case "$mode" in
   mock) ;;
   plan|live)
     export DEVIN_E2E_PAT="${DEVIN_E2E_PAT:-${DEVIN_E2E_CREDENTIAL:-}}"
-    : "${DEVIN_E2E_PAT:?provide the independent Devin PAT through secret management}"
-    case "$DEVIN_E2E_PAT" in cog_*) ;; *) echo 'Unsupported credential type: a cog_ Devin PAT is required' >&2; exit 2 ;; esac
-    case "$DEVIN_E2E_PAT" in cog_|*[[:space:]]*) echo 'Invalid PAT format' >&2; exit 2 ;; esac
+    : "${DEVIN_E2E_PAT:?runtime credential reference unavailable; check this instance binding/version, not the secret value}"
+    case "$DEVIN_E2E_PAT" in *$'\r'*|*$'\n'*) echo 'Invalid credential reference: newline characters are not allowed' >&2; exit 2 ;; esac
     if [ "$mode" = live ] && [ "${DEVIN_E2E_ALLOW_PAID:-false}" != true ]; then
       echo 'Paid inference is disabled. Review make test-devin-plan, then explicitly set DEVIN_E2E_ALLOW_PAID=true after approval.' >&2
       exit 2

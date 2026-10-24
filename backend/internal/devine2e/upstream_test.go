@@ -25,22 +25,29 @@ const fixtureModel = "swe-2-max"
 // This server speaks native Connect/protobuf over a real socket. The gateway,
 // scheduler, authentication, repositories and billing are the production binary.
 type nativeFixture struct {
-	server      *httptest.Server
-	proxy       *httptest.Server
-	ca          []byte
-	mints       atomic.Int32
-	denyMint    atomic.Bool
-	denyModels  atomic.Bool
-	emptyModels atomic.Bool
-	rejectJWT   atomic.Bool
-	failChat    atomic.Bool
-	failStream  atomic.Bool
-	mu          sync.Mutex
-	chats       []*pb.GetChatMessageRequest
+	server              *httptest.Server
+	proxy               *httptest.Server
+	ca                  []byte
+	credentialReference string
+	referenceExchanges  atomic.Int32
+	mints               atomic.Int32
+	denyMint            atomic.Bool
+	denyModels          atomic.Bool
+	emptyModels         atomic.Bool
+	rejectJWT           atomic.Bool
+	failChat            atomic.Bool
+	failStream          atomic.Bool
+	mu                  sync.Mutex
+	chats               []*pb.GetChatMessageRequest
 }
 
 func newNativeFixture(t *testing.T) *nativeFixture {
-	f := &nativeFixture{}
+	return newNativeFixtureWithReference(t, "")
+}
+
+func newNativeFixtureWithReference(t *testing.T, reference string) *nativeFixture {
+	t.Helper()
+	f := &nativeFixture{credentialReference: reference}
 	f.startTLSProxy(t)
 	return f
 }
@@ -68,9 +75,14 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				APIKey string `json:"api_key"`
 			} `json:"metadata"`
 		}
-		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body) != nil || !strings.HasPrefix(r.Header.Get("X-Api-Key"), "cog_e2e_") || body.Metadata.APIKey != r.Header.Get("X-Api-Key") {
+		key := r.Header.Get("X-Api-Key")
+		isReference := f.credentialReference != "" && key == f.credentialReference
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body) != nil || (!strings.HasPrefix(key, "cog_e2e_") && !isReference) || body.Metadata.APIKey != key {
 			http.Error(w, "invalid synthetic PAT exchange", 401)
 			return
+		}
+		if isReference {
+			f.referenceExchanges.Add(1)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"sessionToken": "devin-session-token$fixture-session-" + strconv.Itoa(int(f.mints.Load()))})
