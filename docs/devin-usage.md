@@ -33,7 +33,7 @@ Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以
 
 失败时会保留 RPC 阶段（例如 `GetUserJwt`、`AssignModel`、`GetChatMessage`），以及上游提供的合法 trace ID。`invalid_argument` 本身无法证明是模型 UID、请求字段还是上游内部故障；重试仍失败时应记录这些信息定位，不会把失败显示成测试成功。上游原始错误正文和凭据不直接透出。
 
-协议对照来源：[OMP Devin provider](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/ai/src/providers/devin.ts)、[wire metadata](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/catalog/src/wire/devin.ts)、[protobuf 字段](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/catalog/src/discovery/devin-proto.ts)。回归包含模拟原生 RPC 和本机 WebSocket 多轮调用；真实账号的上游可用性需要部署后实测。
+协议对照来源：[OMP Devin provider](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/ai/src/providers/devin.ts)、[wire metadata](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/catalog/src/wire/devin.ts)、[protobuf 字段](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/catalog/src/discovery/devin-proto.ts)。可在发布前使用[云端 Devin E2E 环境](DEVIN_E2E.md)，通过当前后端的公开网关执行确定性协议回归，并用独立测试账号验证真实上游。模拟结果不代表真实账号或上游协议当前可用。
 
 ## 账号用量
 

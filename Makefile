@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
+.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical test-devin-e2e test-devin-live
 
 FRONTEND_CRITICAL_VITEST := \
 	src/i18n/__tests__/localeKeyCompleteness.spec.ts \
@@ -66,3 +66,11 @@ test-frontend:
 
 test-frontend-critical:
 	@pnpm --dir frontend exec vitest run $(FRONTEND_CRITICAL_VITEST)
+
+# Full production binary, disposable PostgreSQL/Redis, native protocol fixture.
+test-devin-e2e:
+	@bash deploy/devin-e2e.sh mock
+
+# Explicit opt-in: uses a dedicated Devin account and consumes upstream credits.
+test-devin-live:
+	@bash deploy/devin-e2e.sh live

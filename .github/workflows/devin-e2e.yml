@@ -1,0 +1,86 @@
+name: Devin E2E
+
+on:
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'deploy/devin-e2e.sh'
+      - 'deploy/docker-compose.devin-e2e.yml'
+      - '.github/workflows/devin-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'deploy/devin-e2e.sh'
+      - 'deploy/docker-compose.devin-e2e.yml'
+      - '.github/workflows/devin-e2e.yml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Mock is deterministic. Live consumes dedicated Devin test-account credits.'
+        type: choice
+        options: [mock, live]
+        default: mock
+
+permissions:
+  contents: read
+
+jobs:
+  mock:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'mock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Exercise the production gateway with synthetic Devin RPCs
+        env:
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-e2e
+        run: make test-devin-e2e
+      - name: Save test results (exclude private backend log and binary)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-e2e-mock
+          path: |
+            ${{ runner.temp }}/devin-e2e/results.jsonl
+            ${{ runner.temp }}/devin-e2e/provenance.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  live:
+    # Never run PR code with a real credential; opt in on the default branch.
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'live' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: devin-e2e-live
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Exercise the isolated current binary against live Devin
+        env:
+          DEVIN_E2E_CREDENTIAL: ${{ secrets.DEVIN_E2E_CREDENTIAL }}
+          DEVIN_E2E_CREDENTIAL_TYPE: ${{ vars.DEVIN_E2E_CREDENTIAL_TYPE || 'apikey' }}
+          DEVIN_E2E_MODEL: ${{ vars.DEVIN_E2E_MODEL }}
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-e2e
+        run: make test-devin-live
+      - name: Save live verification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-e2e-live
+          path: |
+            ${{ runner.temp }}/devin-e2e/results.jsonl
+            ${{ runner.temp }}/devin-e2e/provenance.txt
+          if-no-files-found: ignore
+          retention-days: 7

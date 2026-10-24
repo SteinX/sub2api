@@ -1,0 +1,27 @@
+# Disposable dependencies for deploy/devin-e2e.sh. No production data or ports.
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: devin_e2e
+      POSTGRES_DB: devin_e2e
+      POSTGRES_PASSWORD: ${DEVIN_E2E_DB_PASSWORD:?run deploy/devin-e2e.sh}
+    ports:
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U devin_e2e -d devin_e2e"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "127.0.0.1::6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
