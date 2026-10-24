@@ -6,11 +6,17 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mode="${1:-mock}"
 case "$mode" in
   mock) ;;
-  live)
-    : "${DEVIN_E2E_CREDENTIAL:?provide a dedicated Devin test credential}"
-    : "${DEVIN_E2E_MODEL:?select an upstream model explicitly}"
+  plan|live)
+    export DEVIN_E2E_PAT="${DEVIN_E2E_PAT:-${DEVIN_E2E_CREDENTIAL:-}}"
+    : "${DEVIN_E2E_PAT:?provide the independent Devin PAT through secret management}"
+    case "$DEVIN_E2E_PAT" in cog_*) ;; *) echo 'Unsupported credential type: a cog_ Devin PAT is required' >&2; exit 2 ;; esac
+    case "$DEVIN_E2E_PAT" in cog_|*[[:space:]]*) echo 'Invalid PAT format' >&2; exit 2 ;; esac
+    if [ "$mode" = live ] && [ "${DEVIN_E2E_ALLOW_PAID:-false}" != true ]; then
+      echo 'Paid inference is disabled. Review make test-devin-plan, then explicitly set DEVIN_E2E_ALLOW_PAID=true after approval.' >&2
+      exit 2
+    fi
     ;;
-  *) echo 'Usage: bash deploy/devin-e2e.sh [mock|live]' >&2; exit 2 ;;
+  *) echo 'Usage: bash deploy/devin-e2e.sh [mock|plan|live]' >&2; exit 2 ;;
 esac
 export DEVIN_E2E_MODE="$mode"
 export DEVIN_E2E_ARTIFACTS="${DEVIN_E2E_ARTIFACTS:-$repo_dir/.cache/devin-e2e/$(date -u +%Y%m%dT%H%M%SZ)-$$}"

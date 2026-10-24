@@ -17,10 +17,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Mock is deterministic. Live consumes dedicated Devin test-account credits.'
+        description: 'Plan onboards the PAT without inference; live consumes test-account credits.'
         type: choice
-        options: [mock, live]
+        options: [mock, plan, live]
         default: mock
+      allow_paid:
+        description: 'Authorize six capped gateway requests; retries can consume extra credits. No spending hard cap.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -50,12 +54,13 @@ jobs:
           path: |
             ${{ runner.temp }}/devin-e2e/results.jsonl
             ${{ runner.temp }}/devin-e2e/provenance.txt
+            ${{ runner.temp }}/devin-e2e/smoke-plan.json
           if-no-files-found: ignore
           retention-days: 7
 
   live:
     # Never run PR code with a real credential; opt in on the default branch.
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'live' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'plan' || (inputs.mode == 'live' && inputs.allow_paid)) && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     environment: devin-e2e-live
@@ -67,13 +72,13 @@ jobs:
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      - name: Exercise the isolated current binary against live Devin
+      - name: Onboard the PAT, discover models, and run the authorized mode
         env:
-          DEVIN_E2E_CREDENTIAL: ${{ secrets.DEVIN_E2E_CREDENTIAL }}
-          DEVIN_E2E_CREDENTIAL_TYPE: ${{ vars.DEVIN_E2E_CREDENTIAL_TYPE || 'apikey' }}
-          DEVIN_E2E_MODEL: ${{ vars.DEVIN_E2E_MODEL }}
+          DEVIN_E2E_PAT: ${{ secrets.DEVIN_E2E_PAT }}
+          DEVIN_E2E_MODE_INPUT: ${{ inputs.mode }}
+          DEVIN_E2E_ALLOW_PAID: ${{ inputs.allow_paid && 'true' || 'false' }}
           DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-e2e
-        run: make test-devin-live
+        run: bash deploy/devin-e2e.sh "$DEVIN_E2E_MODE_INPUT"
       - name: Save live verification results
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,5 +87,6 @@ jobs:
           path: |
             ${{ runner.temp }}/devin-e2e/results.jsonl
             ${{ runner.temp }}/devin-e2e/provenance.txt
+            ${{ runner.temp }}/devin-e2e/smoke-plan.json
           if-no-files-found: ignore
           retention-days: 7

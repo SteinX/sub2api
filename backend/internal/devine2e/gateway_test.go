@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,12 +19,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"github.com/coder/websocket"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -33,6 +37,9 @@ type application struct {
 	command                     *exec.Cmd
 	done                        chan error
 	log                         *os.File
+	redactor                    *redactedLog
+	trustFile                   string
+	database                    string
 }
 
 func randomID() string {
@@ -43,7 +50,7 @@ func randomID() string {
 	return hex.EncodeToString(b)
 }
 
-func newApplication(t *testing.T) *application {
+func newApplication(t *testing.T, fixture *nativeFixture) *application {
 	t.Helper()
 	binary := os.Getenv("DEVIN_E2E_BINARY")
 	require.NotEmpty(t, binary, "run bash deploy/devin-e2e.sh")
@@ -56,6 +63,24 @@ func newApplication(t *testing.T) *application {
 	require.NoError(t, listener.Close())
 	dir := t.TempDir()
 	a := &application{binary: binary, base: base, dir: dir, password: randomID()}
+	// Each scenario owns a database inside this runner's disposable PostgreSQL.
+	db, err := sql.Open("postgres", fmt.Sprintf("host=127.0.0.1 port=%s user=devin_e2e dbname=devin_e2e password=%s sslmode=disable", os.Getenv("DEVIN_E2E_PG_PORT"), os.Getenv("DEVIN_E2E_DB_PASSWORD")))
+	require.NoError(t, err)
+	a.database = "devin_e2e_" + randomID()
+	_, err = db.Exec("CREATE DATABASE " + pq.QuoteIdentifier(a.database))
+	_ = db.Close()
+	require.NoError(t, err)
+	if fixture != nil {
+		bundle, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt")
+		require.NoError(t, err)
+		if path := os.Getenv("CODEX_PROXY_CERT"); path != "" {
+			certificate, err := os.ReadFile(path)
+			require.NoError(t, err)
+			bundle = append(append(bundle, '\n'), certificate...)
+		}
+		a.trustFile = filepath.Join(dir, "synthetic-ca-bundle.pem")
+		require.NoError(t, os.WriteFile(a.trustFile, append(append(bundle, '\n'), fixture.ca...), 0600))
+	}
 	t.Cleanup(func() { a.stop(t) })
 	a.start(t)
 	return a
@@ -74,12 +99,21 @@ func (a *application) start(t *testing.T) {
 	a.command = exec.Command(a.binary)
 	a.command.Dir = a.dir
 	// Keep the platform proxy and CA settings. All test services use loopback.
-	a.command.Env = append(os.Environ(),
+	var inherited []string
+	for _, variable := range os.Environ() {
+		name, _, _ := strings.Cut(variable, "=")
+		switch name {
+		case "DEVIN_E2E_PAT", "DEVIN_E2E_CREDENTIAL", "SUB2API_API_KEY", "SUB2API_USER_TOKEN", "DEVIN_API_KEY":
+			continue
+		}
+		inherited = append(inherited, variable)
+	}
+	a.command.Env = append(inherited,
 		"DATA_DIR="+a.dir, "AUTO_SETUP=true", "RUN_MODE=standard",
 		"CONFIG_FILE=",
 		"SERVER_HOST=127.0.0.1", "SERVER_PORT="+port, "SERVER_MODE=release",
 		"DATABASE_HOST=127.0.0.1", "DATABASE_PORT="+os.Getenv("DEVIN_E2E_PG_PORT"),
-		"DATABASE_USER=devin_e2e", "DATABASE_DBNAME=devin_e2e", "DATABASE_SSLMODE=disable",
+		"DATABASE_USER=devin_e2e", "DATABASE_DBNAME="+a.database, "DATABASE_SSLMODE=disable",
 		"DATABASE_PASSWORD="+os.Getenv("DEVIN_E2E_DB_PASSWORD"),
 		"REDIS_HOST=127.0.0.1", "REDIS_PORT="+os.Getenv("DEVIN_E2E_REDIS_PORT"), "REDIS_PASSWORD=", "REDIS_DB=0",
 		"ADMIN_EMAIL=admin@devin-e2e.invalid", "ADMIN_PASSWORD="+a.password,
@@ -87,7 +121,14 @@ func (a *application) start(t *testing.T) {
 		"SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true", "BATCH_IMAGE_ENABLED=false",
 		"GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true",
 	)
-	a.command.Stdout, a.command.Stderr = a.log, a.log
+	if a.trustFile != "" {
+		a.command.Env = append(a.command.Env, "SSL_CERT_FILE="+a.trustFile)
+	}
+	a.redactor = &redactedLog{destination: a.log}
+	for _, secret := range []string{a.password, os.Getenv("DEVIN_E2E_DB_PASSWORD"), os.Getenv("DEVIN_E2E_PAT"), os.Getenv("DEVIN_E2E_CREDENTIAL")} {
+		a.redactor.addSecret(secret)
+	}
+	a.command.Stdout, a.command.Stderr = a.redactor, a.redactor
 	if err := a.command.Start(); err != nil {
 		a.command = nil
 		t.Fatal("could not start the test backend")
@@ -130,6 +171,9 @@ func (a *application) stop(t *testing.T) {
 		a.command = nil
 	}
 	if a.log != nil {
+		if a.redactor != nil {
+			a.redactor.flush()
+		}
 		_ = a.log.Close()
 		a.log = nil
 	}
@@ -173,16 +217,39 @@ func api(t *testing.T, a *application, method, path, token string, body any) gjs
 
 func login(t *testing.T, a *application, email, password string) string {
 	t.Helper()
+	a.redactor.addSecret(password)
 	data := api(t, a, "POST", "/auth/login", "", map[string]any{"email": email, "password": password})
 	token := data.Get("access_token").String()
 	require.NotEmpty(t, token)
+	a.redactor.addSecret(token)
 	return token
 }
 
 func TestDevinCloudGateway(t *testing.T) {
 	mode := os.Getenv("DEVIN_E2E_MODE")
-	require.Contains(t, []string{"mock", "live"}, mode, "select mock or live explicitly")
-	model, credential, kind, upstream := fixtureModel, "cog_e2e_fixture", "apikey", ""
+	var fixture *nativeFixture
+	if mode == "mock" {
+		fixture = newNativeFixture(t)
+	}
+	runDevinCloudGateway(t, mode, fixture)
+}
+
+func TestPATPlanStopsBeforeInference(t *testing.T) {
+	if os.Getenv("DEVIN_E2E_MODE") != "mock" {
+		t.Skip("synthetic plan regression runs only in mock mode")
+	}
+	fixture := newNativeFixture(t)
+	runDevinCloudGateway(t, "plan", fixture)
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	require.Empty(t, fixture.chats, "plan mode must not request inference")
+	require.Positive(t, fixture.mints.Load(), "plan must still validate and onboard the PAT")
+}
+
+func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
+	t.Helper()
+	require.Contains(t, []string{"mock", "plan", "live"}, mode, "select mock, plan or live explicitly")
+	pat := "cog_e2e_fixture"
 	maxOutputTokens := 1024
 	if raw := os.Getenv("DEVIN_E2E_MAX_OUTPUT_TOKENS"); raw != "" {
 		var err error
@@ -191,26 +258,18 @@ func TestDevinCloudGateway(t *testing.T) {
 		require.GreaterOrEqual(t, maxOutputTokens, 1)
 		require.LessOrEqual(t, maxOutputTokens, 32768)
 	}
-	var fixture *nativeFixture
-	if mode == "mock" {
-		fixture = newNativeFixture(t)
-		upstream = fixture.server.URL
-	} else {
-		model, credential = os.Getenv("DEVIN_E2E_MODEL"), os.Getenv("DEVIN_E2E_CREDENTIAL")
-		require.NotEmpty(t, model, "select the paid inference model explicitly")
-		require.NotEmpty(t, credential, "live mode requires an independent Devin test credential")
-		kind = os.Getenv("DEVIN_E2E_CREDENTIAL_TYPE")
-		if kind == "" {
-			kind = "apikey"
+	if fixture == nil {
+		pat = os.Getenv("DEVIN_E2E_PAT")
+		if pat == "" {
+			pat = os.Getenv("DEVIN_E2E_CREDENTIAL")
 		}
-		require.Contains(t, []string{"apikey", "oauth"}, kind)
-		upstream = os.Getenv("DEVIN_E2E_UPSTREAM")
-		if upstream == "" {
-			upstream = "https://server.codeium.com"
+		require.True(t, strings.HasPrefix(pat, "cog_") && !strings.ContainsAny(pat, " \t\r\n"), "supply a supported cog_ Devin PAT securely; legacy API and CLI session credentials are not interchangeable")
+		if mode == "live" {
+			require.Equal(t, "true", os.Getenv("DEVIN_E2E_ALLOW_PAID"), "explicit paid-test authorization is required before transmitting the PAT")
 		}
 	}
 	t.Logf("mode=%s; production binary with isolated PostgreSQL/Redis; public group/key routing", mode)
-	a := newApplication(t)
+	a := newApplication(t, fixture)
 	admin := login(t, a, "admin@devin-e2e.invalid", a.password)
 	// Exercise the first-run guard with this disposable synthetic administrator.
 	compliance := api(t, a, "GET", "/admin/compliance", admin, nil)
@@ -233,21 +292,56 @@ func TestDevinCloudGateway(t *testing.T) {
 	group := api(t, a, "POST", "/admin/groups", admin, groupInput)
 	groupID := group.Get("id").Int()
 	require.Positive(t, groupID)
-	creds := map[string]any{"base_url": upstream}
-	if kind == "apikey" {
-		creds["api_key"] = credential
-	} else {
-		creds["access_token"] = credential
+	var proxyID int64
+	if fixture != nil {
+		proxyID = fixture.registerProxy(t, a, admin)
 	}
-	account := api(t, a, "POST", "/admin/accounts", admin, map[string]any{
-		"name": "devin-e2e", "platform": "devin", "type": kind,
-		"credentials": creds, "concurrency": 4, "priority": 1, "rate_multiplier": 1,
-		"group_ids": []int64{groupID}, "extra": map[string]any{"devin_fusion_enabled": false},
-	})
-	accountID := account.Get("id").Int()
-	require.Positive(t, accountID)
-	api(t, a, "POST", fmt.Sprintf("/admin/accounts/%d/models/sync-upstream", accountID), admin, map[string]any{})
+	if mode == "mock" {
+		for _, testCase := range []struct {
+			name  string
+			flag  *atomic.Bool
+			stage string
+		}{
+			{"PAT_CLI_exchange_denied", &fixture.denyMint, "GetSelfDevinSessionToken"},
+			{"PAT_model_discovery_denied", &fixture.denyModels, "GetCliModelConfigs"},
+			{"PAT_empty_model_catalog", &fixture.emptyModels, "no available models"},
+		} {
+			t.Run(testCase.name, func(t *testing.T) {
+				testCase.flag.Store(true)
+				defer testCase.flag.Store(false)
+				id, err := addPATAccount(t, a, admin, "cog_e2e_denied_"+randomID(), groupID, proxyID)
+				require.Zero(t, id)
+				require.ErrorContains(t, err, testCase.stage)
+				accounts := api(t, a, "GET", "/admin/accounts", admin, nil)
+				require.Zero(t, accounts.Get("total").Int(), "failed authorization must not create an account")
+				fixture.mu.Lock()
+				defer fixture.mu.Unlock()
+				require.Empty(t, fixture.chats)
+			})
+		}
+	}
+	accountID, err := addPATAccount(t, a, admin, pat, groupID, proxyID)
+	require.NoError(t, err)
+	account := api(t, a, "GET", fmt.Sprintf("/admin/accounts/%d", accountID), admin, nil)
+	if mode == "mock" {
+		t.Run("PAT_account_added_through_authorization_flow", func(t *testing.T) {
+			require.Equal(t, "apikey", account.Get("type").String())
+			require.Equal(t, "api_key", account.Get("extra.devin_auth_source").String())
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			require.Empty(t, fixture.chats)
+		})
+	}
+	var catalog devin.CatalogSnapshot
+	require.NoError(t, json.Unmarshal([]byte(account.Get("extra.devin_model_catalog").Raw), &catalog))
+	selection, err := selectSmokeModel(catalog.Models, os.Getenv("DEVIN_E2E_MODEL"), maxOutputTokens)
+	require.NoError(t, err)
+	selection.PaidAllowed = mode == "live"
+	selection.Mode = mode
+	saveSmokePlan(t, selection)
+	model := selection.Model
 	userPassword := randomID()
+	a.redactor.addSecret(userPassword)
 	api(t, a, "POST", "/admin/users", admin, map[string]any{
 		"email": "user@devin-e2e.invalid", "password": userPassword, "balance": 100,
 		"concurrency": 4, "allowed_groups": []int64{groupID},
@@ -256,6 +350,7 @@ func TestDevinCloudGateway(t *testing.T) {
 	keyData := api(t, a, "POST", "/keys", user, map[string]any{"name": "e2e-key", "group_id": groupID})
 	key := keyData.Get("key").String()
 	require.NotEmpty(t, key, "public API key creation")
+	a.redactor.addSecret(key)
 	keyID := keyData.Get("id").Int()
 	if mode == "mock" {
 		t.Run("administrator_probe", func(t *testing.T) {
@@ -265,7 +360,7 @@ func TestDevinCloudGateway(t *testing.T) {
 		})
 	}
 
-	t.Run("public_catalog_after_admin_sync", func(t *testing.T) {
+	if !t.Run("public_catalog_after_PAT_onboarding", func(t *testing.T) {
 		body := request(t, a, "GET", "/v1/models", key, nil, 200)
 		ids := gjson.GetBytes(body, "data.#.id").Array()
 		found := false
@@ -275,7 +370,13 @@ func TestDevinCloudGateway(t *testing.T) {
 			}
 		}
 		require.True(t, found, "selected Devin model absent from public key's group catalog")
-	})
+	}) {
+		t.Fatal("public model grant validation failed before inference")
+	}
+	if mode == "plan" {
+		t.Log("PAT onboarding, account persistence and public model discovery completed; no inference requested")
+		return
+	}
 
 	for _, protocol := range []string{"responses", "chat/completions", "messages"} {
 		for _, stream := range []bool{false, true} {

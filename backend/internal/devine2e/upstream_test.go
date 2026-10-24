@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,19 +25,23 @@ const fixtureModel = "swe-2-max"
 // This server speaks native Connect/protobuf over a real socket. The gateway,
 // scheduler, authentication, repositories and billing are the production binary.
 type nativeFixture struct {
-	server     *httptest.Server
-	mints      atomic.Int32
-	rejectJWT  atomic.Bool
-	failChat   atomic.Bool
-	failStream atomic.Bool
-	mu         sync.Mutex
-	chats      []*pb.GetChatMessageRequest
+	server      *httptest.Server
+	proxy       *httptest.Server
+	ca          []byte
+	mints       atomic.Int32
+	denyMint    atomic.Bool
+	denyModels  atomic.Bool
+	emptyModels atomic.Bool
+	rejectJWT   atomic.Bool
+	failChat    atomic.Bool
+	failStream  atomic.Bool
+	mu          sync.Mutex
+	chats       []*pb.GetChatMessageRequest
 }
 
 func newNativeFixture(t *testing.T) *nativeFixture {
 	f := &nativeFixture{}
-	f.server = httptest.NewServer(http.HandlerFunc(f.serveHTTP))
-	t.Cleanup(f.server.Close)
+	f.startTLSProxy(t)
 	return f
 }
 
@@ -53,14 +58,47 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case devin.MintPath:
 		f.mints.Add(1)
+		if f.denyMint.Load() {
+			w.WriteHeader(403)
+			_, _ = io.WriteString(w, `{"code":"permission_denied","message":"synthetic denied credential"}`)
+			return
+		}
+		var body struct {
+			Metadata struct {
+				APIKey string `json:"api_key"`
+			} `json:"metadata"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body) != nil || !strings.HasPrefix(r.Header.Get("X-Api-Key"), "cog_e2e_") || body.Metadata.APIKey != r.Header.Get("X-Api-Key") {
+			http.Error(w, "invalid synthetic PAT exchange", 401)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"sessionToken": "devin-session-token$fixture-session-" + strconv.Itoa(int(f.mints.Load()))})
 	case devin.ModelsPath:
-		writeProto(&pb.GetCliModelConfigsResponse{ClientModelConfigs: []*pb.ClientModelConfig{{
-			ModelUid: fixtureModel, Label: "E2E synthetic model", MaxTokens: 200000,
-			ModelInfo: &pb.ModelInfo{ModelUid: fixtureModel, MaxOutputTokens: 32000,
-				ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}},
-		}}})
+		if f.denyModels.Load() {
+			w.WriteHeader(403)
+			_, _ = io.WriteString(w, `{"code":"permission_denied"}`)
+			return
+		}
+		if f.emptyModels.Load() {
+			writeProto(&pb.GetCliModelConfigsResponse{})
+			return
+		}
+		var query pb.GetCliModelConfigsRequest
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		user, password, ok := r.BasicAuth()
+		if err != nil || proto.Unmarshal(body, &query) != nil || !ok || user != password || !strings.HasPrefix(user, "devin-session-token$fixture-session-") || query.GetMetadata().GetApiKey() != user {
+			http.Error(w, "invalid synthetic model discovery authentication", 401)
+			return
+		}
+		writeProto(&pb.GetCliModelConfigsResponse{ClientModelConfigs: []*pb.ClientModelConfig{
+			{ModelUid: "e2e-expensive", CreditMultiplier: 8, ModelInfo: &pb.ModelInfo{MaxOutputTokens: 32000}},
+			{ModelUid: "e2e-opaque-cheap", CreditMultiplier: .01, ModelInfo: &pb.ModelInfo{HarnessUids: []string{"unknown-harness"}, MaxOutputTokens: 32000}},
+			{
+				ModelUid: fixtureModel, Label: "E2E synthetic model", MaxTokens: 200000, CreditMultiplier: 1,
+				ModelInfo: &pb.ModelInfo{ModelUid: fixtureModel, MaxOutputTokens: 32000,
+					ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}},
+			}}})
 	case devin.UserJWTPath:
 		if f.rejectJWT.Swap(false) {
 			w.Header().Set("Content-Type", "application/json")

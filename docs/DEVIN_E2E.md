@@ -1,12 +1,13 @@
 # Devin 云端 E2E
 
-测试环境在云端从当前 checkout 编译生产后端，使用独立 PostgreSQL、Redis 和临时应用配置。通过正式 HTTP API 创建管理员测试会话、Devin 分组与账号、普通用户及该分组的 API Key，再访问 `/v1/*` 公开接口。不会连接已有 Sub2API 实例，也不使用 `SUB2API_API_KEY` / `SUB2API_USER_TOKEN`。
+测试环境在云端从当前 checkout 编译生产后端，使用独立 PostgreSQL、Redis 和临时应用配置。只需安全配置一个 Devin PAT：测试通过正式授权 API 验证 PAT、发现账号模型并提交本地 Devin 账号，自动创建分组、普通用户及公开 API Key，再访问 `/v1/*`。不要求手工提供模型 UID、组织 ID 或用户邮箱。不会连接已有 Sub2API 实例，也不使用 `SUB2API_API_KEY` / `SUB2API_USER_TOKEN`。
 
 ## 两种验证边界
 
 | 模式 | 实际运行 | 能证明什么 |
 | --- | --- | --- |
 | `mock` | 当前生产后端 + PostgreSQL + Redis + 原生 Connect/protobuf HTTP fixture | 当前代码的认证、分组权限、公开 Key、模型同步、调度、协议转换、用量持久化及重启路径可协同工作 |
+| `plan` | 相同隔离后端与数据库，真实 PAT 授权、添加本地账号和模型发现；不生成内容 | 本次 PAT 能通过原生 CLI 会话交换，并完成账号添加、模型选择和公开 Key 目录校验 |
 | `live` | 相同隔离后端与数据库，直连独立 Devin 测试账号 | 所选模型与账号在本次执行时能经过公开网关完成真实 Devin 推理 |
 
 Mock 不证明真实 Devin 可用；测试已有远端 Sub2API 只能证明该远端版本，不能验证当前 checkout。管理员账号探测成功也不能替代公开 Key 和分组调度测试。
@@ -31,7 +32,8 @@ GOTOOLCHAIN=go1.27.3 GOMAXPROCS=2 GOFLAGS=-p=2 make test-devin-e2e
 
 Mock 覆盖：
 
-- 管理 API 同步 Devin 模型后，普通 Key 的 `/v1/models` 可发现模型。
+- 通过 `/admin/devin/auth-sessions` 的 Key 授权和 `/commit` 完成与页面相同的新账号添加流程；普通 Key 的 `/v1/models` 可发现该账号获授的模型。
+- PAT 会话交换被拒绝、模型发现被拒绝或目录为空时不提交账号、不发起推理；错误只保留已知 RPC 阶段，不打印凭据和上游原始文本。
 - `/v1/responses`、`/v1/chat/completions`、`/v1/messages` 的 JSON 和 SSE 结果；要求生成文本、完成事件及 JSON 用量有效。
 - 公开 WebSocket Responses 预热不发起推理；function 工具调用、工具结果与 `previous_response_id` 续接保留原生会话。
 - 长期 Key 在输出前收到 401 时只恢复一次；无效公开 Key 和无权绑定的独占分组被拒绝。
@@ -39,22 +41,33 @@ Mock 覆盖：
 - 自定义与推断 Fusion 配对经过公开 Key 调度可完成 Lead 委派、Sidekick 报告、Lead 审查三次原生调用，两个角色使用独立上下文；使用显式合成价格验证计费路径。
 - 原生 `invalid_argument` 在输出前返回 HTTP 错误，在部分流式输出后返回终止失败，不会报告成功或重放推理。
 
-合成 fixture 只存在于 `devine2e` build tag 的测试包，不进入发布二进制。它使用仓库的 protobuf schema，因此不能独立发现该 schema 与真实上游同时发生的偏差；需要 live 验证补足。此套测试尚不覆盖浏览器 OAuth 登录、图片、Fusion 故障恢复与后台压缩、完整的 OMO/OMP 客户端或所有客户端 UI。
+合成 fixture 只存在于 `devine2e` build tag 的测试包，不进入发布二进制。为了验证正式新账号流程使用的默认原生地址，mock 配置一次性的本地账号代理，并让后端在保留现有 CA 的基础上信任临时测试 CA；TLS 校验保持开启，连接只到本地 fixture。plan/live 不使用这套代理或测试 CA。fixture 使用仓库的 protobuf schema，不能独立发现该 schema 与真实上游同时发生的偏差；需要真实验证补足。此套测试尚不覆盖浏览器 OAuth 登录、图片、Fusion 故障恢复与后台压缩、完整的 OMO/OMP 客户端或所有客户端 UI。
 
 ## 真实 Devin 上游
 
-为云端测试准备独立的 Devin 测试账号及可撤销凭据、选择有权限的真实模型 UID，并明确允许使用其额度。不要复用用户侧服务或从现有服务导出账号凭据。
+使用独立测试身份的现有 PAT，通过云端秘密管理注入 **`DEVIN_E2E_PAT`**，即可自动关联该凭据对应的原生账号并走完账号添加流程。不要把真实 PAT 写进命令、聊天、仓库或报告；测试不会创建外部 Devin 用户，不会导出或修改用户侧服务的凭据。旧变量 `DEVIN_E2E_CREDENTIAL` 暂保留为相同 `cog_` 凭据的兼容别名。
 
-需要将 `DEVIN_E2E_CREDENTIAL` 通过秘密管理注入测试进程；`DEVIN_E2E_CREDENTIAL_TYPE` 为 `apikey`（默认，长期 Key）或 `oauth`（导入会话）。`DEVIN_E2E_MODEL` 必须明确设置，测试不猜测模型。`DEVIN_E2E_UPSTREAM` 可覆盖默认的 `https://server.codeium.com`。
+[官方鉴权说明](https://docs.devin.ai/api-reference/authentication)和 [PAT 说明](https://docs.devin.ai/api-reference/personal-access-tokens)区分人类 PAT 与服务用户 Key；两者都使用 `cog_` 前缀。前缀不能证明能通过 Sub2API 所用的原生 CLI 会话交换。测试会实际经过 `GetSelfDevinSessionToken` 和 `GetCliModelConfigs` 验证，遇到 401/403 或空目录立即报告不兼容的阶段，不会改用服务用户、浏览器会话或猜测其他接口。旧 `apk_*`、`apk_user_*`、CLI JWT 和 PAT 不是可互换的凭据。
+
+先完成凭据传输与临时存储范围的确认，再运行不发起推理的 plan：
 
 ```bash
-# 凭据由 Secret 注入；不要把真实值写进命令历史、仓库或报告。
-export DEVIN_E2E_MODEL='<测试账号目录中的模型 UID>'
-export DEVIN_E2E_CREDENTIAL_TYPE=apikey
-make test-devin-live
+# 唯一必需的 Secret DEVIN_E2E_PAT 已由秘密管理注入。
+make test-devin-plan
+
+# 审阅 smoke-plan.json 的所选模型和 token 上限，获得付费调用授权后：
+DEVIN_E2E_ALLOW_PAID=true make test-devin-live
 ```
 
-Live 执行模型同步与六次推理请求（三种 HTTP 协议 × JSON/SSE），正常网关恢复机制可能重试失败请求。每次默认限制 1024 个输出 token，可通过 `DEVIN_E2E_MAX_OUTPUT_TOKENS` 在 1–32768 范围调整，以适配所选模型的输出要求。会消耗真实上游额度；无需为每次 PR 自动调用真实账号。使用独立低额度账号控制成本。模型必须支持三种网关适配需要的基础文本能力。
+模型从已添加账号的目录自动选择：排除禁用、容量受限、Fusion、未知 harness、需要 `AssignModel` 的路由和输出上限不足的模型；优先选择正数、有限的 `credit_multiplier` 最低者，同价按 UID 排序。零值或缺失价格视为未知，全部未知时按 UID 稳定选择并明确报告未知价格，不声称免费。`DEVIN_E2E_MODEL` 仅用于人工定向复现时覆盖选择，仍必须属于该账号可用的直接模型，不是必填项。该策略依据账号目录中的相对 credit 倍率，不将其解释成美元报价或保证最低实际费用。
+
+Live 执行六个网关推理请求（三种 HTTP 协议 × JSON/SSE），正常网关恢复机制可能重试失败请求。每次默认限制 1024 个输出 token，可通过 `DEVIN_E2E_MAX_OUTPUT_TOKENS` 在 1–32768 范围调整。必须显式设置 `DEVIN_E2E_ALLOW_PAID=true`，否则在依赖启动或 PAT 传输之前退出。输出上限与请求数都不是供应商金额硬上限；付费授权与低额度测试账号仍需由用户安排。plan 不发起生成请求，但会进行真实认证和模型发现，不能在没有凭据传输授权时运行。
+
+### 传输目标与存储范围
+
+PAT 经 loopback 送入临时 Sub2API 的授权 API；该实例通过 HTTPS 将 PAT 放入 `X-Api-Key` 和 JSON metadata，发送到 **`server.codeium.com`** 的 `/exa.seat_management_pb.SeatManagementService/GetSelfDevinSessionToken`。交换得到的会话凭据用于同域的模型目录 RPC，以及 live 模式的后续原生请求。此流程无需用 PAT 调用 `api.devin.ai/v3/self`、枚举组织或创建外部账号。
+
+PAT 和派生会话只暂存在本次隔离实例的 PostgreSQL tmpfs 和 Redis 内存；测试退出后删除容器。凭据不写入模型计划和 CI 归档，后端日志按已知凭据及敏感字段脱敏，测试结果不输出授权响应正文。真实 PAT 不通过命令参数传给后端进程，也不作为该进程的继承环境变量；它只通过正式授权 API 交给隔离实例。原始 PAT 不发送到已有远端 Sub2API。
 
 托管云环境应允许访问 `server.codeium.com`，以及上游实际返回的 API server 域名。仅放行 `static.devin.ai` 不能访问原生 RPC。浏览器授权额外涉及 `api.devin.ai`，不属于本套测试。保留平台提供的代理、凭据域名绑定与 CA 验证；域名被策略拒绝时需要通过环境配置流程更新，不能通过关闭代理绕过。凭据若是代理注入占位符，必须能在正确目标域名的请求中注入，不能把限定到远端 Sub2API 的 Key 当作 Devin 凭据。
 
@@ -62,7 +75,7 @@ Live 执行模型同步与六次推理请求（三种 HTTP 协议 × JSON/SSE）
 
 `Devin E2E` workflow 对后端改动的 PR 和 main push 自动运行 mock；不向 PR 提供真实凭据。
 
-如需 live，在 GitHub Environment `devin-e2e-live` 中配置 secret `DEVIN_E2E_CREDENTIAL` 和 variable `DEVIN_E2E_MODEL`（可选 `DEVIN_E2E_CREDENTIAL_TYPE`），按团队要求配置审批人与分支限制，然后在 main 手动选择 workflow 的 `live` 模式。本次代码添加不会自行创建这些持久配置或触发付费测试。
+如需真实接入，在 GitHub Environment `devin-e2e-live` 中配置唯一必需的 secret **`DEVIN_E2E_PAT`**，按团队要求配置审批人与分支限制。main 手动选择 `plan` 可完成授权、添加账号和发现；选择 `live` 还必须勾选 `allow_paid`，否则不启动真实作业。PR、push 和默认手动操作只运行 mock。本次代码添加不会创建这些持久配置、生成 PAT 或触发真实传输。
 
 ## 结果与停止
 
@@ -70,10 +83,11 @@ Live 执行模型同步与六次推理请求（三种 HTTP 协议 × JSON/SSE）
 
 - `results.jsonl`：Go 测试事件，明确包含 mock/live 模式；测试失败会返回非零退出码。
 - `provenance.txt`：checkout commit、未提交文件数、Go 版本和后端二进制 SHA-256。
-- `backend-private.log`：仅本地排查的私有日志。不要上传或分享；可能包含应用运行诊断。
+- `smoke-plan.json`：自动发现的模型、相对 credit 倍率（若已知）、请求数、输出上限及付费开关；明确没有供应商金额硬上限。
+- `backend-private.log`：脱敏后的本地诊断日志。仍不上传或分享。
 - `server`：本次从源码构建的后端。
 
-CI 只上传测试结果和 provenance，不上传后端日志、二进制、应用配置或数据库。临时管理员密码、JWT 和用户 Key 不打印；临时应用目录由 Go 测试清理。该目录和本地构建产物默认不纳入 Git。
+CI 只上传测试结果、provenance 和模型计划，不上传后端日志、二进制、应用配置或数据库。临时管理员密码、JWT 和用户 Key 不打印；临时应用目录由 Go 测试清理。该目录和本地构建产物默认不纳入 Git。
 
 正常退出或 Ctrl-C 会停止后端并删除本次 Compose 容器和网络。若进程被强制杀死，先用 `docker compose ls` 确认本次 `devin-e2e-<进程号>` project，再清理该 project：
 
