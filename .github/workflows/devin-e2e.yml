@@ -1,0 +1,164 @@
+name: Devin E2E
+
+on:
+  pull_request:
+    paths:
+      - 'Makefile'
+      - 'backend/**'
+      - 'deploy/devin-e2e.sh'
+      - 'deploy/docker-compose.devin-e2e.yml'
+      - 'deploy/devin-agent-e2e.sh'
+      - 'tools/devin-e2e-clients/**'
+      - '.github/workflows/devin-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Makefile'
+      - 'backend/**'
+      - 'deploy/devin-e2e.sh'
+      - 'deploy/docker-compose.devin-e2e.yml'
+      - 'deploy/devin-agent-e2e.sh'
+      - 'tools/devin-e2e-clients/**'
+      - '.github/workflows/devin-e2e.yml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Plan onboards the PAT without inference; live consumes test-account credits.'
+        type: choice
+        options: [mock, plan, live]
+        default: mock
+      allow_paid:
+        description: 'Authorize selected batch: protocol 6; agent canary at most 3; agent matrix at most 48 gateway requests. No provider spending cap.'
+        type: boolean
+        default: false
+      suite:
+        description: 'Protocol probes or pinned real client processes'
+        type: choice
+        options: [protocol, agents]
+        default: protocol
+      agent_batch:
+        description: 'Canary: one OMP direct read; matrix: 42 client launches, both model kinds'
+        type: choice
+        options: [canary, matrix]
+        default: canary
+
+permissions:
+  contents: read
+
+jobs:
+  mock:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'mock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Exercise the production gateway with synthetic Devin RPCs
+        env:
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-e2e
+        run: make test-devin-e2e
+      - name: Save test results (exclude private backend log and binary)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-e2e-mock
+          path: |
+            ${{ runner.temp }}/devin-e2e/results.jsonl
+            ${{ runner.temp }}/devin-e2e/provenance.txt
+            ${{ runner.temp }}/devin-e2e/smoke-plan.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  clients-mock:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'mock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tools/devin-e2e-clients/package-lock.json
+      - name: Install locked Linux clients without lifecycle scripts
+        run: npm ci --prefix tools/devin-e2e-clients --ignore-scripts --omit=optional --no-audit --no-fund
+      - name: Check runner boundaries
+        run: python3 -m unittest discover -s tools/devin-e2e-clients -p 'test_*.py'
+      - name: Real clients through current gateway and synthetic Devin
+        env:
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-agents
+        run: make test-devin-agent-e2e
+      - name: Save structural client and role evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-agent-mock
+          path: |
+            ${{ runner.temp }}/devin-agents/results.jsonl
+            ${{ runner.temp }}/devin-agents/provenance.txt
+            ${{ runner.temp }}/devin-agents/agent-*.json
+            ${{ runner.temp }}/devin-agents/fusion-*.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  live:
+    # Never run PR code with a real credential; opt in on the default branch.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'plan' || (inputs.mode == 'live' && inputs.allow_paid)) && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: devin-e2e-live
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v6
+        if: inputs.suite == 'agents' && inputs.mode != 'plan'
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tools/devin-e2e-clients/package-lock.json
+      - name: Onboard the PAT, discover models, and run the authorized mode
+        env:
+          DEVIN_E2E_PAT: ${{ secrets.DEVIN_E2E_PAT }}
+          DEVIN_E2E_MODE_INPUT: ${{ inputs.mode }}
+          DEVIN_E2E_ALLOW_PAID: ${{ inputs.allow_paid && 'true' || 'false' }}
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-e2e
+          DEVIN_E2E_SUITE_INPUT: ${{ inputs.suite }}
+          DEVIN_E2E_AGENT_BATCH: ${{ inputs.agent_batch }}
+        run: |
+          if [ "$DEVIN_E2E_SUITE_INPUT" = agents ]; then
+            if [ "$DEVIN_E2E_MODE_INPUT" != plan ]; then
+              npm ci --prefix tools/devin-e2e-clients --ignore-scripts --omit=optional --no-audit --no-fund
+            fi
+            bash deploy/devin-agent-e2e.sh "$DEVIN_E2E_MODE_INPUT"
+          else
+            bash deploy/devin-e2e.sh "$DEVIN_E2E_MODE_INPUT"
+          fi
+      - name: Save live verification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-e2e-live
+          path: |
+            ${{ runner.temp }}/devin-e2e/results.jsonl
+            ${{ runner.temp }}/devin-e2e/provenance.txt
+            ${{ runner.temp }}/devin-e2e/smoke-plan.json
+            ${{ runner.temp }}/devin-e2e/agent-*.json
+            ${{ runner.temp }}/devin-e2e/fusion-*.json
+          if-no-files-found: ignore
+          retention-days: 7

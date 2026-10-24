@@ -1,0 +1,15 @@
+# Candidate for @openai/codex 0.164.0. Not a passed client-process test.
+# Render only for an isolated client; never replace the task's CODEX_HOME.
+model_provider = "sub2api-e2e"
+model = "REPLACE_WITH_DISCOVERED_MODEL_UID"
+disable_response_storage = true
+
+[model_providers.sub2api-e2e]
+name = "Isolated Sub2API Devin E2E"
+base_url = "http://127.0.0.1:REPLACE_PORT/v1"
+env_key = "DEVIN_E2E_GATEWAY_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
