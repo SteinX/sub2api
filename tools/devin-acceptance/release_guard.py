@@ -12,13 +12,6 @@ import subprocess
 from acceptance import PREFIX, validate
 from github_snapshot import collect
 
-RUNTIME_PREFIXES = ('backend/internal/service/', 'backend/internal/repository/', 'backend/internal/handler/',
-                    'backend/internal/server/', 'backend/internal/pkg/devin/', 'backend/internal/pkg/apicompat/',
-                    'frontend/src/components/keys/', 'frontend/src/utils/devin', 'frontend/src/i18n/',
-                    'tools/devin-acceptance/', 'tools/devin-e2e-clients/', 'deploy/devin-',
-                    '.github/workflows/devin-e2e.yml', '.github/workflows/release.yml')
-
-
 def git(*arguments):
     return subprocess.check_output(['git', *arguments], stderr=subprocess.DEVNULL, timeout=30).decode().strip()
 
@@ -28,12 +21,9 @@ def requires_acceptance(commit):
         git('cat-file', '-e', commit + ':backend/internal/service/openai_gateway_devin_fusion.go')
     except subprocess.CalledProcessError:
         return False  # Preserve historical releases predating the Devin feature.
-    try:
-        previous = git('describe', '--tags', '--match', 'v*', '--abbrev=0', commit + '^')
-        files = git('diff', '--name-only', previous, commit).splitlines()
-    except subprocess.CalledProcessError:
-        files = git('ls-tree', '-r', '--name-only', commit).splitlines()
-    return any(name.startswith(RUNTIME_PREFIXES) for name in files)
+    # A failed release still leaves its tag behind. Never treat a nearby tag
+    # (or a documentation-only diff from it) as evidence of prior acceptance.
+    return True
 
 
 def evaluate(ref, repository):

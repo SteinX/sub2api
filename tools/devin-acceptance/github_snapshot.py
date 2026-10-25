@@ -13,10 +13,20 @@ import subprocess
 from pathlib import Path
 
 
+class SnapshotError(ValueError):
+    def __init__(self, stage, kind):
+        super().__init__('complete GitHub snapshot unavailable')
+        self.stage, self.kind = stage, kind
+
+
 def api(route, *arguments):
     proc = subprocess.run(['gh', 'api', '--paginate', '--slurp', route, *arguments], capture_output=True, timeout=90)
     if proc.returncode:
-        raise ValueError('GitHub acceptance source unavailable')
+        stage = next((name for name, marker in [('review_threads', 'graphql'), ('check_runs', '/check-runs?'), ('statuses', '/statuses?'),
+                     ('reviews', '/reviews?'), ('workflow_jobs', '/jobs?'), ('workflows', '/actions/runs?'), ('pull_request', '/pulls/')] if marker in route), 'github')
+        error = proc.stderr.decode(errors='replace').lower()
+        kind = 'access_denied' if any(marker in error for marker in ['forbidden', '403', 'not accessible']) else 'unavailable'
+        raise SnapshotError(stage, kind)
     return json.loads(proc.stdout)
 
 
@@ -37,7 +47,7 @@ def collect(repository, pr_number, commit, independent_review):
     job_metadata = {}
     self_check_ids = set()
     for run in runs:
-        for page in api(f"{root}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100"):
+        for page in api(f"{root}/actions/runs/{run['id']}/jobs?filter=all&per_page=100"):
             for job in page['jobs']:
                 check_id = int(job['check_run_url'].rsplit('/', 1)[-1])
                 job_metadata[check_id] = {'workflow': run['path'].rsplit('/', 1)[-1], 'event': run['event']}
@@ -102,6 +112,9 @@ def main():
         state = collect(args.repository, args.pr, args.commit, json.loads(args.review.read_text()))
         args.output.write_text(json.dumps(state, indent=2) + '\n')
         args.output.chmod(0o600)
+    except SnapshotError as error:
+        print(json.dumps({'collected': False, 'stage': error.stage, 'reason': error.kind}))
+        return 1
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
         print(json.dumps({'collected': False, 'reason': 'complete_exact_sha_review_security_snapshot_unavailable'}))
         return 1

@@ -28,7 +28,7 @@ make test-devin-acceptance
 
 固定版本：OpenCode `1.19.4`、oh-my-opencode 插件 `5.1.44`（宿主 OpenCode）、OMP `18.12.6`、Bun `1.4.4`。这不是用户反馈里的 Senpi engine OMO；Senpi 的结果不可互相替代。模拟成员为 `swe-2-max` / `e2e-sidekick`，不是对线上 `swe-2-high` 或所有 effort 档位的验收。报告记录实际物理 UID、原生角色调用和隔离上下文哈希。
 
-目前新增项目旅程只证明正常关闭后重开同一会话。上下文压力、客户端 compact/fork/worker、在途断线恢复尚未覆盖时必须保留 `not_run`，不得用后端内部压缩用例代替。关闭 OMP pruning 会增加历史占用，不能据此承诺长会话兼容。
+基础项目旅程证明正常关闭后重开同一会话。另可用 `DEVIN_JOURNEY_CAPABILITIES=true` 启动实际 OMP direct/compatibility RPC 探测：16 个多行合成文件，要求至少 128 KiB 实际进入原生模型历史，再检查 compact、空闲客户端 SIGKILL 后恢复和 fork。合成 token 用量随实际输入字节增长，并非供应商用量。失败阶段及未执行的后续能力分别保留；开启该探测时未完成必需能力会使测试失败。其他客户端、Fusion 的这些能力、worker 和在途断线仍不得用内部执行器或空闲进程恢复代替。关闭 OMP pruning 会增加历史占用，不能据此承诺长会话兼容。
 
 ## 价格与配置合同
 
@@ -51,13 +51,13 @@ make test-devin-acceptance
 
 `acceptance.py verify --mode client_mock` 只检查模拟回归证据。`user_e2e` 还要求真实服务、部署产品入口、全部必需能力及价格证据；存在未验收或不支持的必需组合时不得宣称完整验收。默认 Fusion 的页面拦截也不能签发真实任务通过。
 
-发布含 Devin/网关相关变更时，`Release.prepare` 要求带验收注释的 annotated tag。`release_guard.py` 将测试 SHA/tree 与待发布源核对，重新读取全部分页的 exact-SHA Actions/check runs、commit statuses、PR reviews 和未解决 review threads。必需集合显式包含：
+发布含 Devin 功能的版本时，`Release.prepare` 要求带验收注释的 annotated tag。`release_guard.py` 将测试 SHA/tree 与待发布源核对，重新读取全部分页的 exact-SHA Actions/check runs、commit statuses、PR reviews 和未解决 review threads。必需集合显式包含：
 
 - `backend-ci.yml`：shell、test、frontend、golangci-lint、release-helpers。
 - `security-scan.yml`：backend-security、frontend-security。
 - `devin-e2e.yml`：mock、clients-mock、user-journeys-mock。
 
-缺失检查、仍运行、失败、未解决评审、安全扫描未完成均阻止发布。只排除当前 Release 自身以避免循环等待；必需安全检查不能跳过。独立评审必须指向不可变 base/head，补丁哈希采用 `git diff --binary --full-index BASE HEAD | sha256sum`，发布时重新计算。发布注释是维护者的可审计声明，不是密码学证明；它不能代替运行证据、分支权限和独立评审。
+缺失检查、仍运行、失败、未解决评审、安全扫描未完成均阻止发布。准备阶段及每个外部发布步骤前都重新查询。只排除当前 Release 自身以避免循环等待；必需安全检查不能跳过。独立评审必须指向不可变 base/head，补丁哈希采用 `git diff --binary --full-index BASE HEAD | sha256sum`，发布时重新计算。发布注释是维护者的可审计声明，不是密码学证明；它不能代替运行证据、分支权限和独立评审。
 
 使用已有 `gh` 认证读取快照：
 
@@ -74,4 +74,15 @@ python3 tools/devin-acceptance/acceptance.py tag-note --mode user_e2e \
 
 当前阶段未授权新一轮真实生成或线上写入。部署管理 Token 已过期，实际 group/channel 的 SWE 规则仍未核明；这些步骤暂停，不能以模拟价格替代。应先安全恢复只读访问并核实两个真实成员的价格来源、group/channel 生效范围和服务版本；不输出或复制秘密。
 
-后续需单独审阅的建议：只使用既有 `sub2api.steinbox.top` 公共 Key 服务及其 `server.codeium.com` 上游，发送合成工程。七个支持配置各至多十个公开请求，三客户端 Fusion 长旅程各至多二十四个，共最多 142；单并发、每次最多输出 1024 token、整批 60 分钟、本地累计金额最多 $3，单 turn 保留 64 内部调用/20 工具/2 交接/300 秒/$0.50 的上界。实际模型与明确价格确认后才能锁定计划；首次失败、预算拒绝或发送结果不明即停，不自动重跑，不重置累计预算。已有有效证据先复用，不为凑覆盖重发。上述是未来批准提案，不是现有授权，也不是供应商扣费硬上限。
+所需访问与凭据一次汇总如下；值只由秘密管理注入，不写入聊天、CLI 参数、配置文件或日志：
+
+| 用途 | 必需访问/凭据 | 传输及持久化边界 |
+| --- | --- | --- |
+| 部署现状和真实价格前置核验 | 刷新的 `SUB2API_USER_TOKEN`；沿用现有权限，只做获准只读操作 | 仅现有 Sub2API 管理服务；不改价格、分组或权限 |
+| 现有公开调用方对照 | 现有 Devin 分组 `SUB2API_API_KEY` | 仅其绑定的 Sub2API 服务；客户端使用环境变量引用 |
+| 最终代码的真实用户 E2E | 经审阅的临时完整产品预览实例；`DEVIN_E2E_PAT` 安全引用；一次性 UI 测试用户及公共 Key | 需另行批准在 loopback 临时实例添加本地账号、分组和真实价格配置；PAT/派生会话只在临时 SQL/Redis，真实上游仍仅 `server.codeium.com`；不把现有线上 Key/Token 转发到预览实例 |
+| 发布前当前检查和评审 | Actions 已有 GitHub token 的读能力 | 只读 checks、Actions、statuses、PR reviews/review threads。权限不足时拒绝验收，不能改为过滤后的快照或复制其他凭据 |
+
+预览必须提供完整产品门户入口，不能继续用孤立弹窗认证为真实用户 E2E；实际业务路由与价格规则须在开始前核实。若改在已有线上实例验收最终代码，还需要独立部署/线上写入授权，本次不包含该授权。Senpi engine 的 OMO 二进制/分发来源尚待核实，不可用 oh-my-opencode 插件的结果替代。
+
+后续需单独审阅的批次建议：七个已支持配置各至多十个公开请求，三客户端 Fusion 长旅程各至多二十四个，共最多 142；如两个普通 HTTP 对照也需要重验，合计上限为 144。单并发、每次最多输出 1024 token、整批 60 分钟、本地累计金额最多 $3，单 turn 保留 64 内部调用/20 工具/2 交接/300 秒/$0.50 的上界。只向批准的 Sub2API 实例及 `server.codeium.com` 发送合成工程。目标优先锁定反馈中的 `claude-opus-5-5-medium` / `swe-2-high`，但必须先核实真实授权和明确价格；缺价或需换模型即停在零生成前置阶段。尚未取得 Senpi 的覆盖不能列为通过，若新增其独立矩阵要另列请求数后批准。首次失败、预算拒绝或发送结果不明即停，不自动重跑，不重置累计预算。已有有效证据先复用，不为凑覆盖重发。上述是未来批准提案，不是现有授权，也不是供应商扣费硬上限。

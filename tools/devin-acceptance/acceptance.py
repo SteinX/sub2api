@@ -24,7 +24,8 @@ REQUIRED_CHECKS = {
 }
 CLIENT_PINS = {'opencode': ('opencode-ai', '1.19.4'), 'omo': ('oh-my-opencode', '5.1.44'),
                'omp': ('@oh-my-pi/pi-coding-agent', '18.12.6')}
-SECRET_KEYS = {'api_key', 'apikey', 'authorization', 'access_token', 'refresh_token', 'pat', 'cookie', 'raw_log', 'prompt', 'content'}
+SECRET_KEYS = {'api_key', 'apikey', 'authorization', 'access_token', 'refresh_token', 'pat', 'cookie', 'raw_log', 'prompt', 'content',
+               'account_id', 'group_id', 'channel_id', 'user_id', 'session_id', 'email', 'stdout', 'stderr', 'request_body', 'response_body'}
 
 
 def read_report(path):
@@ -69,6 +70,8 @@ def validate(report, mode, commit, tree, state=None):
         parts = ident.split('/')
         if len(parts) != 3 or case.get('model_kind') != parts[1]:
             errors.append(ident + ':model_kind_mismatch')
+        if mode == 'user_e2e' and (case.get('tier') != 'user_e2e' or case.get('eligible_for_real_e2e') is not True):
+            errors.append(ident + ':case_not_real_e2e_eligible')
         refusal = case.get('handoff', {})
         if (mode == 'client_mock' and ident == 'omp/fusion/default' and case.get('status') == 'unsupported_by_product'
                 and refusal.get('blocked') is True and refusal.get('source') == 'UseKeyModal browser refusal'
@@ -123,11 +126,15 @@ def validate(report, mode, commit, tree, state=None):
                 or case.get('task', {}).get('client_tests_succeeded') is not True or case.get('task', {}).get('test_command_verified') is not True
                 or case.get('task', {}).get('bash_exit_code') != 0 or case.get('resume', {}).get('tools', {}).get('read', 0) < 1):
             errors.append(ident + ':actual_client_tools_missing')
+        if case.get('capabilities_required') is True:
+            extended = case.get('capability_evidence', {})
+            if extended.get('status') != 'passed' or any(extended.get(name) != 'passed' for name in ['context_pressure', 'compact', 'fork', 'idle_process_recovery']):
+                errors.append(ident + ':required_client_capabilities_failed')
     if mode == 'client_mock':
         if report.get('tier') != 'client_mock' or report.get('real_upstream') is not False or report.get('eligible_for_real_e2e') is not False:
             errors.append('mock_tier_misrepresented')
         return errors
-    if report.get('tier') != 'user_e2e' or report.get('real_upstream') is not True:
+    if report.get('tier') != 'user_e2e' or report.get('real_upstream') is not True or report.get('eligible_for_real_e2e') is not True:
         errors.append('real_upstream_not_verified')
     if source.get('dirty') is not False:
         errors.append('dirty_source')
@@ -166,7 +173,10 @@ def validate(report, mode, commit, tree, state=None):
         errors.append('independent_review_not_cleared')
     latest_reviews = {}
     for review in state.get('reviews', []):
-        latest_reviews[review.get('reviewer')] = review.get('state')
+        if review.get('state') in {'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'}:
+            latest_reviews[review.get('reviewer')] = review.get('state')
+        elif review.get('state') == 'PENDING':
+            errors.append('review_pending_or_changes_requested')
     if any(value in {'CHANGES_REQUESTED', 'PENDING'} for value in latest_reviews.values()):
         errors.append('review_pending_or_changes_requested')
     if state.get('unresolved_findings') != 0:

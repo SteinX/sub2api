@@ -61,6 +61,7 @@ type agentAdmission struct {
 	model         string
 	forwarded     int
 	maxForwarded  int
+	maxAttempts   int
 	requests      []*agentRequest
 	interruptFile string
 	active        chan struct{}
@@ -68,9 +69,15 @@ type agentAdmission struct {
 
 type agentRequestContext struct{}
 
-func newAgentAdmission(t *testing.T, app *application, model string, maxForwarded int) *agentAdmission {
+func newAgentAdmission(t *testing.T, app *application, model string, maxForwarded int, attemptLimits ...int) *agentAdmission {
 	t.Helper()
-	p := &agentAdmission{model: model, maxForwarded: maxForwarded, active: make(chan struct{}, 1)}
+	maxAttempts := 12
+	if len(attemptLimits) > 0 {
+		require.Len(t, attemptLimits, 1)
+		maxAttempts = attemptLimits[0]
+		require.Positive(t, maxAttempts)
+	}
+	p := &agentAdmission{model: model, maxForwarded: maxForwarded, maxAttempts: maxAttempts, active: make(chan struct{}, 1)}
 	target, err := url.Parse(app.base)
 	require.NoError(t, err)
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -143,7 +150,7 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 			}
 		}
 		p.requests = append(p.requests, record)
-		if len(p.requests) > 12 || p.forwarded >= p.maxForwarded {
+		if len(p.requests) > p.maxAttempts || p.forwarded >= p.maxForwarded {
 			p.mu.Unlock()
 			http.Error(w, "E2E request budget exhausted", 402)
 			return

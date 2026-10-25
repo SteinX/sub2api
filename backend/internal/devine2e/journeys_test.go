@@ -47,10 +47,12 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	extra["devin_fusion_profiles"] = []fusion.Profile{profile}
 	api(t, app, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra})
 	reports := []map[string]any{}
+	billing := map[string]any{"verified": false, "tier": "synthetic billing; not a provider invoice"}
 	defer func() {
 		writeAgentArtifact(t, "client-journeys.json", map[string]any{
 			"schema_version": 1, "tier": "client_mock", "real_upstream": false, "eligible_for_real_e2e": false,
 			"source": journeySource(t, app), "cases": reports,
+			"billing":    billing,
 			"unverified": []string{"real upstream", "deployed existing group/channel rules", "OMO Senpi identity", "unexpected disconnect", "client compact", "client fork", "client workers"},
 		})
 	}()
@@ -75,8 +77,9 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					t.Cleanup(func() { _ = os.RemoveAll(directory) })
 					fixture.journey.mu.Lock()
 					fixture.journey.workspace = filepath.Join(directory, "workspace")
+					fixture.journey.maxContextBytes = 0
 					fixture.journey.mu.Unlock()
-					admission := newAgentAdmission(t, app, model, 40)
+					admission := newAgentAdmission(t, app, model, 40, 40)
 					fixture.mu.Lock()
 					nativeStart := len(fixture.chats)
 					fixture.mu.Unlock()
@@ -126,8 +129,13 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					fixture.mu.Unlock()
 					report["observed_physical_models"], report["observed_role_calls"] = uids, roles
 					report["native_context_hashes"] = contexts
+					fixture.journey.mu.Lock()
+					report["native_context_max_bytes"] = fixture.journey.maxContextBytes
+					fixture.journey.mu.Unlock()
 					report["reasoning_scope"] = map[string]string{"model_uid_effort": "fixture UID swe-2-max", "client_thinking": map[bool]string{true: "off", false: "client default"}[client == "omp"]}
 					report["public_requests"], report["http_attempts"], report["error_codes"] = forwarded, len(requests), errors
+					capabilitiesRequired := os.Getenv("DEVIN_JOURNEY_CAPABILITIES") == "true" && client == "omp" && kind == "direct" && configProfile == "compatibility"
+					report["capabilities_required"] = capabilitiesRequired
 					if report["status"] == "unsupported_by_product" {
 						report["expectation"] = "product refuses known incompatible configuration; task not run"
 					}
@@ -146,6 +154,12 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					}
 					require.NoError(t, runErr, "real CLI project task failed; structural evidence retained")
 					require.Equal(t, "passed", report["status"])
+					if capabilitiesRequired {
+						capabilities, ok := report["capability_evidence"].(map[string]any)
+						require.True(t, ok)
+						require.Equal(t, "passed", capabilities["status"], "actual OMP capabilities did not complete; failure evidence retained")
+						require.GreaterOrEqual(t, report["native_context_max_bytes"], 131072, "pressure must actually reach forwarded model history, not just files on disk")
+					}
 					require.Positive(t, uids[fixtureModel])
 					if kind == "fusion" {
 						require.Positive(t, uids[fixtureSidekick])
@@ -154,11 +168,27 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 						}
 					}
 					verifyAgentUsage(t, app, keyID, usageBefore+nativeCount)
+					if kind == "fusion" {
+						verifyAgentFusion(t, app, keyID, requests, "journey-"+client)
+					}
 				})
 			}
 		}
 	}
 	require.NotEmpty(t, reports, "case filter did not select any journey")
+	fixture.mu.Lock()
+	nativeTotal := len(fixture.chats)
+	fixture.mu.Unlock()
+	db := agentDatabase(t, app)
+	require.Eventually(t, func() bool {
+		var rows, unique, charged int
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		err := db.QueryRowContext(ctx, `SELECT count(*),count(DISTINCT request_id),count(*) FILTER (WHERE actual_cost>0)
+			FROM usage_logs WHERE api_key_id=$1`, keyID).Scan(&rows, &unique, &charged)
+		return err == nil && rows == nativeTotal && unique == rows && charged == rows
+	}, 15*time.Second, 200*time.Millisecond, "every actual native inference needs exactly one charged synthetic usage row")
+	billing["verified"], billing["native_calls"], billing["unique_charged_rows"] = true, nativeTotal, nativeTotal
 }
 
 func journeyUIServer(t *testing.T, endpoint, key string) *httptest.Server {

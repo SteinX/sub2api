@@ -142,6 +142,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
@@ -168,6 +169,23 @@ jobs:
         env:
           REPORT: ${{ runner.temp }}/devin-user-journeys/client-journeys.json
         run: python3 tools/devin-acceptance/acceptance.py verify --mode client_mock --report "$REPORT" --commit "$(git rev-parse HEAD)" --tree "$(git rev-parse HEAD^{tree})"
+      - name: Check complete exact-SHA GitHub read snapshot (not acceptance)
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_HEAD: ${{ github.event.pull_request.head.sha }}
+          SNAPSHOT_BASE: ${{ github.event.pull_request.base.sha }}
+          SNAPSHOT_PR: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib,json,os,subprocess
+          from pathlib import Path
+          head,base=os.environ['SNAPSHOT_HEAD'],os.environ['SNAPSHOT_BASE']
+          digest=hashlib.sha256(subprocess.check_output(['git','diff','--binary','--full-index',base,head])).hexdigest()
+          (Path(os.environ['RUNNER_TEMP']) / 'pending-review.json').write_text(json.dumps({'base':base,'head':head,'status':'pending','patch_sha256':digest}))
+          PYTHON
+          python3 tools/devin-acceptance/github_snapshot.py --repository "$GITHUB_REPOSITORY" --pr "$SNAPSHOT_PR" --commit "$SNAPSHOT_HEAD" --review "$RUNNER_TEMP/pending-review.json" --output "$RUNNER_TEMP/current-check-state.json"
+          rm "$RUNNER_TEMP/pending-review.json" "$RUNNER_TEMP/current-check-state.json"
       - name: Save only structural synthetic journey evidence
         if: always()
         uses: actions/upload-artifact@v4

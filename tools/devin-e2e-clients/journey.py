@@ -12,6 +12,7 @@ from pathlib import Path
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 
@@ -364,6 +365,11 @@ def main():
     source_before_resume = digest(project_bytes(workspace, 'price_math.py'))
     resumed = invoke(args, directory, True) if task_passed else None
     same_session = resumed is not None and first["client_session_sha256"] is not None and first["client_session_sha256"] == resumed["client_session_sha256"]
+    extended = {}
+    if (os.environ.get('DEVIN_JOURNEY_CAPABILITIES') == 'true' and same_session and resumed['passed']
+            and args.client == 'omp' and args.profile == 'compatibility' and not args.model.startswith('fusion-')):
+        import capabilities
+        extended = capabilities.run(args, directory, first['client_session_sha256'], expected['nonce'], sys.modules[__name__])
     final = final_project_snapshot(workspace, expected, protected, source_before_resume)
     passed = task_passed and resumed is not None and resumed["passed"] and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
     report = {"tier": "client_mock", "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
@@ -372,7 +378,9 @@ def main():
               "initial_project_test_failed": True, "artifact_verified_before_oracle": valid, **final,
               "independent_project_test_passed": after is not None and after.returncode == 0,
               "same_client_session": same_session,
-              "context_pressure": "not_run", "compact": "not_run", "fork": "not_run", "worker": "not_run"}
+              "context_pressure": extended.get('context_pressure', 'not_run'), "compact": extended.get('compact', 'not_run'),
+              "fork": extended.get('fork', 'not_run'), "disconnect_recovery": 'not_run', "worker": "not_run",
+              "capability_evidence": extended}
     print(json.dumps(report, sort_keys=True))
     return 0 if passed else 1
 

@@ -4,7 +4,9 @@ package devine2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,8 +18,9 @@ import (
 // This is a scripted MODEL, not a tool executor. It never opens project files,
 // runs commands, creates output artifacts or decides whether the journey passed.
 type projectJourney struct {
-	mu        sync.Mutex
-	workspace string
+	mu              sync.Mutex
+	workspace       string
+	maxContextBytes int
 }
 
 const fixedProjectSource = `import json
@@ -41,6 +44,24 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	reply.DeltaText, reply.DeltaToolCalls = "PROJECT_FAILED", nil
 	reply.Usage.BillingModelUid = request.ChatModelUid
 	reply.StopReason = pb.StopReason_STOP_REASON_STOP_PATTERN
+	var history strings.Builder
+	for _, prompt := range request.ChatMessagePrompts {
+		history.WriteString(prompt.Prompt)
+	}
+	j.mu.Lock()
+	if history.Len() > j.maxContextBytes {
+		j.maxContextBytes = history.Len()
+	}
+	j.mu.Unlock()
+	// A fixed eleven-token fixture response makes a real client's compactor
+	// believe even a large tool history is empty. Use a stated synthetic estimate
+	// that grows with the actual forwarded context; never treat it as real usage.
+	reply.Usage.InputTokens = uint64(1 + history.Len()/4)
+	checkpointNonce := regexp.MustCompile(`CONTEXT_NONCE=([a-f0-9]{24})`).FindStringSubmatch(history.String())
+	if len(request.Tools) == 0 && len(checkpointNonce) == 2 {
+		reply.DeltaText = "Project checkpoint: CONTEXT_NONCE=" + checkpointNonce[1] + "; verified subtotal minus discount, tests passed, report at out/report.json."
+		return
+	}
 	lastUser, lastReport := -1, -1
 	userTask := ""
 	for i, prompt := range request.ChatMessagePrompts {
@@ -49,6 +70,13 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		}
 	}
 	resume := strings.Contains(userTask, "Resume this project session")
+	pressure := strings.Contains(userTask, "Exercise context pressure")
+	if strings.Contains(userTask, "Recall the shared CONTEXT_NONCE") {
+		if len(checkpointNonce) == 2 {
+			reply.DeltaText = checkpointNonce[1]
+		}
+		return
+	}
 	final := "PROJECT_COMPLETE"
 	if resume {
 		final = "PROJECT_REVIEWED"
@@ -103,7 +131,21 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		}
 	}
 	readPath := ""
+	if pressure {
+		for index := 0; index < 16; index++ {
+			name := "part-" + fmt.Sprintf("%02d", index) + ".txt"
+			if reads[name] == 0 {
+				readPath = filepath.Join("context", name)
+				break
+			}
+		}
+		if readPath == "" {
+			reply.DeltaText = "CONTEXT_READY"
+			return
+		}
+	}
 	switch {
+	case pressure:
 	case resume && reads["report.json"] == 0:
 		readPath = "out/report.json"
 	case resume:

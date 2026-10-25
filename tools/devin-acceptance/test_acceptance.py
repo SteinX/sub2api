@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -22,6 +23,7 @@ def evidence(live=False):
                     'client_session_sha256': DIGEST, 'tools': {'read': 4, 'write': 1, 'bash': 1},
                     'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0}
         case = {'id': ident, 'model_kind': kind, 'status': 'passed', 'artifact_sha256': DIGEST,
+                'tier': 'user_e2e' if live else 'client_mock', 'eligible_for_real_e2e': live,
                 'public_model_uid': 'fusion-test' if kind == 'fusion' else 'physical-lead',
                 'physical_lead_uid': 'physical-lead', 'physical_sidekick_uid': 'physical-sidekick' if kind == 'fusion' else '',
                 'observed_physical_models': {'physical-lead': 2, 'physical-sidekick': 3} if kind == 'fusion' else {'physical-lead': 5},
@@ -60,6 +62,12 @@ class AcceptanceTests(unittest.TestCase):
     def test_mock_cannot_certify_live_even_with_green_checks(self):
         report, state = evidence()
         self.assertEqual([], gate.validate(report, 'client_mock', COMMIT, TREE))
+        self.assertIn('real_upstream_not_verified', gate.validate(report, 'user_e2e', COMMIT, TREE, state))
+        report, state = evidence(True)
+        report['cases'][0].update(tier='client_mock', eligible_for_real_e2e=False)
+        self.assertTrue(gate.validate(report, 'user_e2e', COMMIT, TREE, state))
+        report, state = evidence(True)
+        report['eligible_for_real_e2e'] = False
         self.assertIn('real_upstream_not_verified', gate.validate(report, 'user_e2e', COMMIT, TREE, state))
 
     def test_boolean_session_claim_cannot_hide_identity_or_terminal_failure(self):
@@ -131,6 +139,13 @@ class AcceptanceTests(unittest.TestCase):
         report['api_key'] = 'synthetic-only'
         self.assertIn('private_fields_present', gate.validate(report, 'client_mock', COMMIT, TREE))
 
+    def test_comment_does_not_clear_requested_changes(self):
+        report, state = evidence(True)
+        state['reviews'] = [{'reviewer': 'same', 'state': 'CHANGES_REQUESTED'}, {'reviewer': 'same', 'state': 'COMMENTED'}]
+        self.assertIn('review_pending_or_changes_requested', gate.validate(report, 'user_e2e', COMMIT, TREE, state))
+        state['reviews'].append({'reviewer': 'same', 'state': 'APPROVED'})
+        self.assertEqual([], gate.validate(report, 'user_e2e', COMMIT, TREE, state))
+
 
 class LegacyTests(unittest.TestCase):
     def test_cancellation_marker_requires_same_source_parent_pass(self):
@@ -146,7 +161,56 @@ class LegacyTests(unittest.TestCase):
                 self.assertEqual(1 if parent == 'pass' else 0, reassess_legacy.reassess([directory])['reusable_cancel_contracts'])
 
 
+class SnapshotTests(unittest.TestCase):
+    def test_retry_maps_old_and_new_attempts_and_keeps_pending_external_checks(self):
+        review = {'base': 'e' * 40, 'head': COMMIT, 'status': 'cleared', 'patch_sha256': hashlib.sha256(b'fixed-patch').hexdigest()}
+        seen = []
+        def api(route, *arguments):
+            seen.append(route)
+            if route.endswith('/pulls/21'):
+                return [{'head': {'sha': COMMIT}, 'merge_commit_sha': None}]
+            if '/actions/runs?' in route:
+                return [{'workflow_runs': [{'id': 10, 'path': '.github/workflows/backend-ci.yml', 'event': 'pull_request'}]}]
+            if '/actions/runs/10/jobs?' in route:
+                self.assertIn('filter=all', route)
+                return [{'jobs': [{'check_run_url': 'https://api.github.com/check-runs/1'}, {'check_run_url': 'https://api.github.com/check-runs/2'}]}]
+            if '/check-runs?' in route:
+                base = {'head_sha': COMMIT, 'name': 'test', 'app': {'slug': 'github-actions'}, 'status': 'completed'}
+                external = {**base, 'id': 3, 'name': 'external security', 'status': 'in_progress', 'conclusion': None, 'app': {'slug': 'scanner'}}
+                return [{'check_runs': [{**base, 'id': 1, 'conclusion': 'failure'}]}, {'check_runs': [{**base, 'id': 2, 'conclusion': 'success'}, external]}]
+            if '/statuses?' in route:
+                return [[{'context': 'external-status', 'state': 'pending'}]]
+            if route.endswith('/reviews?per_page=100'):
+                return [[]]
+            if route == 'graphql':
+                return [{'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': [{'isResolved': True}]}}}}},
+                        {'data': {'repository': {'pullRequest': {'reviewThreads': {'nodes': [{'isResolved': False}]}}}}}]
+            raise AssertionError(route)
+        with patch.object(github_snapshot, 'api', side_effect=api), patch.object(github_snapshot.subprocess, 'run') as run:
+            run.return_value.returncode, run.return_value.stdout = 0, b'fixed-patch'
+            state = github_snapshot.collect('owner/repo', 21, COMMIT, review)
+        tests = [check for check in state['checks'] if check['name'] == 'test']
+        self.assertEqual(1, len(tests))
+        self.assertEqual('success', tests[0]['conclusion'])
+        self.assertEqual('backend-ci.yml', tests[0]['workflow'])
+        self.assertEqual([3], state['outstanding_checks'])
+        self.assertEqual(1, state['unresolved_findings'])
+        self.assertTrue(any(check['name'] == 'external-status' and check['status'] == 'in_progress' for check in state['checks']))
+        self.assertTrue(any('filter=all' in route and '/check-runs?' in route for route in seen))
+
+    def test_review_patch_mismatch_stops_before_github_reads(self):
+        with patch.object(github_snapshot.subprocess, 'run') as run, patch.object(github_snapshot, 'api') as api:
+            run.return_value.returncode, run.return_value.stdout = 0, b'changed-patch'
+            with self.assertRaises(ValueError):
+                github_snapshot.collect('owner/repo', 21, COMMIT, {'base': 'e' * 40, 'patch_sha256': DIGEST})
+            api.assert_not_called()
+
+
 class ReleaseBoundaryTests(unittest.TestCase):
+    def test_any_target_with_devin_still_requires_acceptance_after_failed_tag(self):
+        with patch.object(release_guard, 'git', return_value='') as git:
+            self.assertTrue(release_guard.requires_acceptance(COMMIT))
+            git.assert_called_once_with('cat-file', '-e', COMMIT + ':backend/internal/service/openai_gateway_devin_fusion.go')
     def test_lightweight_tag_cannot_authorize_runtime_release(self):
         def git(*args):
             if args[0] == 'rev-parse':
