@@ -35,6 +35,7 @@
               v-for="tab in clientTabs"
               :key="tab.id"
               type="button"
+              :data-client="tab.id"
               @click="activeClientTab = tab.id"
               :class="[
                 'whitespace-nowrap py-2.5 px-1 border-b-2 font-medium text-sm transition-colors',
@@ -146,6 +147,10 @@
             <option v-for="model in codexCatalogModelSlugs" :key="model" :value="model">{{ model }}</option>
           </select>
           <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.useKeyModal.devin.description') }}</p>
+          <label v-if="['opencode', 'omo', 'omp'].includes(activeClientTab)" class="flex items-center gap-2 text-sm">
+            <input v-model="devinKeyFromEnv" type="checkbox" data-testid="devin-key-from-env" />
+            {{ t('keys.useKeyModal.devin.keyFromEnv') }}
+          </label>
           <button
             type="button"
             data-testid="devin-models-refresh"
@@ -159,7 +164,11 @@
           <p v-else-if="codexModelManifestState === 'ready' && !codexCatalogModelSlugs.length" role="status" class="text-xs">
             {{ t('keys.useKeyModal.devin.noModels') }}
           </p>
-          <template v-if="activeClientTab === 'omo'">
+          <label v-if="activeClientTab === 'opencode' || activeClientTab === 'omo'" class="flex items-center gap-2 text-sm">
+            <input v-model="devinProjectMode" type="checkbox" data-testid="devin-project-mode" />
+            {{ t('keys.useKeyModal.devin.projectMode') }}
+          </label>
+          <template v-if="activeClientTab === 'omo' || devinProjectMode">
             <label class="input-label" for="devin-workspace-path">{{ t('keys.useKeyModal.devin.workspace') }}</label>
             <input
               id="devin-workspace-path"
@@ -172,6 +181,19 @@
               {{ t('keys.useKeyModal.devin.workspaceInvalid') }}
             </p>
           </template>
+          <template v-if="devinProjectMode && (activeClientTab === 'opencode' || activeClientTab === 'omo')">
+            <label class="input-label" for="devin-test-command">{{ t('keys.useKeyModal.devin.testCommand') }}</label>
+            <input id="devin-test-command" v-model="devinTestCommandInput" data-testid="devin-test-command" class="input" />
+            <p class="text-xs">{{ t('keys.useKeyModal.devin.projectScope') }}</p>
+            <p v-if="devinTestCommandInput && !devinTestCommand" role="alert" class="text-xs text-amber-700">{{ t('keys.useKeyModal.devin.testCommandInvalid') }}</p>
+          </template>
+          <label v-if="activeClientTab === 'omp'" class="input-label">
+            {{ t('keys.useKeyModal.devin.ompProfile') }}
+            <select v-model="devinOmpProfile" data-testid="devin-omp-profile" class="input">
+              <option value="compatibility">{{ t('keys.useKeyModal.devin.ompCompatibility') }}</option>
+              <option value="default">{{ t('keys.useKeyModal.devin.ompDefault') }}</option>
+            </select>
+          </label>
           <button
             v-if="devinSelectedModel && (activeClientTab === 'codex' || activeClientTab === 'claude')"
             type="button"
@@ -199,6 +221,8 @@
           <div
             v-for="(file, index) in currentFiles"
             :key="index"
+            data-testid="client-config-file"
+            :data-config-path="file.path"
             class="relative"
           >
             <!-- File Hint (if exists) -->
@@ -335,7 +359,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildCodexModelCatalogUrl, fetchCodexModelsManifest } from '@/api/codex'
-import { devinOmpConfig, normalizeDevinWorkspacePath } from '@/utils/devinClientConfig'
+import { devinOmpConfig, devinOpenCodeConfig, normalizeDevinWorkspacePath, normalizeDevinTestCommand } from '@/utils/devinClientConfig'
 import type { GroupPlatform } from '@/types'
 import {
   findCodexCatalogModel,
@@ -387,6 +411,11 @@ const codexModelManifestState = ref<CodexModelManifestState>('idle')
 const devinSelectedModel = ref('')
 const devinWorkspaceInput = ref('')
 const devinWorkspacePath = computed(() => normalizeDevinWorkspacePath(devinWorkspaceInput.value))
+const devinProjectMode = ref(false)
+const devinTestCommandInput = ref('')
+const devinTestCommand = computed(() => normalizeDevinTestCommand(devinTestCommandInput.value))
+const devinOmpProfile = ref<'compatibility' | 'default'>('compatibility')
+const devinKeyFromEnv = ref(false)
 const codexModelManifestContent = ref('')
 const codexModelManifestModelCount = ref(0)
 const codexModelCatalogMode = ref<'remote' | 'file'>('remote')
@@ -610,8 +639,9 @@ const openaiTabs: TabConfig[] = [
 const showShellTabs = computed(() => !['opencode', 'omo'].includes(activeClientTab.value))
 
 const devinClientInstructions = computed(() => {
+  if (devinProjectMode.value && ['opencode', 'omo'].includes(activeClientTab.value)) return t('keys.useKeyModal.devin.projectInstructions')
   switch (activeClientTab.value) {
-    case 'omp': return t('keys.useKeyModal.devin.ompInstructions')
+    case 'omp': return t(`keys.useKeyModal.devin.${devinOmpProfile.value === 'default' ? 'ompDefaultInstructions' : 'ompInstructions'}`)
     case 'omo': return t('keys.useKeyModal.devin.omoInstructions')
     case 'opencode': return t('keys.useKeyModal.devin.opencodeInstructions')
     case 'claude': return t('keys.useKeyModal.devin.claudeInstructions')
@@ -833,7 +863,9 @@ const comment = (value: string) => wrapToken('text-slate-500', value)
 // Generate file configs based on platform and active tab
 const currentFiles = computed((): FileConfig[] => {
   const baseUrl = props.baseUrl || window.location.origin
-  const apiKey = props.apiKey
+  const apiKey = props.platform === 'devin' && devinKeyFromEnv.value && ['opencode', 'omo', 'omp'].includes(activeClientTab.value)
+    ? (activeClientTab.value === 'omp' ? 'SUB2API_API_KEY' : '{env:SUB2API_API_KEY}')
+    : props.apiKey
   const baseRoot = baseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '')
   const ensureV1 = (value: string) => {
     const trimmed = value.replace(/\/+$/, '')
@@ -842,6 +874,7 @@ const currentFiles = computed((): FileConfig[] => {
   const apiBase = ensureV1(baseRoot)
   if (props.platform === 'devin' && (!devinSelectedModel.value || codexModelManifestState.value !== 'ready')) return []
   if (props.platform === 'devin' && activeClientTab.value === 'omo' && !devinWorkspacePath.value) return []
+  if (props.platform === 'devin' && ['opencode', 'omo'].includes(activeClientTab.value) && devinProjectMode.value && (!devinWorkspacePath.value || !devinTestCommand.value)) return []
   const antigravityBase = ensureV1(`${baseRoot}/antigravity`)
   const antigravityGeminiBase = (() => {
     const trimmed = `${baseRoot}/antigravity`.replace(/\/+$/, '')
@@ -854,7 +887,7 @@ const currentFiles = computed((): FileConfig[] => {
 
   if (props.platform === 'devin' && activeClientTab.value === 'omp') {
     const advertisedContext = findCodexCatalogModel(codexModelManifestContent.value, devinSelectedModel.value)?.context_window
-    const config = devinOmpConfig(apiBase, apiKey, devinSelectedModel.value, advertisedContext)
+    const config = devinOmpConfig(apiBase, apiKey, devinSelectedModel.value, advertisedContext, devinOmpProfile.value)
     const directory = activeTab.value === 'unix' ? '~/.omp/agent' : '%USERPROFILE%\\.omp\\agent'
     const separator = activeTab.value === 'unix' ? '/' : '\\'
     return [
@@ -881,30 +914,10 @@ const currentFiles = computed((): FileConfig[] => {
       case 'devin':
         return [{
           path: activeClientTab.value === 'omo' ? `${devinWorkspacePath.value}/opencode.json` : 'opencode.json',
-          content: JSON.stringify({
-            $schema: 'https://opencode.ai/config.json',
-            model: `devin/${devinSelectedModel.value}`,
-            small_model: `devin/${devinSelectedModel.value}`,
-            ...(activeClientTab.value === 'omo' ? {
-              plugin: ['oh-my-opencode@5.1.44'],
-              default_agent: 'devin-check',
-              permission: { '*': 'deny', read: 'allow', external_directory: { [`${devinWorkspacePath.value}/*`]: 'allow' } },
-              agent: { 'devin-check': {
-                mode: 'primary', model: `devin/${devinSelectedModel.value}`,
-                prompt: 'Read probe.txt when asked. Use only read; do not spawn client-side workers or modify files. Gateway-internal Fusion Lead/Sidekick delegation remains allowed.',
-                tools: Object.fromEntries(
-                  ['read', 'bash', 'edit', 'write', 'task', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'question']
-                    .map(name => [name, name === 'read'])
-                )
-              } }
-            } : {}),
-            provider: { devin: {
-              npm: '@ai-sdk/openai-compatible',
-              name: 'Devin via Sub2API',
-              options: { baseURL: apiBase, apiKey },
-              models: Object.fromEntries(codexCatalogModelSlugs.value.map(id => [id, { name: id }]))
-            } }
-          }, null, 2)
+          content: JSON.stringify(devinOpenCodeConfig(apiBase, apiKey, devinSelectedModel.value, codexCatalogModelSlugs.value, {
+            omo: activeClientTab.value === 'omo', workspace: devinWorkspacePath.value,
+            project: devinProjectMode.value, testCommand: devinTestCommand.value
+          }), null, 2)
         }, ...(activeClientTab.value === 'omo' ? [{
           path: `${devinWorkspacePath.value}/.omo/omo.jsonc`,
           content: JSON.stringify({ model_fallback: false, runtime_fallback: false, disabled_mcps: ['websearch', 'context7', 'grep_app'] }, null, 2),

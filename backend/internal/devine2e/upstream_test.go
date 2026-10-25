@@ -44,6 +44,7 @@ type nativeFixture struct {
 	agentRead           atomic.Bool
 	probePath           string              // guarded by mu
 	longWorkflow        *longNativeWorkflow // configured before serving inference
+	journey             *projectJourney     // configured before serving inference
 }
 
 func newNativeFixture(t *testing.T) *nativeFixture {
@@ -184,7 +185,9 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			reply.DeltaToolCalls = []*pb.ChatToolCall{{Id: "call_e2e", Name: "e2e_echo", ArgumentsJson: `{"value":"E2E_TOOL_RESULT"}`}}
 			reply.StopReason = pb.StopReason_STOP_REASON_FUNCTION_CALL
 		}
-		if f.longWorkflow != nil {
+		if f.journey != nil {
+			f.journey.reply(&request, reply)
+		} else if f.longWorkflow != nil {
 			f.longWorkflow.reply(&request, reply)
 		} else if f.agentMode.Load() {
 			f.agentReply(&request, reply)

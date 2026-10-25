@@ -70,12 +70,16 @@ class ClientBoundaryTests(unittest.TestCase):
         self.assertFalse(evidence["saw_expected_text"])
 
     def test_streaming_marker_can_span_client_frames(self):
-        code, evidence = self.execute_fixture([{"type":"text","part":{"text":"E2E_"}}, {"type":"text","part":{"text":"OK"}}])
+        code, evidence = self.execute_fixture([{"type":"text","part":{"text":"E2E_"}}, {"type":"text","part":{"text":"OK"}}, {"type":"step_finish","part":{"reason":"stop"}}])
         self.assertEqual(code, 0)
         self.assertTrue(evidence["saw_expected_text"])
 
     def test_assistant_completion_retains_no_text_or_tool_payload(self):
-        code, evidence = self.execute_fixture({"type": "text", "part": {"text": "E2E_OK synthetic-private-output"}})
+        code, evidence = self.execute_fixture([
+            {"type": "tool_use", "part": {"tool": "read", "state": {"status": "completed", "output": "synthetic-private-output"}}},
+            {"type": "text", "part": {"text": "E2E_OK"}},
+            {"type": "step_finish", "part": {"reason": "stop"}}
+        ])
         self.assertEqual(code, 0)
         self.assertTrue(evidence["saw_expected_text"])
         self.assertNotIn("synthetic-private-output", json.dumps(evidence))
@@ -86,6 +90,15 @@ class ClientBoundaryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runner.execute(args)
             popen.assert_not_called()
+
+    def test_zero_exit_with_assistant_error_is_not_a_pass(self):
+        code, evidence = self.execute_fixture([
+            {"type": "text", "part": {"text": "E2E_OK"}},
+            {"type": "message_end", "message": {"role": "assistant", "stopReason": "error", "content": [{"type": "text", "text": "synthetic-private-error"}]}}
+        ])
+        self.assertNotEqual(code, 0)
+        self.assertFalse(evidence["success"])
+        self.assertNotIn("synthetic-private-error", json.dumps(evidence))
 
     def test_omo_refuses_a_writable_personal_home_before_starting(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(runner, "configuration"), patch.object(runner.os, "access", return_value=True), patch.object(runner.subprocess, "Popen") as popen, patch.dict(os.environ, {"DEVIN_E2E_GATEWAY_KEY": "synthetic-local-key", "GITHUB_ACTIONS": "false"}):
