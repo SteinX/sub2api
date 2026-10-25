@@ -14,6 +14,8 @@ Mock 不证明真实 Devin 可用；测试已有远端 Sub2API 只能证明该�
 
 生产后端按账号显式选择代理，不自动读取 `HTTPS_PROXY`。plan/live 会在本次临时数据库创建与继承环境一致的 HTTP(S) 代理记录，在 PAT 授权前绑定，并保留到账号提交与后续请求；不启用直连回退。托管环境缺少可用代理时在 PAT 交换前停止。平台代理 CA 与系统信任根合并到临时证书包，TLS 验证保持开启；该记录和证书包随本次测试清理。
 
+live 的上游域名白名单固定为 `server.codeium.com`，也约束原生准备接口返回的其他 API 地址；未获授权的主机在凭据发送前拒绝。域名解析沿用既有代理，不依赖执行容器的公共 DNS。合成回归同时验证允许域名的代理接入和未获授权域名的拒绝。认证失败只报告白名单内的 RPC 阶段与错误类别，不输出上游原始错误或凭据。
+
 ## 启动与测试
 
 需要 Linux、Bash、GNU coreutils `timeout`、Docker Engine（本地 `/var/run/docker.sock`）、Docker Compose v2，以及 `backend/go.mod` 要求的 Go 版本。协议测试不要求前端、额外 Python 包或真实账号。Docker 可拉取 `postgres:18-alpine`、`redis:8-alpine`；Go 模块需可下载。

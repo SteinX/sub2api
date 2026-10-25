@@ -124,6 +124,18 @@ func (a *application) start(t *testing.T) {
 		"SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true", "BATCH_IMAGE_ENABLED=false",
 		"GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true",
 	)
+	if os.Getenv("DEVIN_E2E_MODE") == "live" {
+		// The approved batch sends native credentials only to this hostname,
+		// including when GetUserJwt supplies an account-specific API URL.
+		a.command.Env = append(a.command.Env,
+			"SECURITY_URL_ALLOWLIST_ENABLED=true",
+			"SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS=server.codeium.com",
+			// The managed proxy resolves the allowlisted hostname. Preserve the
+			// runner's proxy-compatible setting instead of requiring local DNS.
+			"SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=true",
+			"SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=false",
+		)
+	}
 	if a.trustFile != "" {
 		a.command.Env = append(a.command.Env, "SSL_CERT_FILE="+a.trustFile)
 	}

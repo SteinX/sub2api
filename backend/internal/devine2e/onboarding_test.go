@@ -28,13 +28,38 @@ func onboardingFailure(message string) error {
 		}
 	}
 	code := "rejected"
-	for _, candidate := range []string{"permission_denied", "unauthenticated", "no available models"} {
+	for _, candidate := range []string{"permission_denied", "unauthenticated", "no available models", "resource_exhausted", "unavailable", "deadline_exceeded", "invalid_argument"} {
 		if strings.Contains(message, candidate) {
 			code = candidate
 			break
 		}
 	}
+	for _, failure := range []struct{ marker, code string }{
+		{"dns resolution failed", "dns_resolution_failed"},
+		{"host is not allowed", "target_host_denied"},
+		{"x509:", "tls_verification_failed"},
+	} {
+		if strings.Contains(message, failure.marker) {
+			code = failure.code
+			break
+		}
+	}
 	return fmt.Errorf("PAT onboarding failed at %s (%s); no account was committed and no inference was requested", stage, code)
+}
+
+func TestOnboardingFailureKeepsOnlyKnownDiagnostics(t *testing.T) {
+	for _, test := range []struct{ message, code string }{
+		{"dns resolution failed: lookup private-host", "dns_resolution_failed"},
+		{"host is not allowed: private-host", "target_host_denied"},
+		{"x509: certificate signed by unknown authority", "tls_verification_failed"},
+		{"unavailable: arbitrary upstream body", "unavailable"},
+	} {
+		err := onboardingFailure("GetSelfDevinSessionToken: cog_synthetic_secret " + test.message)
+		require.ErrorContains(t, err, "("+test.code+")")
+		require.NotContains(t, err.Error(), "cog_synthetic_secret")
+		require.NotContains(t, err.Error(), "private-host")
+		require.NotContains(t, err.Error(), "arbitrary upstream body")
+	}
 }
 
 func addPATAccount(t *testing.T, a *application, admin, pat string, groupID, proxyID int64) (int64, error) {

@@ -77,6 +77,7 @@ func TestEnvironmentProxyRoutesPATOnboarding(t *testing.T) {
 	t.Setenv("https_proxy", fixture.proxy.URL)
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "")
+	t.Setenv("DEVIN_E2E_MODE", "live")
 	a := newApplication(t, fixture)
 	admin := login(t, a, "admin@devin-e2e.invalid", a.password)
 	compliance := api(t, a, "GET", "/admin/compliance", admin, nil)
@@ -88,6 +89,16 @@ func TestEnvironmentProxyRoutesPATOnboarding(t *testing.T) {
 	require.NoError(t, err)
 	account := api(t, a, "GET", fmt.Sprintf("/admin/accounts/%d", accountID), admin, nil)
 	require.Equal(t, proxyID, account.Get("proxy_id").Int())
+	before := fixture.mints.Load()
+	api(t, a, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{
+		"credentials": map[string]any{"base_url": "https://unapproved.invalid"},
+	})
+	rejected := api(t, a, "POST", "/admin/devin/auth-sessions", admin, map[string]any{
+		"mode": "key", "content": "cog_e2e_fixture", "account_id": accountID,
+	})
+	require.Equal(t, "failed", rejected.Get("status").String())
+	require.Contains(t, rejected.Get("error").String(), "host is not allowed")
+	require.Equal(t, before, fixture.mints.Load(), "unapproved host must be rejected before credential transmission")
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
 	require.Empty(t, fixture.chats, "proxy regression must not generate content")

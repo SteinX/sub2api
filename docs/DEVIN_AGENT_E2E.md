@@ -90,6 +90,8 @@ DEVIN_E2E_ALLOW_PAID=true DEVIN_E2E_AGENT_BATCH=matrix make test-devin-agent-liv
 
 停止和依赖清理与基础 runner 相同：退出或 Ctrl-C 删除本次容器/网络，停止后端；每个进程组有超时和终止路径。客户端自身的私有会话仅在临时测试目录，测试结束删除。PAT 与派生会话不进入客户端环境；客户端只拿到本次新建的公开 Key。
 
+每组结束时（包括失败）在删除临时数据库前保存 `private-usage-<client>-<kind>.json`，记录该临时 Key 的累计 SQL 用量行数、角色行数、token 与本地费用。快照不可用时明确失败，不将缺少记录解释成供应商费用为零；这些累计值也不是供应商账单。该文件不匹配 CI 的 `agent-*.json` 归档规则，真实账号细节留在私有运行目录。
+
 ## 尚不能声明通过的范围
 
 真实 PAT → `server.codeium.com` 的运行时凭据引用、现有任务的配置版本绑定及出站放行必须先核实，详见[运行时说明](DEVIN_E2E.md#托管域名-secret-与版本绑定)。发布配置不等于既有实例已应用；不能提取 Secret、猜测引用或绕过策略。

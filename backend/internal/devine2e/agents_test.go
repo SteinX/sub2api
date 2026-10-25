@@ -351,6 +351,7 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 				}
 				defer func() {
 					forwarded, records := admission.snapshot()
+					savePrivateAgentUsage(t, app, keyID, client, kind)
 					var safe []map[string]any
 					for _, record := range records {
 						safe = append(safe, map[string]any{"status": record.Status, "stream": record.Stream, "forwarded": record.Forwarded, "error_code": record.ErrorCode,
@@ -529,6 +530,32 @@ func verifyAgentUsage(t *testing.T, app *application, keyID int64, minimum int) 
 		defer cancel()
 		return db.QueryRowContext(ctx, "SELECT count(*) FROM usage_logs WHERE api_key_id=$1 AND input_tokens>0 AND output_tokens>0 AND actual_cost>0", keyID).Scan(&count) == nil && count >= minimum
 	}, 15*time.Second, 200*time.Millisecond, "client usage not persisted for its public key")
+}
+
+// Keep real-account usage evidence out of the CI agent-*.json upload pattern.
+// Capture it before disposable SQL is deleted, including failed client runs.
+func savePrivateAgentUsage(t *testing.T, app *application, keyID int64, client, kind string) {
+	t.Helper()
+	db := agentDatabase(t, app)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var rows, roles, input, output, cacheWrite, cacheRead int64
+	var actualCost, totalCost float64
+	err := db.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER (WHERE request_id LIKE 'fusion:%'),
+		coalesce(sum(input_tokens),0),coalesce(sum(output_tokens),0),
+		coalesce(sum(cache_creation_tokens),0),coalesce(sum(cache_read_tokens),0),
+		coalesce(sum(actual_cost),0),coalesce(sum(total_cost),0)
+		FROM usage_logs WHERE api_key_id=$1`, keyID).Scan(&rows, &roles, &input, &output, &cacheWrite, &cacheRead, &actualCost, &totalCost)
+	evidence := map[string]any{"available": err == nil, "scope": "cumulative temporary public-key SQL usage; not a provider invoice"}
+	if err == nil {
+		evidence["rows"], evidence["role_rows"] = rows, roles
+		evidence["input_tokens"], evidence["output_tokens"] = input, output
+		evidence["cache_creation_tokens"], evidence["cache_read_tokens"] = cacheWrite, cacheRead
+		evidence["actual_cost_usd"], evidence["total_cost_usd"] = actualCost, totalCost
+	} else {
+		t.Error("private usage snapshot unavailable; do not infer zero provider cost")
+	}
+	writeAgentArtifact(t, "private-usage-"+client+"-"+kind+".json", evidence)
 }
 
 func verifyAgentFusion(t *testing.T, app *application, keyID int64, records []agentRequest, client string) {
