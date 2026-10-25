@@ -9,18 +9,89 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http/httpproxy"
 )
+
+// The production transport uses the account's explicit proxy rather than
+// ProxyFromEnvironment. Bind the inherited platform proxy before PAT validation.
+// This record exists only in the runner's disposable database.
+func registerEnvironmentProxy(t *testing.T, a *application, admin string) int64 {
+	t.Helper()
+	target, _ := url.Parse("https://server.codeium.com")
+	u, err := httpproxy.FromEnvironment().ProxyFunc()(target)
+	if err != nil {
+		t.Fatal("invalid inherited HTTPS proxy; no PAT exchange requested")
+	}
+	if u == nil {
+		if _, err := os.Stat("/etc/codex/network-policy.json"); err == nil {
+			t.Fatal("managed environment requires its inherited proxy for Devin; no PAT exchange requested")
+		}
+		return 0
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		t.Fatal("unsupported inherited HTTPS proxy; no PAT exchange requested")
+	}
+	port := 80
+	if u.Scheme == "https" {
+		port = 443
+	}
+	if u.Port() != "" {
+		port, err = strconv.Atoi(u.Port())
+		if err != nil || port < 1 || port > 65535 {
+			t.Fatal("invalid inherited HTTPS proxy port; no PAT exchange requested")
+		}
+	}
+	body := map[string]any{"name": "platform Devin upstream", "protocol": u.Scheme, "host": u.Hostname(), "port": port, "fallback_mode": "none"}
+	if u.User != nil {
+		username := u.User.Username()
+		password, _ := u.User.Password()
+		a.redactor.addSecret(username)
+		a.redactor.addSecret(password)
+		body["username"], body["password"] = username, password
+	}
+	proxy := api(t, a, "POST", "/admin/proxies", admin, body)
+	id := proxy.Get("id").Int()
+	require.Positive(t, id)
+	return id
+}
+
+func TestEnvironmentProxyRoutesPATOnboarding(t *testing.T) {
+	if os.Getenv("DEVIN_E2E_MODE") != "mock" {
+		t.Skip("inherited proxy regression uses a synthetic upstream")
+	}
+	fixture := newNativeFixture(t)
+	t.Setenv("HTTPS_PROXY", fixture.proxy.URL)
+	t.Setenv("https_proxy", fixture.proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	a := newApplication(t, fixture)
+	admin := login(t, a, "admin@devin-e2e.invalid", a.password)
+	compliance := api(t, a, "GET", "/admin/compliance", admin, nil)
+	api(t, a, "POST", "/admin/compliance/accept", admin, map[string]string{"language": "en", "phrase": compliance.Get("ack_phrase_en").String()})
+	group := api(t, a, "POST", "/admin/groups", admin, map[string]any{"name": "proxy-e2e", "platform": "devin", "subscription_type": "standard", "rate_multiplier": 1})
+	proxyID := registerEnvironmentProxy(t, a, admin)
+	accountID, err := addPATAccount(t, a, admin, "cog_e2e_fixture", group.Get("id").Int(), proxyID)
+	require.Positive(t, fixture.mints.Load(), "PAT exchange must traverse the inherited proxy")
+	require.NoError(t, err)
+	account := api(t, a, "GET", fmt.Sprintf("/admin/accounts/%d", accountID), admin, nil)
+	require.Equal(t, proxyID, account.Get("proxy_id").Int())
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	require.Empty(t, fixture.chats, "proxy regression must not generate content")
+}
 
 // Use the existing account proxy option to exercise new-account onboarding at
 // the production default hostname. TLS stays verified with a temporary test CA;

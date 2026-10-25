@@ -70,7 +70,7 @@ func newApplication(t *testing.T, fixture *nativeFixture) *application {
 	_, err = db.Exec("CREATE DATABASE " + pq.QuoteIdentifier(a.database))
 	_ = db.Close()
 	require.NoError(t, err)
-	if fixture != nil {
+	if fixture != nil || os.Getenv("CODEX_PROXY_CERT") != "" {
 		bundle, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt")
 		require.NoError(t, err)
 		if path := os.Getenv("CODEX_PROXY_CERT"); path != "" {
@@ -78,8 +78,11 @@ func newApplication(t *testing.T, fixture *nativeFixture) *application {
 			require.NoError(t, err)
 			bundle = append(append(bundle, '\n'), certificate...)
 		}
-		a.trustFile = filepath.Join(dir, "synthetic-ca-bundle.pem")
-		require.NoError(t, os.WriteFile(a.trustFile, append(append(bundle, '\n'), fixture.ca...), 0600))
+		if fixture != nil {
+			bundle = append(append(bundle, '\n'), fixture.ca...)
+		}
+		a.trustFile = filepath.Join(dir, "upstream-ca-bundle.pem")
+		require.NoError(t, os.WriteFile(a.trustFile, bundle, 0600))
 	}
 	t.Cleanup(func() { a.stop(t) })
 	a.start(t)
@@ -322,6 +325,8 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	var proxyID int64
 	if fixture != nil {
 		proxyID = fixture.registerProxy(t, a, admin)
+	} else {
+		proxyID = registerEnvironmentProxy(t, a, admin)
 	}
 	if mode == "mock" {
 		for _, testCase := range []struct {

@@ -12,6 +12,8 @@
 
 Mock 不证明真实 Devin 可用；测试已有远端 Sub2API 只能证明该远端版本，不能验证当前 checkout。管理员账号探测成功也不能替代公开 Key 和分组调度测试。
 
+生产后端按账号显式选择代理，不自动读取 `HTTPS_PROXY`。plan/live 会在本次临时数据库创建与继承环境一致的 HTTP(S) 代理记录，在 PAT 授权前绑定，并保留到账号提交与后续请求；不启用直连回退。托管环境缺少可用代理时在 PAT 交换前停止。平台代理 CA 与系统信任根合并到临时证书包，TLS 验证保持开启；该记录和证书包随本次测试清理。
+
 ## 启动与测试
 
 需要 Linux、Bash、GNU coreutils `timeout`、Docker Engine（本地 `/var/run/docker.sock`）、Docker Compose v2，以及 `backend/go.mod` 要求的 Go 版本。协议测试不要求前端、额外 Python 包或真实账号。Docker 可拉取 `postgres:18-alpine`、`redis:8-alpine`；Go 模块需可下载。
@@ -41,7 +43,7 @@ Mock 覆盖：
 - 自定义与推断 Fusion 配对经过公开 Key 调度可完成 Lead 委派、Sidekick 报告、Lead 审查三次原生调用，两个角色使用独立上下文；使用显式合成价格验证计费路径。
 - 原生 `invalid_argument` 在输出前返回 HTTP 错误，在部分流式输出后返回终止失败，不会报告成功或重放推理。
 
-合成 fixture 只存在于 `devine2e` build tag 的测试包，不进入发布二进制。为了验证正式新账号流程使用的默认原生地址，mock 配置一次性的本地账号代理，并让后端在保留现有 CA 的基础上信任临时测试 CA；TLS 校验保持开启，连接只到本地 fixture。plan/live 不使用这套代理或测试 CA。fixture 使用仓库的 protobuf schema，不能独立发现该 schema 与真实上游同时发生的偏差；需要真实验证补足。上述协议套件尚不覆盖浏览器 OAuth 登录、图片、Fusion 故障恢复与后台压缩或客户端 UI；另有[真实客户端进程矩阵](DEVIN_AGENT_E2E.md)，覆盖固定版本 OpenCode、OMO、OMP 的短流程。
+合成 fixture 只存在于 `devine2e` build tag 的测试包，不进入发布二进制。为了验证正式新账号流程使用的默认原生地址，mock 配置一次性的本地账号代理，并让后端在保留现有 CA 的基础上信任临时测试 CA；TLS 校验保持开启，连接只到本地 fixture。另一个合成回归通过继承的 HTTPS 代理完成 PAT 接入，确认生产传输实际使用该代理、账号持久化其绑定，且没有生成请求。plan/live 使用平台提供的代理与 CA，不使用合成代理或测试 CA。fixture 使用仓库的 protobuf schema，不能独立发现该 schema 与真实上游同时发生的偏差；需要真实验证补足。上述协议套件尚不覆盖浏览器 OAuth 登录、图片、Fusion 故障恢复与后台压缩或客户端 UI；另有[真实客户端进程矩阵](DEVIN_AGENT_E2E.md)，覆盖固定版本 OpenCode、OMO、OMP 的短流程。
 
 ## 真实 Devin 上游
 
