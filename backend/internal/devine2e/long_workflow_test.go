@@ -332,7 +332,8 @@ func savePrivateLongFailure(t *testing.T, app *application, keyID int64, session
 			"cost_usd": a.CostUSD, "failure": a.Failure, "tool_shapes": toolShapes})
 	}
 	evidence = map[string]any{"available": true, "state": session.State, "turn_requests": session.TurnRequests,
-		"turn_tools": session.TurnTools, "turn_handoffs": session.TurnHandoffs, "turn_cost_usd": session.TurnCostUSD, "attempts": attempts}
+		"turn_tools": session.TurnTools, "turn_handoffs": session.TurnHandoffs, "turn_cost_usd": session.TurnCostUSD,
+		"attempts": attempts, "maintenance": session.Maintenance}
 }
 
 func longRequest(t *testing.T, app *application, key string, sessionID *string, payload any) (*apicompat.ResponsesResponse, string) {
