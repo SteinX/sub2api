@@ -876,6 +876,8 @@ func TestFusionWarmAdmissionFailsBeforePaidSend(t *testing.T) {
 			switch condition {
 			case "unknown price":
 				delete(f.service.billingService.fallbackPrices, f.snapshot.Model)
+				delete(f.service.billingService.fallbackPrices, normalizeAntigravityClaudeTierAlias(f.snapshot.Model))
+				require.False(t, f.service.billingService.HasIdentifiedTokenPricing(f.snapshot.Model), "remove both the exact and known base card to exercise unknown pricing")
 			case "no reservation backend":
 				f.service.cfg.Billing.InflightReservation.Enabled = false
 			case "insufficient balance":
