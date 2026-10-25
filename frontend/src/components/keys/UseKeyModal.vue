@@ -608,7 +608,7 @@ const clientTabs = computed((): TabConfig[] => {
         { id: 'codex', label: t('keys.useKeyModal.cliTabs.codexCli'), icon: TerminalIcon },
         { id: 'claude', label: t('keys.useKeyModal.cliTabs.claudeCode'), icon: TerminalIcon },
         { id: 'opencode', label: t('keys.useKeyModal.cliTabs.opencode'), icon: TerminalIcon },
-        { id: 'omo', label: 'OMO', icon: TerminalIcon },
+        { id: 'omo', label: 'OMO (OpenCode)', icon: TerminalIcon },
         { id: 'omp', label: 'OMP', icon: TerminalIcon }
       ]
     case 'deepseek':

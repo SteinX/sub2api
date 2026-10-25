@@ -49,6 +49,14 @@ class RpcProofTests(unittest.TestCase):
                         {'id': '1', 'type': 'response', 'success': True, 'data': {'right': True}}])
         self.assertEqual({'right': True}, rpc.call('get_state'))
 
+    def test_local_compact_uses_its_actual_response_contract(self):
+        rpc = rpc_with([{'id': '1', 'type': 'response', 'success': True, 'data': {'agentInvoked': False}}])
+        self.assertEqual({'local_command_acknowledged': True}, rpc.call('prompt', message='/compact soft', local_prompt=True))
+        rpc = rpc_with([{'id': '1', 'type': 'response', 'success': True, 'data': {'agentInvoked': False}},
+                        {'id': '1', 'type': 'prompt_result', 'status': 'completed', 'agentInvoked': False, 'sessionSettled': True}])
+        with self.assertRaises(ValueError):
+            rpc.call('prompt', message='ordinary task', local_prompt=True)
+
     def test_cleanup_escalates_and_reaps_without_losing_evidence(self):
         for permanently_stuck in [False, True]:
             with self.subTest(permanently_stuck=permanently_stuck):

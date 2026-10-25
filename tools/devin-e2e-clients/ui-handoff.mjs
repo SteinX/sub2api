@@ -8,6 +8,8 @@ import path from 'node:path'
 
 let stage = 'input'
 const diagnostics = { model_http_statuses: [], page_errors: 0, model_count: 0, selected_model_available: false }
+const journey = { auth_method: 'login_form', login_http_status: null, key_list_http_status: null, selected_key_matches: false, routes: [] }
+const uiScope = 'full product application: login, key list, selection and configuration copy'
 async function main() {
   let raw = ''
   for await (const chunk of process.stdin) { raw += chunk; if (raw.length > 65536) throw new Error('Oversized UI request') }
@@ -28,6 +30,17 @@ async function main() {
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort())
     const page = await context.newPage()
     page.on('response', async response => {
+      const route = new URL(response.url()).pathname
+      if (route === '/api/v1/auth/login') journey.login_http_status = response.status()
+      if (route === '/api/v1/keys') {
+        journey.key_list_http_status = response.status()
+        try {
+          const payload = await response.json()
+          const items = payload.data?.items ?? []
+          const selected = items.find(key => key.name === input.key_name)
+          journey.selected_key_matches = Boolean(selected?.key && createHash('sha256').update(selected.key).digest('hex') === input.expected_key_sha256)
+        } catch { /* never log key responses */ }
+      }
       if (!new URL(response.url()).pathname.endsWith('/models')) return
       diagnostics.model_http_statuses.push(response.status())
       try {
@@ -39,7 +52,25 @@ async function main() {
     })
     page.on('pageerror', () => { diagnostics.page_errors++ })
     stage = 'navigate'
-    await page.goto(`${origin}/test-support/devin-handoff.html`, { waitUntil: 'networkidle', timeout: 30000 })
+    await page.goto(`${origin}/login`, { waitUntil: 'networkidle', timeout: 30000 })
+    journey.routes.push(new URL(page.url()).pathname)
+    stage = 'product-login'
+    await page.locator('#email').fill(input.email)
+    await page.locator('#password').fill(input.password)
+    await page.locator('button[type="submit"]').click()
+    await page.waitForURL(url => url.pathname === '/dashboard', { timeout: 30000 })
+    journey.routes.push(new URL(page.url()).pathname)
+    stage = 'product-key-list'
+    await page.locator('a[href="/keys"]').first().click()
+    await page.waitForURL(url => url.pathname === '/keys', { timeout: 30000 })
+    journey.routes.push(new URL(page.url()).pathname)
+    await page.getByTestId('key-use').first().waitFor()
+    let selectedButton
+    for (const button of await page.getByTestId('key-use').all()) {
+      if (await button.getAttribute('data-key-name') === input.key_name) { selectedButton = button; break }
+    }
+    if (!selectedButton || !journey.selected_key_matches || journey.login_http_status !== 200 || journey.key_list_http_status !== 200) throw new Error('Authenticated product key selection failed')
+    await selectedButton.click()
     stage = 'model-discovery'
     await page.getByTestId('devin-client-model').waitFor()
     await page.waitForFunction(model => [...document.querySelectorAll('#devin-client-model option')].some(option => option.value === model), input.model)
@@ -64,7 +95,7 @@ async function main() {
       if (input.client !== 'omp' || input.profile !== 'default' || !input.model.startsWith('fusion-') || await nodes.count() !== 0) throw new Error('Invalid product refusal')
       process.stdout.write(JSON.stringify({ passed: false, blocked: true, reason: 'omp_default_fusion_history_pruning',
         source: 'UseKeyModal browser refusal', client: input.client, profile: input.profile, selected_model: input.model,
-        files: [], browser: browser.version(), ui_scope: 'isolated product modal; signup/login not covered' }) + '\n')
+        files: [], browser: browser.version(), ui_scope: uiScope, product_journey: journey }) + '\n')
       return
     }
     await nodes.first().waitFor()
@@ -93,7 +124,7 @@ async function main() {
       files.push({ name, sha256: createHash('sha256').update(normalized).digest('hex') })
     }
     process.stdout.write(JSON.stringify({
-      passed: true, source: 'UseKeyModal browser copy buttons', ui_scope: 'isolated product modal; signup/login not covered',
+      passed: true, source: 'UseKeyModal browser copy buttons', ui_scope: uiScope, product_journey: journey,
       client: input.client, profile: input.profile, selected_model: input.model, files,
       instructions_sha256: createHash('sha256').update(instructions).digest('hex'), browser: browser.version()
     }) + '\n')

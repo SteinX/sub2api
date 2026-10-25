@@ -24,6 +24,7 @@ REQUIRED_CHECKS = {
 }
 CLIENT_PINS = {'opencode': ('opencode-ai', '1.19.4'), 'omo': ('oh-my-opencode', '5.1.44'),
                'omp': ('@oh-my-pi/pi-coding-agent', '18.12.6')}
+PRODUCT_UI_SCOPE = 'full product application: login, key list, selection and configuration copy'
 SECRET_KEYS = {'api_key', 'apikey', 'authorization', 'access_token', 'refresh_token', 'pat', 'cookie', 'raw_log', 'prompt', 'content',
                'account_id', 'group_id', 'channel_id', 'user_id', 'session_id', 'email', 'stdout', 'stderr', 'request_body', 'response_body'}
 
@@ -73,6 +74,11 @@ def validate(report, mode, commit, tree, state=None):
         if mode == 'user_e2e' and (case.get('tier') != 'user_e2e' or case.get('eligible_for_real_e2e') is not True):
             errors.append(ident + ':case_not_real_e2e_eligible')
         refusal = case.get('handoff', {})
+        product = refusal.get('product_journey', {})
+        if (refusal.get('ui_scope') != PRODUCT_UI_SCOPE or product.get('login_http_status') != 200
+                or product.get('key_list_http_status') != 200 or product.get('selected_key_matches') is not True
+                or product.get('routes') != ['/login', '/dashboard', '/keys']):
+            errors.append(ident + ':complete_product_route_missing')
         if (mode == 'client_mock' and ident == 'omp/fusion/default' and case.get('status') == 'unsupported_by_product'
                 and refusal.get('blocked') is True and refusal.get('source') == 'UseKeyModal browser refusal'
                 and refusal.get('reason') == 'omp_default_fusion_history_pruning' and refusal.get('files') == []
@@ -145,7 +151,7 @@ def validate(report, mode, commit, tree, state=None):
     if source.get('dirty') is not False:
         errors.append('dirty_source')
     for case in cases:
-        if case.get('handoff', {}).get('ui_scope') != 'deployed product Use Key journey':
+        if case.get('handoff', {}).get('ui_scope') != PRODUCT_UI_SCOPE:
             errors.append(str(case.get('id')) + ':deployed_product_journey_not_verified')
         for capability in ['context_pressure', 'compact', 'fork', 'worker', 'disconnect_recovery']:
             if case.get(capability) != 'passed':

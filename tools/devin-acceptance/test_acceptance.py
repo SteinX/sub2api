@@ -33,7 +33,8 @@ def evidence(live=False):
                                     'executable_sha256': DIGEST, 'engine_version': 'pinned'},
                 'handoff': {'passed': True, 'source': 'UseKeyModal browser copy buttons',
                             'selected_model': 'fusion-test' if kind == 'fusion' else 'physical-lead',
-                            'ui_scope': 'deployed product Use Key journey' if live else 'isolated product modal; signup/login not covered',
+                            'ui_scope': gate.PRODUCT_UI_SCOPE,
+                            'product_journey': {'login_http_status': 200, 'key_list_http_status': 200, 'selected_key_matches': True, 'routes': ['/login', '/dashboard', '/keys']},
                             'files': [{'name': 'product-config', 'sha256': DIGEST}]},
                 'pricing_contract': {'identified': True, 'physical_model_uids': ['physical-lead', 'physical-sidekick'] if kind == 'fusion' else ['physical-lead'],
                                      'snapshot_sha256': DIGEST, 'group_config_sha256': DIGEST, 'public_key_route_verified': True,
@@ -120,7 +121,8 @@ class AcceptanceTests(unittest.TestCase):
         report, state = evidence()
         case = next(case for case in report['cases'] if case['id'] == 'omp/fusion/default')
         case.update(status='unsupported_by_product', public_requests=0, observed_physical_models={},
-                    handoff={'blocked': True, 'source': 'UseKeyModal browser refusal', 'reason': 'omp_default_fusion_history_pruning', 'files': []})
+                    handoff={'blocked': True, 'source': 'UseKeyModal browser refusal', 'reason': 'omp_default_fusion_history_pruning', 'files': [],
+                             'ui_scope': gate.PRODUCT_UI_SCOPE, 'product_journey': {'login_http_status': 200, 'key_list_http_status': 200, 'selected_key_matches': True, 'routes': ['/login', '/dashboard', '/keys']}})
         self.assertEqual([], gate.validate(report, 'client_mock', COMMIT, TREE))
         self.assertTrue(gate.validate(report, 'user_e2e', COMMIT, TREE, state))
         case['public_requests'] = 1
@@ -155,6 +157,13 @@ class AcceptanceTests(unittest.TestCase):
         self.assertIn('review_pending_or_changes_requested', gate.validate(report, 'user_e2e', COMMIT, TREE, state))
         state['reviews'].append({'reviewer': 'same', 'state': 'APPROVED'})
         self.assertEqual([], gate.validate(report, 'user_e2e', COMMIT, TREE, state))
+
+    def test_component_mount_or_injected_login_is_not_a_product_journey(self):
+        for change in [{'ui_scope': 'isolated product modal; signup/login not covered'},
+                       {'product_journey': {'login_http_status': 200, 'key_list_http_status': 200, 'selected_key_matches': True, 'routes': ['/keys']}}]:
+            report, state = evidence(True)
+            report['cases'][0]['handoff'].update(change)
+            self.assertTrue(gate.validate(report, 'user_e2e', COMMIT, TREE, state))
 
 
 class LegacyTests(unittest.TestCase):

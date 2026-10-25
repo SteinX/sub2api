@@ -12,6 +12,7 @@ import signal
 import subprocess
 import threading
 import time
+from urllib.parse import urlsplit
 
 
 class Rpc:
@@ -30,6 +31,18 @@ class Rpc:
         env['SUB2API_API_KEY'] = os.environ['DEVIN_JOURNEY_GATEWAY_KEY']
         env['BUN_INSTALL_CACHE_DIR'] = str(directory / 'cache/bun')
         command = helpers.command('omp', args.model, True)[:-1]
+        self.trace = None
+        if os.environ.get('DEVIN_JOURNEY_FETCH_DIAGNOSTIC') == 'true':
+            if os.environ.get('DEVIN_E2E_MODE') != 'mock':
+                raise ValueError('fetch_diagnostic_requires_mock')
+            origin = urlsplit(args.ui_url)
+            env['DEVIN_JOURNEY_FETCH_ORIGIN'] = f'{origin.scheme}://{origin.netloc}'
+            self.trace = directory / f'rpc-fetch-{time.time_ns()}.jsonl'
+            self.trace.touch(mode=0o600)
+            if os.geteuid() == 0:
+                os.chown(self.trace, 65534, 65534)
+            env['DEVIN_JOURNEY_FETCH_TRACE'] = str(self.trace)
+            command[1:1] = ['--preload', str(helpers.ROOT / 'diagnostic-fetch.cjs')]
         command.remove('-p')
         command[command.index('--mode') + 1] = 'rpc'
         self.proc = subprocess.Popen(command, cwd=directory / 'workspace', env=env, stdin=subprocess.PIPE,
@@ -96,6 +109,15 @@ class Rpc:
             if event.get('type') == 'response' and event.get('success') is not True:
                 raise ValueError('rpc_command_rejected')
             if kind == 'prompt':
+                # OMP 18.12.6 discards the prompt lifecycle token for locally
+                # handled slash commands and returns this response instead of
+                # a prompt_result. Acknowledge only this exact local command;
+                # run() independently verifies a newly persisted checkpoint.
+                if (local_prompt and fields.get('message') == '/compact soft' and event.get('type') == 'response'
+                        and event.get('success') is True and event.get('data', {}).get('agentInvoked') is False):
+                    if self.failed or self.parse_errors:
+                        raise ValueError('rpc_event_failure')
+                    return {'local_command_acknowledged': True}
                 if event.get('type') != 'prompt_result':
                     continue
                 invoked = event.get('agentInvoked') is True or (local_prompt and fields.get('message') == '/compact soft' and event.get('agentInvoked') is False)
@@ -137,11 +159,19 @@ class Rpc:
             self.h.ACTIVE.discard(self.proc)
         return clean
 
+    def take_fetch_observations(self):
+        if not self.trace:
+            return []
+        records = [json.loads(line) for line in self.h.project_bytes(self.trace.parent, self.trace.name).decode().splitlines()]
+        self.trace = None
+        return records
+
 
 def run(args, directory, session_hash, nonce, helpers):
     result = {'tier': 'client_mock', 'client': 'omp', 'context_pressure': 'not_run', 'compact': 'not_run',
               'fork': 'not_run', 'disconnect_recovery': 'not_run', 'idle_process_recovery': 'not_run', 'worker': 'not_run', 'stage': 'rpc_start', 'status': 'failed'}
     rpc = None
+    fetch_observations = []
     try:
         pressure = directory / 'workspace/context'
         pressure.mkdir()
@@ -171,6 +201,7 @@ def run(args, directory, session_hash, nonce, helpers):
             raise ValueError('fork_not_independent_or_history_missing')
         result.update(fork='passed', distinct_fork_session=True, original_history_copied=True)
         result['stage'] = 'idle_process_recovery'
+        fetch_observations.extend(rpc.take_fetch_observations())
         if not rpc.close(abrupt=True):
             raise ValueError('rpc_cleanup_failed')
         rpc = Rpc(args, directory, helpers)
@@ -190,20 +221,32 @@ def run(args, directory, session_hash, nonce, helpers):
                           compact_scope='separate compact probe failed; not retried in this independent run')
             return result
         result['stage'] = 'compact'
-        # This is the user's explicit local compaction command. It skips the
-        # client's provider-specific remote-compaction preference without
-        # modifying any copied configuration or calling another model service.
-        rpc.call('prompt', message='/compact soft', local_prompt=True)
+        prior_checkpoints = {entry['id'] for entry in rpc.call('get_entries')['entries'] if entry.get('type') == 'compaction'}
+        style = os.environ.get('DEVIN_JOURNEY_COMPACT_STYLE', 'rpc')
+        if style == 'soft':
+            completed = rpc.call('prompt', message='/compact soft', local_prompt=True)
+        elif style == 'rpc':
+            rpc.call('compact')
+            completed = {'local_command_acknowledged': True}
+        else:
+            raise ValueError('invalid_compact_style')
         entries = rpc.call('get_entries')['entries']
         compact = next((entry for entry in reversed(entries) if entry.get('type') == 'compaction'), {})
-        if not compact.get('summary') or nonce not in compact['summary'] or not any(entry.get('type') == 'compaction' for entry in entries):
+        state = rpc.call('get_state')
+        result['compact_checks'] = {'local_acknowledged': completed.get('local_command_acknowledged') is True,
+                                    'new_checkpoint': bool(compact.get('id')) and compact.get('id') not in prior_checkpoints,
+                                    'summary_present': bool(compact.get('summary')), 'nonce_preserved': nonce in compact.get('summary', ''),
+                                    'is_compacting': state.get('isCompacting')}
+        if (completed.get('local_command_acknowledged') is not True or not compact.get('summary') or nonce not in compact['summary']
+                or compact.get('id') in prior_checkpoints or state.get('isCompacting') is not False):
             raise ValueError('compaction_not_persisted_or_lost_fact')
         result.update(compact='passed', summary_preserved_nonce=True, compaction_entry_observed=True,
-                      compaction_tokens_before=compact.get('tokensBefore'), compact_mode='explicit /compact soft; automatic/default compaction not certified',
+                      compaction_tokens_before=compact.get('tokensBefore'), compact_mode='default compact RPC' if style == 'rpc' else 'explicit /compact soft',
                       usage_basis='synthetic input bytes/4; not provider usage')
         result['stage'] = 'idle_process_recovery'
         # Kill the actual idle client after compaction, then reopen the same
         # persisted session. This does not claim an in-flight network recovery.
+        fetch_observations.extend(rpc.take_fetch_observations())
         if not rpc.close(abrupt=True):
             raise ValueError('rpc_cleanup_failed')
         rpc = Rpc(args, directory, helpers)
@@ -231,6 +274,9 @@ def run(args, directory, session_hash, nonce, helpers):
             result.update(observed_reads=rpc.reads, context_ready_marker=rpc.final_text.strip() == 'CONTEXT_READY', event_failure=rpc.failed)
             result.update(error_categories=sorted(rpc.error_categories), error_http_status=rpc.error_http_status)
             result['error_vocabulary'] = sorted(rpc.error_vocabulary)
+            fetch_observations.extend(rpc.take_fetch_observations())
+            if fetch_observations:
+                result['fetch_observations'] = fetch_observations
             result['cleanup_passed'] = rpc.close()
             if not result['cleanup_passed']:
                 result['status'] = 'failed'

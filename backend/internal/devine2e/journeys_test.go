@@ -35,7 +35,7 @@ func TestDevinClientUserJourneysMock(t *testing.T) {
 	runDevinCloudGatewaySuite(t, "mock", f, "journeys")
 }
 
-func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, admin, key string, keyID, accountID int64) {
+func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, admin, key, userPassword string, keyID, accountID int64) {
 	t.Helper()
 	profile := fusion.DefaultProfile("fusion-project-journey", fixtureModel, fixtureSidekick)
 	profile.MaxHandoffs, profile.MaxRequests, profile.MaxTools = 2, 32, 20
@@ -79,12 +79,12 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					fixture.journey.workspace = filepath.Join(directory, "workspace")
 					fixture.journey.maxContextBytes = 0
 					fixture.journey.mu.Unlock()
-					admission := newAgentAdmission(t, app, model, 40, 40)
+					admission := newJourneyAdmission(t, app, model, 40)
 					fixture.mu.Lock()
 					nativeStart := len(fixture.chats)
 					fixture.mu.Unlock()
 					usageBefore := agentUsageCount(t, app, keyID)
-					ui := journeyUIServer(t, admission.server.URL, key)
+					ui := journeyUIServer(t, app.base, admission.server.URL)
 					script, err := filepath.Abs("../../../tools/devin-e2e-clients/journey.py")
 					require.NoError(t, err)
 					ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
@@ -97,6 +97,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 						}
 					}
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_GATEWAY_KEY="+key)
+					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_UI_PASSWORD="+userPassword)
 					output, runErr := cmd.Output()
 					var report map[string]any
 					require.NoError(t, json.Unmarshal(output, &report), "journey runner must return sanitized structural evidence")
@@ -205,21 +206,24 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	billing["verified"], billing["native_calls"], billing["unique_charged_rows"] = true, nativeTotal, nativeTotal
 }
 
-func journeyUIServer(t *testing.T, endpoint, key string) *httptest.Server {
+func journeyUIServer(t *testing.T, backend, endpoint string) *httptest.Server {
 	t.Helper()
 	directory := os.Getenv("DEVIN_JOURNEY_UI_DIST")
-	require.NotEmpty(t, directory, "build the product browser harness first")
+	require.NotEmpty(t, directory, "build the complete product application first")
 	target, err := url.Parse(endpoint)
 	require.NoError(t, err)
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	apiTarget, err := url.Parse(backend)
+	require.NoError(t, err)
+	apiProxy := httputil.NewSingleHostReverseProxy(apiTarget)
 	files := http.FileServer(http.Dir(directory))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/__journey/session" {
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Cache-Control", "no-store")
-			_ = json.NewEncoder(w).Encode(map[string]string{"key": key})
-		} else if strings.HasPrefix(r.URL.Path, "/v1/") {
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
 			proxy.ServeHTTP(w, r)
+		} else if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/setup/") || r.URL.Path == "/health" {
+			apiProxy.ServeHTTP(w, r)
+		} else if r.URL.Path == "/login" || r.URL.Path == "/keys" || r.URL.Path == "/dashboard" || r.URL.Path == "/" {
+			http.ServeFile(w, r, filepath.Join(directory, "index.html"))
 		} else {
 			files.ServeHTTP(w, r)
 		}

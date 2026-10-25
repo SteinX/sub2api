@@ -449,7 +449,7 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 		return
 	}
 	if journeys {
-		runUserJourneys(t, a, fixture, admin, key, keyID, accountID)
+		runUserJourneys(t, a, fixture, admin, key, userPassword, keyID, accountID)
 		return
 	}
 	if longTask {

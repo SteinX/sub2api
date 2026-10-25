@@ -83,7 +83,7 @@ def isolation(client=None):
 
 def project_environment(directory):
     env = child_environment(directory)
-    for name in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "DEVIN_E2E_GATEWAY_KEY", "DEVIN_JOURNEY_GATEWAY_KEY"}:
+    for name in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "DEVIN_E2E_GATEWAY_KEY", "DEVIN_JOURNEY_GATEWAY_KEY", "DEVIN_JOURNEY_UI_PASSWORD"}:
         env.pop(name, None)
     return env
 
@@ -330,6 +330,8 @@ def main():
     directory = Path(args.directory).resolve()
     workspace, expected, protected = prepare(directory)
     ui_input = {"directory": str(directory), "workspace": str(workspace), "client": args.client, "model": args.model, "ui_url": args.ui_url, "profile": args.profile, "test_command": TEST_COMMAND}
+    ui_input.update(email='user@devin-e2e.invalid', password=os.environ['DEVIN_JOURNEY_UI_PASSWORD'], key_name='e2e-key',
+                    expected_key_sha256=digest(os.environ['DEVIN_JOURNEY_GATEWAY_KEY'].encode()))
     kwargs = isolation(args.client)
     ui = subprocess.Popen(["node", str(ROOT / "ui-handoff.mjs")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=project_environment(directory), start_new_session=True, **kwargs)
     ACTIVE.add(ui)

@@ -56,15 +56,16 @@ type agentRequest struct {
 // It preserves the client's protocol and session headers, limits model calls,
 // and clamps requested output before the production gateway receives a request.
 type agentAdmission struct {
-	server        *httptest.Server
-	mu            sync.Mutex
-	model         string
-	forwarded     int
-	maxForwarded  int
-	maxAttempts   int
-	requests      []*agentRequest
-	interruptFile string
-	active        chan struct{}
+	server          *httptest.Server
+	mu              sync.Mutex
+	model           string
+	forwarded       int
+	maxForwarded    int
+	maxAttempts     int
+	queueConcurrent bool
+	requests        []*agentRequest
+	interruptFile   string
+	active          chan struct{}
 }
 
 type agentRequestContext struct{}
@@ -77,7 +78,16 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 		maxAttempts = attemptLimits[0]
 		require.Positive(t, maxAttempts)
 	}
-	p := &agentAdmission{model: model, maxForwarded: maxForwarded, maxAttempts: maxAttempts, active: make(chan struct{}, 1)}
+	return newAgentAdmissionPolicy(t, app, model, maxForwarded, maxAttempts, false)
+}
+
+func newJourneyAdmission(t *testing.T, app *application, model string, maxForwarded int) *agentAdmission {
+	return newAgentAdmissionPolicy(t, app, model, maxForwarded, maxForwarded, true)
+}
+
+func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxForwarded, maxAttempts int, queue bool) *agentAdmission {
+	t.Helper()
+	p := &agentAdmission{model: model, maxForwarded: maxForwarded, maxAttempts: maxAttempts, queueConcurrent: queue, active: make(chan struct{}, 1)}
 	target, err := url.Parse(app.base)
 	require.NoError(t, err)
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -156,12 +166,21 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 			return
 		}
 		p.mu.Unlock()
-		select {
-		case p.active <- struct{}{}:
-			defer func() { <-p.active }()
-		default:
-			http.Error(w, "E2E permits one active request", 409)
-			return
+		if p.queueConcurrent {
+			select {
+			case p.active <- struct{}{}:
+				defer func() { <-p.active }()
+			case <-r.Context().Done():
+				return
+			}
+		} else {
+			select {
+			case p.active <- struct{}{}:
+				defer func() { <-p.active }()
+			default:
+				http.Error(w, "E2E permits one active request", 409)
+				return
+			}
 		}
 		// A request may have passed the earlier check before another request
 		// took and released active. Recheck and reserve under the same lock.
