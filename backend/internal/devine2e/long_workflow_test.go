@@ -149,6 +149,13 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	goal := longGoal + ". Lead must delegate exactly two phases to Sidekick: phase 1 reads parts 1-8, phase 2 reads parts 9-16. Sidekick must read each part exactly once, one tool call at a time, and report the sum of VALUE fields with evidence. Lead reviews both reports and returns E2E_LONG_OK phase1=<sum> phase2=<sum>. Retain completed parts and running sums in any context summary. No other tools or delegated client agents."
 	var input any = goal
 	var sessionID string
+	defer func() {
+		if t.Failed() && sessionID != "" {
+			// Retain structural state/cost before the disposable Redis is removed.
+			// This helper does not serialize tool contents or credentials.
+			diagnoseAgentHistory(t, app, keyID, []agentRequest{{Session: sessionID}})
+		}
+	}()
 	seenIDs, seenParts := map[string]bool{}, map[int]bool{}
 	requests, restarted, finished := 0, false, false
 	started := time.Now()
