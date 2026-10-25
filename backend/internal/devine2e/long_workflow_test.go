@@ -228,7 +228,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 			finished = true
 			break
 		}
-		require.Len(t, results, 1, "the long workflow is serial")
+		require.Equal(t, 1, len(results), "the long workflow is serial; results withheld")
 		if len(seenParts) == 8 && !restarted {
 			app.stop(t)
 			app.start(t)
@@ -247,7 +247,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	require.NoError(t, err)
 	var session fusion.Session
 	require.NoError(t, json.Unmarshal(stored, &session))
-	require.Len(t, session.Handoffs, 2)
+	require.Equal(t, 2, len(session.Handoffs), "unexpected handoff count; briefs and reports withheld")
 	require.NotNil(t, session.Contexts[fusion.Sidekick])
 	require.Positive(t, session.Contexts[fusion.Sidekick].Epoch, "Sidekick must actually compact during this task")
 	require.Positive(t, session.Maintenance.CompactionsApplied)
@@ -313,9 +313,23 @@ func savePrivateLongFailure(t *testing.T, app *application, keyID int64, session
 	}
 	var attempts []map[string]any
 	for _, a := range session.Attempts {
+		var toolShapes []map[string]any
+		if a.Response != nil {
+			for _, item := range a.Response.Output {
+				if item.Type != "function_call" || len(toolShapes) >= 20 {
+					continue
+				}
+				toolShapes = append(toolShapes, map[string]any{
+					"declared_test_tool": item.Name == "read_fragment" || item.Name == fusion.DelegateTool,
+					"argument_bytes":     len(item.Arguments), "json_valid": json.Valid([]byte(item.Arguments)),
+					"part_key_mentions": strings.Count(item.Arguments, `"part"`),
+					"object_starts":     strings.Count(item.Arguments, "{"), "object_ends": strings.Count(item.Arguments, "}"),
+				})
+			}
+		}
 		attempts = append(attempts, map[string]any{"role": a.Role, "purpose": a.Purpose, "status": a.Status,
 			"settled": a.Settled, "applied": a.Applied, "usage_observed": a.Response != nil && a.Response.Usage != nil,
-			"cost_usd": a.CostUSD, "failure": a.Failure})
+			"cost_usd": a.CostUSD, "failure": a.Failure, "tool_shapes": toolShapes})
 	}
 	evidence = map[string]any{"available": true, "state": session.State, "turn_requests": session.TurnRequests,
 		"turn_tools": session.TurnTools, "turn_handoffs": session.TurnHandoffs, "turn_cost_usd": session.TurnCostUSD, "attempts": attempts}
