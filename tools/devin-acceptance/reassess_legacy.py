@@ -16,12 +16,15 @@ def reassess(directories):
     setup = 0
     for directory in directories:
         records = {}
+        groups = {}
         for line in (directory / 'results.jsonl').read_text().splitlines():
             try:
                 event = json.loads(line)
             except ValueError:
                 continue
             parts = str(event.get('Test', '')).split('/')
+            if len(parts) == 3 and parts[1] in CLIENTS and parts[2] in KINDS and event.get('Action') in {'pass', 'fail', 'skip'}:
+                groups['/'.join(parts[:3])] = event['Action']
             if len(parts) != 4 or parts[1] not in CLIENTS or parts[2] not in KINDS:
                 continue
             name = '/'.join(parts[1:])
@@ -29,7 +32,7 @@ def reassess(directories):
                 if event.get('Action') == 'pass' and parts[3].startswith('recovery_setup_'):
                     setup += 1
                 continue
-            record = records.setdefault(name, {'source': directory.name, 'test_status': None, 'processes': []})
+            record = records.setdefault(name, {'source': directory.name, 'test_status': None, 'processes': [], 'parent_test': '/'.join(parts[:3])})
             if event.get('Action') in {'pass', 'fail', 'skip'}:
                 record['test_status'] = event['Action']
             match = PATTERN.search(event.get('Output', ''))
@@ -37,6 +40,7 @@ def reassess(directories):
                 record['processes'].append({'exit_code': int(match[3]), 'frames': int(match[4]), 'completed_read': int(match[5]),
                                             'expected_marker': match[6] == 'true', 'interrupted_before_forward': match[7] == 'true'})
         for name, record in records.items():
+            record['parent_test_status'] = groups.get(record.pop('parent_test'))
             attempts.setdefault(name, []).append(record)
     result = []
     for client in CLIENTS:
@@ -46,7 +50,7 @@ def reassess(directories):
                 history = attempts.get(name, [])
                 passed = [attempt for attempt in history if attempt['test_status'] == 'pass']
                 reusable_cancel = case == 'interrupt_before_upstream_send' and any(
-                    process.get('interrupted_before_forward') for attempt in passed for process in attempt['processes'])
+                    process.get('interrupted_before_forward') for attempt in passed if attempt['parent_test_status'] == 'pass' for process in attempt['processes'])
                 result.append({'id': name, 'historical_contract_pass_recorded': bool(passed),
                                'terminal_state_available': False, 'product_ui_config_available': False,
                                'reusable_scope': 'recorded cancellation-before-forward contract' if reusable_cancel else 'historical process/tool/routing counts only',

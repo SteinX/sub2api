@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 
 let stage = 'input'
+const diagnostics = { model_http_statuses: [], page_errors: 0, model_count: 0, selected_model_available: false }
 async function main() {
   let raw = ''
   for await (const chunk of process.stdin) { raw += chunk; if (raw.length > 65536) throw new Error('Oversized UI request') }
@@ -26,11 +27,28 @@ async function main() {
     const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] })
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort())
     const page = await context.newPage()
+    page.on('response', async response => {
+      if (!new URL(response.url()).pathname.endsWith('/models')) return
+      diagnostics.model_http_statuses.push(response.status())
+      try {
+        const catalog = await response.json()
+        const models = catalog.models ?? catalog.data ?? []
+        diagnostics.model_count = models.length
+        diagnostics.selected_model_available = models.some(model => (model.slug ?? model.id) === input.model)
+      } catch { /* retain only safe structural diagnostics */ }
+    })
+    page.on('pageerror', () => { diagnostics.page_errors++ })
     stage = 'navigate'
     await page.goto(`${origin}/test-support/devin-handoff.html`, { waitUntil: 'networkidle', timeout: 30000 })
     stage = 'model-discovery'
+    await page.getByTestId('devin-client-model').waitFor()
+    await page.waitForFunction(model => [...document.querySelectorAll('#devin-client-model option')].some(option => option.value === model), input.model)
+    diagnostics.model_count = await page.locator('#devin-client-model option').count()
+    diagnostics.selected_model_available = true
     await page.getByTestId('devin-client-model').selectOption(input.model)
+    stage = 'client-tab'
     await page.locator(`button[data-client="${input.client}"]`).click()
+    stage = 'environment-key'
     await page.getByTestId('devin-key-from-env').check()
     if (input.client !== 'omp') {
       await page.getByTestId('devin-project-mode').check()
@@ -74,4 +92,4 @@ async function main() {
     }) + '\n')
   } finally { await browser.close() }
 }
-main().catch(error => { process.stdout.write(JSON.stringify({ passed: false, stage, error_kind: ['Error', 'TimeoutError', 'TypeError'].includes(error.name) ? error.name : 'other' }) + '\n'); process.exitCode = 1 })
+main().catch(error => { process.stdout.write(JSON.stringify({ passed: false, stage, diagnostics, error_kind: ['Error', 'TimeoutError', 'TypeError'].includes(error.name) ? error.name : 'other' }) + '\n'); process.exitCode = 1 })

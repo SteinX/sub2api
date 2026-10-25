@@ -1397,9 +1397,16 @@ func mixedListingModelAllowed(groupPlatform, model string) bool {
 }
 
 func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64, platform string) []string {
+	// Devin grants and Fusion profiles are refreshed independently of static
+	// model mappings. Read the current account snapshot on discovery so the Use
+	// Key refresh cannot retain removed grants or hide a newly configured pair.
+	cache := s.modelsListCache
+	if platform == PlatformDevin {
+		cache = nil
+	}
 	cacheKey := modelsListCacheKey(groupID, platform)
-	if s.modelsListCache != nil {
-		if cached, found := s.modelsListCache.Get(cacheKey); found {
+	if cache != nil {
+		if cached, found := cache.Get(cacheKey); found {
 			if models, ok := cached.([]string); ok {
 				modelsListCacheHitTotal.Add(1)
 				return cloneStringSlice(models)
@@ -1488,8 +1495,8 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		}
 	}
 	if !hasAnyMapping {
-		if s.modelsListCache != nil {
-			s.modelsListCache.Set(cacheKey, []string(nil), s.modelsListCacheTTL)
+		if cache != nil {
+			cache.Set(cacheKey, []string(nil), s.modelsListCacheTTL)
 			modelsListCacheStoreTotal.Add(1)
 		}
 		return nil
@@ -1512,8 +1519,8 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		}
 	}
 
-	if s.modelsListCache != nil {
-		s.modelsListCache.Set(cacheKey, cloneStringSlice(models), s.modelsListCacheTTL)
+	if cache != nil {
+		cache.Set(cacheKey, cloneStringSlice(models), s.modelsListCacheTTL)
 		modelsListCacheStoreTotal.Add(1)
 	}
 	return cloneStringSlice(models)
