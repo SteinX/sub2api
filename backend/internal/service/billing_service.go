@@ -1380,7 +1380,10 @@ func (s *BillingService) HasIdentifiedTokenPricing(model string) bool {
 			return true
 		}
 	}
-	pricing, ok := s.fallbackPrices[model]
+	// Claude 5.5's known effort tiers select reasoning depth, not a different
+	// token card. Keep admission consistent with getFallbackPricing even when
+	// the dynamic catalog is absent. Do not use the permissive family lookup.
+	pricing, ok := s.fallbackPrices[normalizeAntigravityClaudeTierAlias(model)]
 	return ok && pricing != nil
 }
 
