@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -76,6 +77,10 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					fixture.journey.workspace = filepath.Join(directory, "workspace")
 					fixture.journey.mu.Unlock()
 					admission := newAgentAdmission(t, app, model, 40)
+					fixture.mu.Lock()
+					nativeStart := len(fixture.chats)
+					fixture.mu.Unlock()
+					usageBefore := agentUsageCount(t, app, keyID)
 					ui := journeyUIServer(t, admission.server.URL, key)
 					script, err := filepath.Abs("../../../tools/devin-e2e-clients/journey.py")
 					require.NoError(t, err)
@@ -99,7 +104,28 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 							errors[request.ErrorCode]++
 						}
 					}
-					report["id"], report["model_kind"], report["physical_lead_uid"], report["physical_sidekick_uid"] = id, kind, fixtureModel, fixtureSidekick
+					report["id"], report["model_kind"], report["physical_lead_uid"] = id, kind, fixtureModel
+					report["physical_sidekick_uid"] = ""
+					if kind == "fusion" {
+						report["physical_sidekick_uid"] = fixtureSidekick
+					}
+					fixture.mu.Lock()
+					uids, roles := map[string]int{}, map[string]int{}
+					contexts := map[string]map[string]bool{"lead": {}, "sidekick": {}}
+					for _, native := range fixture.chats[nativeStart:] {
+						role := "lead"
+						if kind == "fusion" && native.ChatModelUid == fixtureSidekick {
+							role = "sidekick"
+						}
+						uids[native.ChatModelUid]++
+						roles[role]++
+						contexts[role][fusion.Digest(native.CascadeId)] = true
+					}
+					nativeCount := len(fixture.chats) - nativeStart
+					fixture.mu.Unlock()
+					report["observed_physical_models"], report["observed_role_calls"] = uids, roles
+					report["native_context_hashes"] = contexts
+					report["reasoning_scope"] = map[string]string{"model_uid_effort": "fixture UID swe-2-max", "client_thinking": map[bool]string{true: "off", false: "client default"}[client == "omp"]}
 					report["public_requests"], report["http_attempts"], report["error_codes"] = forwarded, len(requests), errors
 					reports = append(reports, report)
 					writeAgentArtifact(t, "journey-"+strings.ReplaceAll(id, "/", "-")+".json", report)
@@ -110,10 +136,19 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					}
 					require.NoError(t, runErr, "real CLI project task failed; structural evidence retained")
 					require.Equal(t, "passed", report["status"])
+					require.Positive(t, uids[fixtureModel])
+					if kind == "fusion" {
+						require.Positive(t, uids[fixtureSidekick])
+						for context := range contexts["lead"] {
+							require.False(t, contexts["sidekick"][context], "roles must keep separate native histories")
+						}
+					}
+					verifyAgentUsage(t, app, keyID, usageBefore+nativeCount)
 				})
 			}
 		}
 	}
+	require.NotEmpty(t, reports, "case filter did not select any journey")
 }
 
 func journeyUIServer(t *testing.T, endpoint, key string) *httptest.Server {
@@ -149,5 +184,27 @@ func journeySource(t *testing.T, app *application) map[string]any {
 	data, err := os.ReadFile(app.binary)
 	require.NoError(t, err)
 	digest := sha256.Sum256(data)
-	return map[string]any{"commit": git("rev-parse", "HEAD"), "tree": git("rev-parse", "HEAD^{tree}"), "dirty": git("status", "--porcelain") != "", "backend_sha256": hex.EncodeToString(digest[:])}
+	ui := sha256.New()
+	root := os.Getenv("DEVIN_JOURNEY_UI_DIST")
+	require.NoError(t, filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		_, _ = ui.Write([]byte(filepath.ToSlash(relative) + "\x00"))
+		_, _ = ui.Write(data)
+		return nil
+	}))
+	lock, err := os.ReadFile("../../../tools/devin-e2e-clients/package-lock.json")
+	require.NoError(t, err)
+	lockDigest := sha256.Sum256(lock)
+	return map[string]any{"commit": git("rev-parse", "HEAD"), "tree": git("rev-parse", "HEAD^{tree}"), "dirty": git("status", "--porcelain") != "", "backend_sha256": hex.EncodeToString(digest[:]),
+		"ui_bundle_sha256": hex.EncodeToString(ui.Sum(nil)), "client_lock_sha256": hex.EncodeToString(lockDigest[:])}
 }

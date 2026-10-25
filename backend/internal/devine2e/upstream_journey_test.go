@@ -124,7 +124,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	case !tested:
 		for _, tool := range request.Tools {
 			if tool.Name == "bash" {
-				call(tool, map[string]any{"command": "python3 -m unittest -v", "description": "Run project tests"})
+				call(tool, map[string]any{"command": "python3 run_tests.py", "description": "Run project tests"})
 				return
 			}
 		}

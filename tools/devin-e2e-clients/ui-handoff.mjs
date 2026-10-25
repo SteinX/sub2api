@@ -35,7 +35,7 @@ async function main() {
     if (input.client !== 'omp') {
       await page.getByTestId('devin-project-mode').check()
       await page.getByTestId('devin-workspace-path').fill(input.workspace)
-      await page.getByTestId('devin-test-command').fill('python3 -m unittest -v')
+      await page.getByTestId('devin-test-command').fill(input.test_command)
     } else {
       await page.getByTestId('devin-omp-profile').selectOption(input.profile)
     }

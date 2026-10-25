@@ -17,7 +17,8 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
 PINS = {"opencode-ai": "1.19.4", "oh-my-opencode": "5.1.44", "@oh-my-pi/pi-coding-agent": "18.12.6", "@oven/bun-linux-x64": "1.4.4"}
-SENSITIVE_ENV = {"DEVIN_E2E_PAT", "DEVIN_E2E_CREDENTIAL", "DEVIN_PAT", "DEVIN_API_KEY", "SUB2API_API_KEY", "SUB2API_USER_TOKEN"}
+SENSITIVE_ENV = {"DEVIN_E2E_PAT", "DEVIN_E2E_CREDENTIAL", "DEVIN_PAT", "DEVIN_API_KEY", "SUB2API_API_KEY", "SUB2API_USER_TOKEN",
+                 "DEVIN_E2E_DB_PASSWORD", "DEVIN_E2E_PG_PORT", "DEVIN_E2E_REDIS_PORT", "DEVIN_JOURNEY_GATEWAY_KEY"}
 
 
 def write_json(path, value):
