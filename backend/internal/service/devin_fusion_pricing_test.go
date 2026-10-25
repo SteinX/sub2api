@@ -107,6 +107,9 @@ func TestDevinFusionMemberPricingUsesPhysicalUIDAndGroupScope(t *testing.T) {
 			require.Equal(t, tc.wantSource != "", admission.Calculable)
 			if tc.wantSource != "" {
 				require.Equal(t, tc.wantSource, admission.Source)
+				quoted := svc.InspectDevinContextPrice(context.Background(), key, sidekick, 32768, 1024)
+				require.NotNil(t, quoted.ContextCostUpperUSD)
+				require.GreaterOrEqual(t, *quoted.ContextCostUpperUSD, 32768*2e-6+1024*4e-6, "quote must include a full context and maximum output at the actual scoped price")
 			}
 			require.False(t, svc.InspectDevinPricing(context.Background(), key, public).Identified)
 			estimate, err := x.estimate(context.Background(), call, false)

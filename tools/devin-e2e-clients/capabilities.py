@@ -47,7 +47,7 @@ class Rpc:
         command[command.index('--mode') + 1] = 'rpc'
         self.proc = subprocess.Popen(command, cwd=directory / 'workspace', env=env, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, **helpers.isolation('omp'))
-        helpers.ACTIVE.add(self.proc)
+        helpers.track(self.proc)
         self.reader = threading.Thread(target=self.consume, daemon=True)
         self.reader.start()
 

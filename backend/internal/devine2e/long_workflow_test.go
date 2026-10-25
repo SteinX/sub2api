@@ -241,7 +241,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	db := agentDatabase(t, app)
 	var userID int64
 	require.NoError(t, db.QueryRow("SELECT user_id FROM api_keys WHERE id=$1", keyID).Scan(&userID))
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT")})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD")})
 	defer rdb.Close()
 	stored, err := rdb.Get(context.Background(), "devin:fusion:session:"+fusion.Scope(userID, keyID)+":"+fusion.Digest(sessionID)).Bytes()
 	require.NoError(t, err)
@@ -301,7 +301,7 @@ func savePrivateLongFailure(t *testing.T, app *application, keyID int64, session
 	if db.QueryRowContext(ctx, "SELECT user_id FROM api_keys WHERE id=$1", keyID).Scan(&userID) != nil {
 		return
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT")})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD")})
 	defer rdb.Close()
 	stored, err := rdb.Get(ctx, "devin:fusion:session:"+fusion.Scope(userID, keyID)+":"+fusion.Digest(sessionID)).Bytes()
 	if err != nil {

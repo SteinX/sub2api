@@ -43,8 +43,9 @@ docker_cli=(docker --host=unix:///var/run/docker.sock)
 "${docker_cli[@]}" info >/dev/null
 project="devin-e2e-$$"
 compose=("${docker_cli[@]}" compose -p "$project" -f "$repo_dir/deploy/docker-compose.devin-e2e.yml")
-export DEVIN_E2E_DB_PASSWORD
+export DEVIN_E2E_DB_PASSWORD DEVIN_E2E_REDIS_PASSWORD
 DEVIN_E2E_DB_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+DEVIN_E2E_REDIS_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
 cleanup() {
   if [ -f "$DEVIN_E2E_ARTIFACTS/server.pid" ]; then
     read -r backend_pid < "$DEVIN_E2E_ARTIFACTS/server.pid" || true

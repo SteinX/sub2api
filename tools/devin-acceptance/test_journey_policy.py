@@ -95,6 +95,15 @@ class RealJourneyPolicyTests(unittest.TestCase):
             snapshot.write_text('[{"changed":true}]')
             with self.assertRaisesRegex(policy.Denied,'price_snapshot'): policy.validate(plan,approval,'live',source,env,NOW)
 
+    def test_direct_quote_obeys_turn_and_remaining_run_limits_before_admit(self):
+        for cost,estimate in [(0,.0011),(.0995,.0008)]:
+            plan,*_=proposal(); plan['limits'].update(turn_usd=.001,local_usd=.1)
+            with tempfile.TemporaryDirectory() as temporary:
+                ledger=Path(temporary)/'ledger.json'; policy.claim(ledger,plan,'live')
+                with self.assertRaisesRegex(policy.Denied,'direct_turn_or_remaining_cost'):
+                    policy.ledger_action(ledger,'admit',cost=cost,estimated_cost=estimate)
+                self.assertEqual(0,policy.read_json(ledger)['requests'])
+
 
 if __name__ == '__main__':
     unittest.main()

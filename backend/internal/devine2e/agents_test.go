@@ -70,6 +70,7 @@ type agentAdmission struct {
 	active          chan struct{}
 	runBudget       journeyBudget
 	outputLimit     int
+	turnTimeout     time.Duration
 }
 
 type agentRequestContext struct{}
@@ -137,6 +138,11 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 		if r.Method != "POST" || r.URL.Path != "/v1/chat/completions" {
 			http.Error(w, "unsupported E2E route", 404)
 			return
+		}
+		if p.turnTimeout > 0 {
+			ctx, cancel := context.WithTimeout(r.Context(), p.turnTimeout)
+			defer cancel()
+			r = r.WithContext(ctx)
 		}
 		var body map[string]any
 		if json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body) != nil || body["model"] != p.model {
@@ -718,7 +724,7 @@ func verifyAgentFusion(t *testing.T, app *application, keyID int64, records []ag
 	db := agentDatabase(t, app)
 	var userID int64
 	require.NoError(t, db.QueryRow("SELECT user_id FROM api_keys WHERE id=$1", keyID).Scan(&userID))
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT")})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD")})
 	t.Cleanup(func() { _ = rdb.Close() })
 	seen := map[string]bool{}
 	allowZero := len(identifiedZero) == 1 && identifiedZero[0]

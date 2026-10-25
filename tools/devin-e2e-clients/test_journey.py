@@ -12,7 +12,7 @@ import journey
 class JourneyProofTests(unittest.TestCase):
     def test_project_code_always_uses_unprivileged_identity_and_clean_environment(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(journey.os, 'geteuid', return_value=0), patch.object(journey.subprocess, 'run') as run:
-            with patch.dict(os.environ, {'DEVIN_E2E_PAT': 'synthetic-secret', 'DEVIN_E2E_DB_PASSWORD': 'synthetic-password', 'SUB2API_API_KEY': 'synthetic-key',
+            with patch.dict(os.environ, {'DEVIN_E2E_PAT': 'synthetic-secret', 'DEVIN_E2E_DB_PASSWORD': 'synthetic-password', 'DEVIN_E2E_REDIS_PASSWORD':'synthetic-cache-secret', 'SUB2API_API_KEY': 'synthetic-key',
                                          'DEVIN_JOURNEY_GATEWAY_KEY': 'synthetic-gateway', 'CODEX_PROXY_GUARD_TEST': 'keep-guard'}):
                 journey.run_project_python(Path(temp), ['-c', 'import price_math'])
             kwargs = run.call_args.kwargs

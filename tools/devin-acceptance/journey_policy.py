@@ -139,7 +139,7 @@ def claim(path, plan, mode):
     return state
 
 
-def ledger_action(path, action, receipt=None, outcome=None, cost=None):
+def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated_cost=None):
     try:
         fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
     except OSError:
@@ -160,6 +160,11 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None):
                 state['local_cost_usd'] = cost
             if state['requests'] >= state['limits']['public_requests'] or state['local_cost_usd'] >= state['limits']['local_usd']:
                 raise Denied('approved_run_budget_exhausted')
+            if estimated_cost is not None:
+                if (type(estimated_cost) not in {float,int} or not math.isfinite(estimated_cost) or estimated_cost<0
+                        or estimated_cost>state['limits']['turn_usd'] or state['local_cost_usd']+estimated_cost>state['limits']['local_usd']):
+                    raise Denied('direct_turn_or_remaining_cost_bound_exceeded')
+            state['request_start_cost_usd']=state['local_cost_usd']
             state['requests'] += 1
             state['inflight'] = state['requests']
         elif action == 'complete':
@@ -168,6 +173,8 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None):
             if type(cost) not in {float, int} or not math.isfinite(cost) or cost < state['local_cost_usd']:
                 outcome = 'uncertain'
             else:
+                if cost-state['request_start_cost_usd']>state['limits']['turn_usd']:
+                    outcome='failed'
                 state['local_cost_usd'] = cost
             state['stopped'] = state['stopped'] or outcome != 'success'
             state['inflight'] = None if outcome == 'success' else receipt

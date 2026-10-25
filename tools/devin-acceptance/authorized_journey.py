@@ -17,6 +17,8 @@ from journey_policy import Denied, claim, current_source, digest, ledger_action,
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE_ROOT = ROOT / '.cache/devin-approved-runs'
+sys.path.insert(0,str(ROOT/'tools/devin-e2e-clients'))
+import process_cleanup
 
 
 def checked(args):
@@ -52,10 +54,13 @@ def run(args, plan):
     claim(args.ledger, plan, args.mode)
     artifacts.mkdir(parents=True, mode=0o700, exist_ok=True)
     artifacts.chmod(0o700)
+    registry=artifacts/'private-processes.jsonl'
+    with os.fdopen(os.open(registry,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600),'w'): pass
     env = dict(os.environ)
     env.update(DEVIN_JOURNEY_REAL='true', DEVIN_JOURNEY_PLAN_FILE=str(Path(args.plan).resolve()),
                DEVIN_JOURNEY_APPROVAL_FILE=str(Path(args.approval).resolve()), DEVIN_JOURNEY_RUN_LEDGER=str(Path(args.ledger).resolve()),
                DEVIN_JOURNEY_RUN_MODE=args.mode, DEVIN_JOURNEY_UI_DIST=str(artifacts/'product-ui'), DEVIN_E2E_ARTIFACTS=str(artifacts),
+               DEVIN_JOURNEY_PROCESS_REGISTRY=str(registry),
                DEVIN_E2E_RUN='^TestDevinClientUserJourneysAuthorized$', DEVIN_E2E_MODEL=plan['models']['direct'],
                DEVIN_E2E_MAX_OUTPUT_TOKENS=str(plan['limits']['output_tokens']), DEVIN_E2E_ALLOW_PAID='true' if args.mode == 'live' else 'false',
                DEVIN_JOURNEY_CAPABILITIES=plan.get('omp_capabilities', 'false'))
@@ -92,9 +97,13 @@ def run(args, plan):
     finally:
         if process is not None:
             stop_process(process)
-        ledger_action(args.ledger, 'close')
-        for number, previous in previous_handlers.items():
-            signal.signal(number, previous)
+        try:
+            clean=process_cleanup.cleanup(registry)
+            ledger_action(args.ledger, 'close')
+            if not clean: raise Denied('client_process_cleanup_unverified')
+        finally:
+            for number, previous in previous_handlers.items():
+                signal.signal(number, previous)
     return {'executed': True, 'mode': args.mode, 'real_user_e2e_certified': False,
             'scope': 'only implemented product/client cases; final evidence validation is separate'}
 
@@ -111,6 +120,7 @@ def main():
     parser.add_argument('--receipt', type=int)
     parser.add_argument('--outcome', choices=['success', 'failed', 'uncertain'])
     parser.add_argument('--cost', type=float)
+    parser.add_argument('--estimated-cost', type=float)
     args = parser.parse_args()
     try:
         plan, checked_plan = checked(args)
@@ -131,7 +141,7 @@ def main():
             if args.action == 'verify':
                 result = {'authorized': True, 'executed': False}
             else:
-                state = ledger_action(args.ledger, args.action, args.receipt, args.outcome, args.cost)
+                state = ledger_action(args.ledger, args.action, args.receipt, args.outcome, args.cost, args.estimated_cost)
                 result = {'authorized': True, 'receipt': state['inflight'], 'requests': state['requests'], 'stopped': state['stopped']}
         print(json.dumps(result))
         return 0

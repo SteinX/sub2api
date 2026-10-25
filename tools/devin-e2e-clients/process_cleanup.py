@@ -1,0 +1,74 @@
+"""Private parent-owned process identities for project-runner cleanup."""
+import json
+import os
+from pathlib import Path
+import signal
+import stat
+import sys
+import time
+
+
+def start_ticks(pid):
+    return int(Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[19])
+
+
+def register(proc):
+    path=os.environ.get('DEVIN_JOURNEY_PROCESS_REGISTRY')
+    if not path:
+        return
+    try:
+        fd=os.open(path,os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW)
+        with os.fdopen(fd,'a') as out:
+            info=os.fstat(out.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o077:
+                raise ValueError('private_process_registry_required')
+            out.write(json.dumps({'pid':proc.pid,'start_ticks':start_ticks(proc.pid)})+'\n')
+            out.flush(); os.fsync(out.fileno())
+    except Exception:
+        os.killpg(proc.pid,signal.SIGKILL)
+        proc.wait(timeout=5)
+        raise
+
+
+def cleanup(path):
+    try:
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+        with os.fdopen(fd,'rb') as source:
+            info=os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o077: return False
+            data=source.read(65537)
+        if len(data)>65536: return False
+        records=[json.loads(line) for line in data.splitlines()]
+        if any(set(row)!={'pid','start_ticks'} or type(row['pid']) is not int or row['pid']<=1 or type(row['start_ticks']) is not int for row in records): return False
+        verified=True
+        for row in records:
+            pid=row['pid']
+            try:
+                if start_ticks(pid)!=row['start_ticks']:
+                    # Never signal a reused PID.
+                    verified=False; continue
+                os.killpg(pid,signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except FileNotFoundError:
+                try: os.killpg(pid,0)
+                except ProcessLookupError: continue
+                verified=False; continue  # an orphaned group cannot be identified safely
+            deadline=time.monotonic()+2
+            while time.monotonic()<deadline:
+                try:
+                    if start_ticks(pid)!=row['start_ticks']: break
+                    status=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[0]
+                    if status=='Z': break
+                except FileNotFoundError: break
+                time.sleep(.02)
+            try:
+                if start_ticks(pid)==row['start_ticks']: os.killpg(pid,signal.SIGKILL)
+            except (ProcessLookupError,FileNotFoundError): pass
+        return verified
+    except (ValueError,OSError,KeyError,TypeError):
+        return False
+
+
+if __name__=='__main__':
+    raise SystemExit(0 if len(sys.argv)==2 and cleanup(sys.argv[1]) else 2)

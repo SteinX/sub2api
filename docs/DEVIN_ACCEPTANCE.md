@@ -103,6 +103,8 @@ python3 tools/devin-acceptance/acceptance.py tag-note --mode user_e2e \
 
 所有用例共用同一持久账本，以及一个临时公共 Key 的真实本地配额预留。HTTP/SSE 错误、缺正常终态、发送不明、客户端失败、用量读取失败或预算耗尽均停止，不自动重试；SDK 后续请求也无法越过已停止账本。主摘要和短摘要意图排队，但合计计数，实际转发并发仍为一。退出清理客户端、后端及临时 SQL/Redis；结构化记录仅留私有目录。本地用量不是供应商扣费硬上限。
 
+direct 和 Fusion 转发都安装批准的单 turn deadline。direct 每次转发前使用相同公共 Key 查询当前有效价，保守地分别按全部授权上下文计入 input/cache-read/cache-write 并加最大输出；估价超过单 turn 或累计剩余额度时不发推理，结算增量异常也停止。这种估价可能提前拒绝实际较短的请求，不能为凑覆盖放宽保护。临时 Redis 使用随机认证；密码不进入浏览器、CLI 或工程环境。父进程记录客户端进程组及启动身份，超时先发送 TERM 让 Python 清理，再处理可核实的进程组；身份不明时报告清理失败，不能当验收成功。
+
 当前真实 runner 实现基础项目、同会话续接及 OMP direct 的 fork、压力、compact、空闲进程恢复；三客户端 Fusion 高级能力、worker、在途断线和 Senpi 尚未实现。输出明确为 `product_live_partial`，不会自动签发 `user_e2e` 或放行发布。隔离预览中的真实价格也不能证明现有部署的 group/channel 正确。后续新增能力应先完成可复现实现，再单独申请真实请求预算。
 
 本地 `/compact soft` 的 ACK 只证明入队，与同步 compact RPC 的终态不同。探测在原时间边界内查询同一次操作是否结束，再验证新检查点，不重复发送压缩请求。诊断文件损坏不会跳过进程清理；mock fetch 诊断禁止自动跟随重定向。

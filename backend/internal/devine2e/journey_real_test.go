@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -102,7 +103,7 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 		_, err := selectSmokeModel(eligibleAgentModels(catalog.Models), uid, plan.Limits.Output)
 		require.NoError(t, err, "every exact approved model must be granted and tool capable; do not silently substitute a model")
 	}
-	profile := fusion.DefaultProfile("fusion-project-journey", plan.Models.Lead, plan.Models.Sidekick)
+	profile := fusion.DefaultProfile("fusion-"+plan.Models.Lead+"-sidekick-"+plan.Models.Sidekick, plan.Models.Lead, plan.Models.Sidekick)
 	profile.MaxHandoffs, profile.MaxRequests, profile.MaxTools = plan.Limits.Handoffs, plan.Limits.Calls, plan.Limits.Tools
 	profile.MaxCostUSD, profile.MaxWallSeconds, profile.MaxOutputTokens = plan.Limits.TurnUSD, plan.Limits.TurnSeconds, plan.Limits.Output
 	profile.Keepalive = &fusion.KeepalivePolicy{Enabled: false}
@@ -114,6 +115,13 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 	var proofs []map[string]any
 	reports := []map[string]any{}
 	budget := &authorizedJourneyBudget{db: agentDatabase(t, app), keyID: keyID}
+	budget.app, budget.key, budget.outputLimit = app, key, plan.Limits.Output
+	for _, model := range catalog.Models {
+		if devin.ModelID(model) == plan.Models.Direct {
+			budget.contextLimit = int(model.GetMaxTokens())
+		}
+	}
+	require.Positive(t, budget.contextLimit, "bounded direct context required for conservative price admission")
 	defer func() {
 		cost, err := budget.cost()
 		writeAgentArtifact(t, "private-product-live.json", map[string]any{
@@ -147,6 +155,9 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					t.Cleanup(func() { _ = os.RemoveAll(directory) })
 					admission := newJourneyAdmission(t, app, model, plan.Limits.Requests)
 					admission.runBudget, admission.outputLimit = budget, plan.Limits.Output
+					admission.turnTimeout = time.Duration(plan.Limits.TurnSeconds) * time.Second
+					budget.direct = kind == "direct"
+					budget.model = model
 					ui := journeyUIServer(t, app.base, admission.server.URL)
 					script, err := filepath.Abs("../../../tools/devin-e2e-clients/journey.py")
 					require.NoError(t, err)
@@ -157,6 +168,7 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 						stage = "handoff"
 					}
 					cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", client, "--model", model, "--ui-url", ui.URL, "--profile", configProfile, "--stage", stage, "--upstream", "real")
+					gracefulJourneyCommand(cmd)
 					for _, variable := range os.Environ() {
 						name, _, _ := strings.Cut(variable, "=")
 						if strings.Contains(" DEVIN_E2E_PAT DEVIN_E2E_CREDENTIAL DEVIN_PAT DEVIN_API_KEY SUB2API_API_KEY SUB2API_USER_TOKEN DEVIN_JOURNEY_PLAN_FILE DEVIN_JOURNEY_APPROVAL_FILE DEVIN_JOURNEY_RUN_LEDGER ", " "+name+" ") {
@@ -165,7 +177,10 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 						cmd.Env = append(cmd.Env, variable)
 					}
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_GATEWAY_KEY="+key, "DEVIN_JOURNEY_UI_PASSWORD="+password)
+					var directRowsBefore int
+					require.NoError(t, budget.db.QueryRow(`SELECT count(*) FROM usage_logs WHERE api_key_id=$1 AND coalesce(nullif(upstream_model,''),model)=$2`, keyID, plan.Models.Direct).Scan(&directRowsBefore))
 					output, runErr := cmd.Output()
+					cleanupErr := cleanupJourneyProcesses()
 					report := map[string]any{"status": "failed", "stage": "runner_output"}
 					parseErr := json.Unmarshal(output, &report)
 					forwarded, records := admission.snapshot()
@@ -195,8 +210,10 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					report["observed_physical_models_cumulative"] = usageModels
 					report["usage_scope"] = "persisted local public-key execution records, cumulative; not a provider invoice"
 					reports = append(reports, report)
+					report["client_process_cleanup_verified"] = cleanupErr == nil
 					savePrivateAgentUsage(t, app, keyID, client, kind)
 					require.NoError(t, parseErr, "retain private structural evidence; never repeat an unknown send")
+					require.NoError(t, cleanupErr, "client cleanup not verified; stop this batch")
 					require.NoError(t, runErr, "first client failure stops this approved batch")
 					require.True(t, budget.healthy(), "global request accounting failed or an earlier send is uncertain; stop")
 					require.NoError(t, dbErr, "physical-model execution evidence unavailable")
@@ -211,7 +228,10 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					}
 					require.Equal(t, "passed", report["status"])
 					if kind == "direct" {
-						require.Positive(t, usageModels[plan.Models.Direct], "actual physical model execution not persisted")
+						require.Eventually(t, func() bool {
+							var current int
+							return budget.db.QueryRow(`SELECT count(*) FROM usage_logs WHERE api_key_id=$1 AND coalesce(nullif(upstream_model,''),model)=$2`, keyID, plan.Models.Direct).Scan(&current) == nil && current == directRowsBefore+forwarded
+						}, 10*time.Second, 100*time.Millisecond, "each direct public inference must add its own physical-model usage row; earlier cases cannot supply this evidence")
 					}
 					if kind == "fusion" {
 						verifyAgentFusion(t, app, keyID, records, "private-product-"+client, true)
@@ -227,4 +247,19 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 			}
 		}
 	}
+}
+
+func gracefulJourneyCommand(cmd *exec.Cmd) {
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 15 * time.Second
+}
+
+func cleanupJourneyProcesses() error {
+	path, err := filepath.Abs("../../../tools/devin-e2e-clients/process_cleanup.py")
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "python3", path, os.Getenv("DEVIN_JOURNEY_PROCESS_REGISTRY")).Run()
 }

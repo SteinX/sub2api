@@ -28,7 +28,7 @@ func diagnoseAgentHistory(t *testing.T, app *application, keyID int64, records [
 	if db.QueryRow("SELECT user_id FROM api_keys WHERE id=$1", keyID).Scan(&userID) != nil {
 		return
 	}
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT")})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD")})
 	defer rdb.Close()
 	stored, err := rdb.Get(context.Background(), "devin:fusion:session:"+fusion.Scope(userID, keyID)+":"+fusion.Digest(last.Session)).Bytes()
 	if err != nil {

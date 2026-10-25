@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -20,6 +21,57 @@ type syntheticJourneyBudget struct {
 	calls, max int
 	stopped    bool
 	outcomes   []string
+}
+
+func TestApprovedJourneyDirectDeadlineStopsForwarding(t *testing.T) {
+	var calls atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+	defer backend.Close()
+	p := newJourneyAdmission(t, &application{base: backend.URL}, fixtureModel, 40)
+	budget := &syntheticJourneyBudget{max: 5}
+	p.runBudget = budget
+	p.turnTimeout = 25 * time.Millisecond
+	for i := 0; i < 2; i++ {
+		response, err := http.Post(p.server.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"`+fixtureModel+`"}`))
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if i == 0 {
+			require.Equal(t, 502, response.StatusCode)
+		} else {
+			require.Equal(t, 402, response.StatusCode)
+		}
+	}
+	require.EqualValues(t, 1, calls.Load())
+	require.Equal(t, []string{"uncertain"}, budget.outcomes)
+}
+
+func TestApprovedJourneyDirectQuoteRequiresTheCurrentIdentifiedModel(t *testing.T) {
+	for _, body := range []string{
+		`{"data":[{"model":"e2e-direct","identified":true,"calculable":true,"context_cost_upper_usd":0.01}]}`,
+		`{"data":[{"model":"e2e-direct","identified":false,"calculable":true,"context_cost_upper_usd":0}]}`,
+		`{"data":[{"model":"another-model","identified":true,"calculable":true,"context_cost_upper_usd":0}]}`,
+		`{"data":[{"model":"e2e-direct","identified":true,"calculable":true}]}`,
+	} {
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, "Bearer synthetic-key", r.Header.Get("Authorization"))
+			require.Equal(t, "32768", r.URL.Query().Get("context_tokens"))
+			_, _ = w.Write([]byte(body))
+		}))
+		b := &authorizedJourneyBudget{app: &application{base: backend.URL}, key: "synthetic-key", model: "e2e-direct", contextLimit: 32768, outputLimit: 1024}
+		quote, err := b.directQuote()
+		backend.Close()
+		if strings.Contains(body, `0.01`) {
+			require.NoError(t, err)
+			require.Equal(t, .01, quote)
+		} else {
+			require.Error(t, err)
+		}
+	}
 }
 
 func (b *syntheticJourneyBudget) Admit() (int, error) {

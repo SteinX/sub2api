@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,10 +30,45 @@ type journeyBudget interface {
 }
 
 type authorizedJourneyBudget struct {
-	db     *sql.DB
-	keyID  int64
-	mu     sync.Mutex
-	failed bool
+	db                        *sql.DB
+	keyID                     int64
+	mu                        sync.Mutex
+	failed                    bool
+	app                       *application
+	key, model                string
+	direct                    bool
+	contextLimit, outputLimit int
+}
+
+func (b *authorizedJourneyBudget) directQuote() (float64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, b.app.base+"/v1/models?pricing_models="+url.QueryEscape(b.model)+"&context_tokens="+strconv.Itoa(b.contextLimit)+"&output_tokens="+strconv.Itoa(b.outputLimit), nil)
+	if err != nil {
+		return 0, errors.New("direct quote unavailable")
+	}
+	request.Header.Set("Authorization", "Bearer "+b.key)
+	response, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+	if err != nil {
+		return 0, errors.New("direct quote unavailable")
+	}
+	defer response.Body.Close()
+	var envelope struct {
+		Data []struct {
+			Model      string   `json:"model"`
+			Identified bool     `json:"identified"`
+			Calculable bool     `json:"calculable"`
+			Cost       *float64 `json:"context_cost_upper_usd"`
+		} `json:"data"`
+	}
+	if response.StatusCode != 200 || json.NewDecoder(io.LimitReader(response.Body, 65536)).Decode(&envelope) != nil || len(envelope.Data) != 1 {
+		return 0, errors.New("direct quote unavailable")
+	}
+	price := envelope.Data[0]
+	if price.Model != b.model || !price.Identified || !price.Calculable || price.Cost == nil || *price.Cost < 0 || math.IsInf(*price.Cost, 0) || math.IsNaN(*price.Cost) {
+		return 0, errors.New("direct identified quote unavailable")
+	}
+	return *price.Cost, nil
 }
 
 func journeyPolicy(action string, arguments ...string) ([]byte, error) {
@@ -70,7 +108,16 @@ func (b *authorizedJourneyBudget) Admit() (int, error) {
 		b.failed = true
 		return 0, errors.New("local cost unavailable")
 	}
-	output, err := journeyPolicy("admit", "--cost", strconv.FormatFloat(cost, 'g', -1, 64))
+	arguments := []string{"--cost", strconv.FormatFloat(cost, 'g', -1, 64)}
+	if b.direct {
+		quote, err := b.directQuote()
+		if err != nil {
+			b.failed = true
+			return 0, err
+		}
+		arguments = append(arguments, "--estimated-cost", strconv.FormatFloat(quote, 'g', -1, 64))
+	}
+	output, err := journeyPolicy("admit", arguments...)
 	var decision struct {
 		Authorized bool `json:"authorized"`
 		Receipt    int  `json:"receipt"`

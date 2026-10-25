@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"math"
 	"strings"
 	"time"
 )
@@ -10,11 +11,31 @@ import (
 // not rates, account/group/channel IDs, or provider credentials. It performs the
 // same physical-member price checks as Fusion without reserving or generating.
 type DevinPricingAdmission struct {
-	Model               string `json:"model"`
-	Identified          bool   `json:"identified"`
-	Calculable          bool   `json:"calculable"`
-	Source              string `json:"source"`
-	ZeroEffectiveCharge bool   `json:"zero_effective_charge"`
+	Model               string   `json:"model"`
+	Identified          bool     `json:"identified"`
+	Calculable          bool     `json:"calculable"`
+	Source              string   `json:"source"`
+	ZeroEffectiveCharge bool     `json:"zero_effective_charge"`
+	ContextCostUpperUSD *float64 `json:"context_cost_upper_usd,omitempty"`
+}
+
+// InspectDevinContextPrice uses the same effective physical price, charging a
+// full declared context independently as input, cache read and cache write.
+// This deliberately conservative local quote is not a supplier spending cap.
+func (s *OpenAIGatewayService) InspectDevinContextPrice(ctx context.Context, key *APIKey, model string, contextTokens, outputTokens int) DevinPricingAdmission {
+	result := s.InspectDevinPricing(ctx, key, model)
+	if !result.Calculable || contextTokens < 1 || contextTokens > 8_000_000 || outputTokens < 1 || outputTokens > 32768 {
+		return result
+	}
+	x := &devinFusionExecutor{service: s, key: key}
+	cost, err := x.cost(ctx, model, UsageTokens{InputTokens: contextTokens, CacheReadTokens: contextTokens, CacheCreationTokens: contextTokens, OutputTokens: outputTokens}, time.Now())
+	if err == nil && cost != nil {
+		upper := math.Max(cost.ActualCost, cost.TotalCost)
+		if upper >= 0 && !math.IsNaN(upper) && !math.IsInf(upper, 0) {
+			result.ContextCostUpperUSD = &upper
+		}
+	}
+	return result
 }
 
 func (s *OpenAIGatewayService) InspectDevinPricing(ctx context.Context, key *APIKey, model string) DevinPricingAdmission {

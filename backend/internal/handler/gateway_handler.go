@@ -1200,12 +1200,26 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 			allowed[model] = true
 		}
 		data := make([]service.DevinPricingAdmission, 0, len(models))
+		contextTokens, outputTokens := 0, 0
+		if c.Query("context_tokens") != "" || c.Query("output_tokens") != "" {
+			var parseErr, errorOut error
+			contextTokens, parseErr = strconv.Atoi(c.Query("context_tokens"))
+			outputTokens, errorOut = strconv.Atoi(c.Query("output_tokens"))
+			if parseErr != nil || errorOut != nil || contextTokens < 1 || contextTokens > 8_000_000 || outputTokens < 1 || outputTokens > 32768 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_pricing_token_bound"}})
+				return
+			}
+		}
 		for _, model := range models {
 			if !allowed[model] {
 				data = append(data, service.DevinPricingAdmission{Model: model, Source: "not_advertised"})
 				continue
 			}
-			data = append(data, h.openAIGatewayService.InspectDevinPricing(c.Request.Context(), apiKey, model))
+			if contextTokens > 0 {
+				data = append(data, h.openAIGatewayService.InspectDevinContextPrice(c.Request.Context(), apiKey, model, contextTokens, outputTokens))
+			} else {
+				data = append(data, h.openAIGatewayService.InspectDevinPricing(c.Request.Context(), apiKey, model))
+			}
 		}
 		c.JSON(http.StatusOK, gin.H{"object": "devin.pricing_admission", "data": data})
 		return

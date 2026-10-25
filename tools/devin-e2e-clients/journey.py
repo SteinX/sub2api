@@ -19,9 +19,15 @@ import threading
 import time
 
 from run import ROOT, PINS, SENSITIVE_ENV, child_environment, write_json
+import process_cleanup
 
 TEST_COMMAND = "python3 run_tests.py"
 ACTIVE = set()
+
+
+def track(proc):
+    ACTIVE.add(proc)
+    process_cleanup.register(proc)
 
 
 def terminate_children(number, _frame):
@@ -87,7 +93,7 @@ def project_environment(directory):
     env = child_environment(directory)
     for name in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "DEVIN_E2E_GATEWAY_KEY", "DEVIN_JOURNEY_GATEWAY_KEY", "DEVIN_JOURNEY_UI_PASSWORD"}:
         env.pop(name, None)
-    for name in ['DEVIN_JOURNEY_APPROVAL_FILE', 'DEVIN_JOURNEY_PLAN_FILE', 'DEVIN_JOURNEY_RUN_LEDGER']:
+    for name in ['DEVIN_JOURNEY_APPROVAL_FILE', 'DEVIN_JOURNEY_PLAN_FILE', 'DEVIN_JOURNEY_RUN_LEDGER','DEVIN_JOURNEY_PROCESS_REGISTRY']:
         env.pop(name, None)
     return env
 
@@ -229,7 +235,7 @@ def invoke(args, directory, resume=False):
     nonce = json.loads(project_bytes(directory / 'workspace', 'requirements.json'))['nonce']
     proc = subprocess.Popen(command(args.client, args.model, resume), cwd=directory / "workspace", env=env,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, **kwargs)
-    ACTIVE.add(proc)
+    track(proc)
     result = {"exit_code": None, "timed_out": False, "event_error": False, "final_text_matches": False,
               "normal_stop": False, "tools": {"read": 0, "write": 0, "bash": 0}, "client_tests_succeeded": False,
               "frames": 0, "parse_errors": 0, "session_seen": False, "client_session_sha256": None, "session_changed": False,
@@ -343,7 +349,7 @@ def main():
                     expected_key_sha256=digest(os.environ['DEVIN_JOURNEY_GATEWAY_KEY'].encode()))
     kwargs = isolation(args.client)
     ui = subprocess.Popen(["node", str(ROOT / "ui-handoff.mjs")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=project_environment(directory), start_new_session=True, **kwargs)
-    ACTIVE.add(ui)
+    track(ui)
     try:
         stdout, _ = ui.communicate(json.dumps(ui_input).encode(), timeout=60)
     except subprocess.TimeoutExpired:

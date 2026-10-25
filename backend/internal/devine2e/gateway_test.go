@@ -55,7 +55,7 @@ func newApplication(t *testing.T, fixture *nativeFixture) *application {
 	t.Helper()
 	binary := os.Getenv("DEVIN_E2E_BINARY")
 	require.NotEmpty(t, binary, "run bash deploy/devin-e2e.sh")
-	for _, name := range []string{"DEVIN_E2E_PG_PORT", "DEVIN_E2E_REDIS_PORT", "DEVIN_E2E_DB_PASSWORD"} {
+	for _, name := range []string{"DEVIN_E2E_PG_PORT", "DEVIN_E2E_REDIS_PORT", "DEVIN_E2E_DB_PASSWORD", "DEVIN_E2E_REDIS_PASSWORD"} {
 		require.NotEmpty(t, os.Getenv(name), "missing %s; use the isolated runner", name)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -131,7 +131,7 @@ func (a *application) start(t *testing.T) {
 		"DATABASE_HOST=127.0.0.1", "DATABASE_PORT="+os.Getenv("DEVIN_E2E_PG_PORT"),
 		"DATABASE_USER=devin_e2e", "DATABASE_DBNAME="+a.database, "DATABASE_SSLMODE=disable",
 		"DATABASE_PASSWORD="+os.Getenv("DEVIN_E2E_DB_PASSWORD"),
-		"REDIS_HOST=127.0.0.1", "REDIS_PORT="+os.Getenv("DEVIN_E2E_REDIS_PORT"), "REDIS_PASSWORD=", "REDIS_DB=0",
+		"REDIS_HOST=127.0.0.1", "REDIS_PORT="+os.Getenv("DEVIN_E2E_REDIS_PORT"), "REDIS_PASSWORD="+os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), "REDIS_DB=0",
 		"ADMIN_EMAIL=admin@devin-e2e.invalid", "ADMIN_PASSWORD="+a.password,
 		"SECURITY_URL_ALLOWLIST_ENABLED=false", "SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=true",
 		"SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true", "BATCH_IMAGE_ENABLED=false",
@@ -159,7 +159,7 @@ func (a *application) start(t *testing.T) {
 		a.redactor.destination = a.log
 		a.redactor.mu.Unlock()
 	}
-	for _, secret := range []string{a.password, os.Getenv("DEVIN_E2E_DB_PASSWORD"), os.Getenv("DEVIN_E2E_PAT"), os.Getenv("DEVIN_E2E_CREDENTIAL")} {
+	for _, secret := range []string{a.password, os.Getenv("DEVIN_E2E_DB_PASSWORD"), os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), os.Getenv("DEVIN_E2E_PAT"), os.Getenv("DEVIN_E2E_CREDENTIAL")} {
 		a.redactor.addSecret(secret)
 	}
 	a.command.Stdout, a.command.Stderr = a.redactor, a.redactor

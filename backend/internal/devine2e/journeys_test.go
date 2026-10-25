@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -37,6 +38,18 @@ func TestDevinClientUserJourneysMock(t *testing.T) {
 
 func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, admin, key, userPassword string, keyID, accountID int64) {
 	t.Helper()
+	t.Run("private_cache_requires_authentication", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		unauth := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT")})
+		defer unauth.Close()
+		err := unauth.Ping(ctx).Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "NOAUTH")
+		auth := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD")})
+		defer auth.Close()
+		require.NoError(t, auth.Ping(ctx).Err())
+	})
 	t.Run("public_physical_price_preflight_has_no_inference_or_usage", func(t *testing.T) {
 		fixture.mu.Lock()
 		before := len(fixture.chats)
@@ -49,6 +62,16 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		}
 		require.Equal(t, false, proofs[2]["identified"])
 		require.Equal(t, "not_advertised", proofs[2]["source"])
+		quote := request(t, app, "GET", "/v1/models?pricing_models="+url.QueryEscape(fixtureModel)+"&context_tokens=32768&output_tokens=1024", key, nil, 200)
+		var quoted struct {
+			Data []struct {
+				Cost float64 `json:"context_cost_upper_usd"`
+			} `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(quote, &quoted))
+		require.Len(t, quoted.Data, 1)
+		require.InDelta(t, 32768*(.000001+.000001+.0000001)+1024*.000002, quoted.Data[0].Cost, 1e-12)
+		request(t, app, "GET", "/v1/models?pricing_models="+url.QueryEscape(fixtureModel)+"&context_tokens=0&output_tokens=1024", key, nil, 400)
 		fixture.mu.Lock()
 		require.Equal(t, before, len(fixture.chats))
 		fixture.mu.Unlock()
