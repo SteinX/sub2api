@@ -23,6 +23,7 @@ class Rpc:
         self.failed = False
         self.error_categories = set()
         self.error_http_status = None
+        self.error_vocabulary = set()
         self.serial = 0
         self.deadline = time.monotonic() + 180
         env = helpers.project_environment(directory)
@@ -51,7 +52,7 @@ class Rpc:
             except (ValueError, UnicodeDecodeError, queue.Full):
                 self.parse_errors += 1
 
-    def call(self, kind, **fields):
+    def call(self, kind, local_prompt=False, **fields):
         self.serial += 1
         ident = str(self.serial)
         self.proc.stdin.write((json.dumps({'id': ident, 'type': kind, **fields}) + '\n').encode())
@@ -75,6 +76,12 @@ class Rpc:
                                       'missing_role_or_credentials': r'api key|credentials|role|not configured'} .items():
                 if re.search(pattern, error_text, re.IGNORECASE):
                     self.error_categories.add(category)
+            vocabulary = {'compaction', 'summary', 'empty', 'no', 'model', 'selected', 'failed', 'error', 'too', 'small', 'nothing', 'to', 'compact',
+                          'disabled', 'aborted', 'cancelled', 'output', 'text', 'response', 'received', 'missing', 'expected', 'not', 'found',
+                          'cannot', 'could', 'format', 'valid', 'json', 'rpc', 'schema', 'invalid', 'read', 'undefined', 'null', 'content', 'data',
+                          'attempt', 'max', 'tokens', 'key', 'provider', 'api', 'limit', 'exceeded', 'token', 'input', 'required', 'state',
+                          'manual', 'method', 'configured', 'run', 'history', 'validation', 'available', 'backend', 'method', 'source', 'assertion'}
+            self.error_vocabulary.update(word for word in re.findall(r'[a-z]+', error_text.lower()) if word in vocabulary)
             if isinstance(event.get('error'), dict):
                 self.error_http_status = event['error'].get('httpStatus', self.error_http_status)
             if event.get('type') == 'tool_execution_end':
@@ -91,7 +98,8 @@ class Rpc:
             if kind == 'prompt':
                 if event.get('type') != 'prompt_result':
                     continue
-                if event.get('status') != 'completed' or event.get('agentInvoked') is not True or event.get('sessionSettled') is not True:
+                invoked = event.get('agentInvoked') is True or (local_prompt and fields.get('message') == '/compact soft' and event.get('agentInvoked') is False)
+                if event.get('status') != 'completed' or not invoked or event.get('sessionSettled') is not True:
                     raise ValueError('rpc_prompt_not_completed')
             elif event.get('type') != 'response':
                 continue
@@ -101,13 +109,33 @@ class Rpc:
         raise ValueError('rpc_timeout')
 
     def close(self, abrupt=False):
-        if self.proc.poll() is None:
-            os.killpg(self.proc.pid, signal.SIGKILL if abrupt else signal.SIGTERM)
-        self.proc.wait(timeout=5)
-        self.reader.join(timeout=3)
-        self.proc.stdin.close()
-        self.proc.stdout.close()
-        self.h.ACTIVE.discard(self.proc)
+        clean = True
+        try:
+            if self.proc.poll() is None:
+                os.killpg(self.proc.pid, signal.SIGKILL if abrupt else signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+                self.proc.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            clean = False
+        finally:
+            self.reader.join(timeout=3)
+            if self.reader.is_alive():
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except OSError:
+                    clean = False
+                self.reader.join(timeout=3)
+                clean &= not self.reader.is_alive()
+            for stream in (self.proc.stdin, self.proc.stdout):
+                try:
+                    stream.close()
+                except OSError:
+                    clean = False
+            self.h.ACTIVE.discard(self.proc)
+        return clean
 
 
 def run(args, directory, session_hash, nonce, helpers):
@@ -132,25 +160,55 @@ def run(args, directory, session_hash, nonce, helpers):
         state = rpc.call('get_state')
         if helpers.digest(state['sessionId'].encode()) != session_hash:
             raise ValueError('wrong_reopened_session')
+        result['stage'] = 'fork'
+        original = rpc.call('get_entries')['entries']
+        message_ids = {entry['id'] for entry in original if entry.get('type') == 'message'}
+        fork = rpc.call('fork')
+        fork_state = rpc.call('get_state')
+        fork_entries = rpc.call('get_entries')['entries']
+        copied_ids = {entry['id'] for entry in fork_entries if entry.get('type') == 'message'}
+        if fork.get('cancelled') is not False or fork_state['sessionId'] == state['sessionId'] or not message_ids or not message_ids.issubset(copied_ids):
+            raise ValueError('fork_not_independent_or_history_missing')
+        result.update(fork='passed', distinct_fork_session=True, original_history_copied=True)
+        result['stage'] = 'idle_process_recovery'
+        if not rpc.close(abrupt=True):
+            raise ValueError('rpc_cleanup_failed')
+        rpc = Rpc(args, directory, helpers)
+        reopened = rpc.call('get_state')
+        entries = rpc.call('get_entries')['entries']
+        restored_ids = {entry['id'] for entry in entries if entry.get('type') == 'message'}
+        if reopened['sessionId'] != fork_state['sessionId'] or not message_ids.issubset(restored_ids):
+            raise ValueError('session_changed_after_kill')
+        result.update(idle_process_recovery='passed', disconnect_scope='idle process SIGKILL; not in-flight network failure', project_history_restored=True)
         result['stage'] = 'context_pressure'
         rpc.call('prompt', message='Exercise context pressure: use read to read every file context/part-00.txt through context/part-15.txt. Keep the shared CONTEXT_NONCE in memory. Then reply with exactly CONTEXT_READY.')
         if rpc.reads != 16 or rpc.final_text.strip() != 'CONTEXT_READY':
             raise ValueError('context_pressure_not_completed')
         result.update(context_pressure='passed', pressure_reads=rpc.reads, pressure_bytes=sum(path.stat().st_size for path in pressure.iterdir()))
+        if os.environ.get('DEVIN_JOURNEY_CAPABILITIES') == 'independent':
+            result.update(status='partial', stage='completed_independent_probes', compact='not_run',
+                          compact_scope='separate compact probe failed; not retried in this independent run')
+            return result
         result['stage'] = 'compact'
-        compact = rpc.call('compact')
+        # This is the user's explicit local compaction command. It skips the
+        # client's provider-specific remote-compaction preference without
+        # modifying any copied configuration or calling another model service.
+        rpc.call('prompt', message='/compact soft', local_prompt=True)
         entries = rpc.call('get_entries')['entries']
+        compact = next((entry for entry in reversed(entries) if entry.get('type') == 'compaction'), {})
         if not compact.get('summary') or nonce not in compact['summary'] or not any(entry.get('type') == 'compaction' for entry in entries):
             raise ValueError('compaction_not_persisted_or_lost_fact')
         result.update(compact='passed', summary_preserved_nonce=True, compaction_entry_observed=True,
-                      compaction_tokens_before=compact.get('tokensBefore'), usage_basis='synthetic input bytes/4; not provider usage')
+                      compaction_tokens_before=compact.get('tokensBefore'), compact_mode='explicit /compact soft; automatic/default compaction not certified',
+                      usage_basis='synthetic input bytes/4; not provider usage')
         result['stage'] = 'idle_process_recovery'
         # Kill the actual idle client after compaction, then reopen the same
         # persisted session. This does not claim an in-flight network recovery.
-        rpc.close(abrupt=True)
+        if not rpc.close(abrupt=True):
+            raise ValueError('rpc_cleanup_failed')
         rpc = Rpc(args, directory, helpers)
         state = rpc.call('get_state')
-        if helpers.digest(state['sessionId'].encode()) != session_hash:
+        if state['sessionId'] != fork_state['sessionId']:
             raise ValueError('session_changed_after_kill')
         entries = rpc.call('get_entries')['entries']
         if not any(entry.get('type') == 'compaction' for entry in entries):
@@ -159,17 +217,11 @@ def run(args, directory, session_hash, nonce, helpers):
         if rpc.reads != 0 or rpc.final_text.strip() != nonce:
             raise ValueError('compacted_fact_not_recalled')
         result.update(idle_process_recovery='passed', disconnect_scope='idle process SIGKILL; not in-flight network failure', checkpoint_restored=True, compacted_fact_recalled=True)
-        result['stage'] = 'fork'
-        fork = rpc.call('fork')
-        after = rpc.call('get_state')
-        fork_entries = rpc.call('get_entries')['entries']
-        if fork.get('cancelled') is not False or after['sessionId'] == state['sessionId'] or not any(entry.get('type') == 'compaction' for entry in fork_entries):
-            raise ValueError('fork_not_independent_or_history_missing')
-        result.update(fork='passed', distinct_fork_session=True, fork_checkpoint_copied=True, status='passed', stage='completed')
+        result.update(status='passed', stage='completed')
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         allowed = {'rpc_process_exited', 'rpc_command_rejected', 'rpc_prompt_not_completed', 'rpc_event_failure', 'rpc_timeout',
                    'wrong_reopened_session', 'context_pressure_not_completed', 'compaction_not_persisted_or_lost_fact',
-                   'session_changed_after_kill', 'checkpoint_lost_after_kill', 'compacted_fact_not_recalled', 'fork_not_independent_or_history_missing'}
+                   'session_changed_after_kill', 'checkpoint_lost_after_kill', 'compacted_fact_not_recalled', 'fork_not_independent_or_history_missing', 'rpc_cleanup_failed'}
         result['failure_kind'] = str(error) if isinstance(error, ValueError) and str(error) in allowed else 'local_probe_error'
         if result['stage'] in {'context_pressure', 'compact', 'fork', 'idle_process_recovery'}:
             result[result['stage']] = 'failed'
@@ -178,5 +230,8 @@ def run(args, directory, session_hash, nonce, helpers):
             result.update(frames=rpc.frames, parse_errors=rpc.parse_errors)
             result.update(observed_reads=rpc.reads, context_ready_marker=rpc.final_text.strip() == 'CONTEXT_READY', event_failure=rpc.failed)
             result.update(error_categories=sorted(rpc.error_categories), error_http_status=rpc.error_http_status)
-            rpc.close()
+            result['error_vocabulary'] = sorted(rpc.error_vocabulary)
+            result['cleanup_passed'] = rpc.close()
+            if not result['cleanup_passed']:
+                result['status'] = 'failed'
     return result

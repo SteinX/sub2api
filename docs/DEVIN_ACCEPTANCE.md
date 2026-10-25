@@ -30,6 +30,8 @@ make test-devin-acceptance
 
 基础项目旅程证明正常关闭后重开同一会话。另可用 `DEVIN_JOURNEY_CAPABILITIES=true` 启动实际 OMP direct/compatibility RPC 探测：16 个多行合成文件，要求至少 128 KiB 实际进入原生模型历史，再检查 compact、空闲客户端 SIGKILL 后恢复和 fork。合成 token 用量随实际输入字节增长，并非供应商用量。失败阶段及未执行的后续能力分别保留；开启该探测时未完成必需能力会使测试失败。其他客户端、Fusion 的这些能力、worker 和在途断线仍不得用内部执行器或空闲进程恢复代替。关闭 OMP pruning 会增加历史占用，不能据此承诺长会话兼容。
 
+当前实际 OMP 探测已分别验证独立 fork、空闲进程 SIGKILL 后恢复历史及 16 次压力读取（约 134 KB 文件、超过 136 KB 转发历史）。`compact` 尚未通过：默认 RPC 返回 fetch 失败；显式 `/compact soft` 在 90 秒内没有完成终态，探测停止。根因仍未定位，不能宣称压缩正常；不会更换目标服务或放开网络限制。`DEVIN_JOURNEY_CAPABILITIES=independent` 只重验前三项并报告 `partial`，不再发送 compact；CI 使用此范围并分别断言三个结果，完整真实验收门槛仍拒绝该部分覆盖。复现完整压缩探测会使测试因失败返回非零。
+
 ## 价格与配置合同
 
 以下是零付费合同，不归入 `user_e2e`：

@@ -366,7 +366,7 @@ def main():
     resumed = invoke(args, directory, True) if task_passed else None
     same_session = resumed is not None and first["client_session_sha256"] is not None and first["client_session_sha256"] == resumed["client_session_sha256"]
     extended = {}
-    if (os.environ.get('DEVIN_JOURNEY_CAPABILITIES') == 'true' and same_session and resumed['passed']
+    if (os.environ.get('DEVIN_JOURNEY_CAPABILITIES') in {'true', 'independent'} and same_session and resumed['passed']
             and args.client == 'omp' and args.profile == 'compatibility' and not args.model.startswith('fusion-')):
         import capabilities
         extended = capabilities.run(args, directory, first['client_session_sha256'], expected['nonce'], sys.modules[__name__])

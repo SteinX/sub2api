@@ -136,6 +136,10 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					report["public_requests"], report["http_attempts"], report["error_codes"] = forwarded, len(requests), errors
 					capabilitiesRequired := os.Getenv("DEVIN_JOURNEY_CAPABILITIES") == "true" && client == "omp" && kind == "direct" && configProfile == "compatibility"
 					report["capabilities_required"] = capabilitiesRequired
+					independentCapabilities := os.Getenv("DEVIN_JOURNEY_CAPABILITIES") == "independent" && client == "omp" && kind == "direct" && configProfile == "compatibility"
+					if independentCapabilities {
+						report["capabilities_scope"] = "fork_pressure_idle_only"
+					}
 					if report["status"] == "unsupported_by_product" {
 						report["expectation"] = "product refuses known incompatible configuration; task not run"
 					}
@@ -154,10 +158,20 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					}
 					require.NoError(t, runErr, "real CLI project task failed; structural evidence retained")
 					require.Equal(t, "passed", report["status"])
-					if capabilitiesRequired {
+					if capabilitiesRequired || independentCapabilities {
 						capabilities, ok := report["capability_evidence"].(map[string]any)
 						require.True(t, ok)
-						require.Equal(t, "passed", capabilities["status"], "actual OMP capabilities did not complete; failure evidence retained")
+						for _, capability := range []string{"fork", "context_pressure", "idle_process_recovery"} {
+							require.Equal(t, "passed", capabilities[capability], "actual OMP capability failed; evidence retained")
+						}
+						require.Equal(t, true, capabilities["cleanup_passed"])
+						if capabilitiesRequired {
+							require.Equal(t, "passed", capabilities["status"])
+							require.Equal(t, "passed", capabilities["compact"])
+						} else {
+							require.Equal(t, "partial", capabilities["status"])
+							require.Equal(t, "not_run", capabilities["compact"])
+						}
 						require.GreaterOrEqual(t, report["native_context_max_bytes"], 131072, "pressure must actually reach forwarded model history, not just files on disk")
 					}
 					require.Positive(t, uids[fixtureModel])

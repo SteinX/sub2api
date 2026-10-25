@@ -34,7 +34,10 @@ def evidence(live=False):
                 'handoff': {'passed': True, 'source': 'UseKeyModal browser copy buttons',
                             'selected_model': 'fusion-test' if kind == 'fusion' else 'physical-lead',
                             'ui_scope': 'deployed product Use Key journey' if live else 'isolated product modal; signup/login not covered',
-                            'files': [{'name': 'product-config', 'sha256': DIGEST}]}, 'pricing_contract': {'identified': True}}
+                            'files': [{'name': 'product-config', 'sha256': DIGEST}]},
+                'pricing_contract': {'identified': True, 'physical_model_uids': ['physical-lead', 'physical-sidekick'] if kind == 'fusion' else ['physical-lead'],
+                                     'snapshot_sha256': DIGEST, 'group_config_sha256': DIGEST, 'public_key_route_verified': True,
+                                     'sources': {'physical-lead': 'builtin_exact', 'physical-sidekick': 'group'}}}
         for key in ['initial_project_test_failed', 'protected_project_files_intact', 'artifact_verified_before_oracle',
                     'artifact_verified_after_resume', 'source_unchanged_after_resume', 'independent_project_test_passed', 'same_client_session']:
             case[key] = True
@@ -138,6 +141,13 @@ class AcceptanceTests(unittest.TestCase):
         self.assertIn('source_mismatch', gate.validate(report, 'client_mock', COMMIT, 'f' * 40))
         report['api_key'] = 'synthetic-only'
         self.assertIn('private_fields_present', gate.validate(report, 'client_mock', COMMIT, TREE))
+
+    def test_truthy_pricing_object_cannot_hide_an_unidentified_physical_member(self):
+        for change in [{'identified': False}, {'physical_model_uids': ['virtual-fusion']}, {'sources': {'physical-lead': 'family_guess'}}, {'public_key_route_verified': False}]:
+            with self.subTest(change=change):
+                report, state = evidence(True)
+                report['cases'][0]['pricing_contract'].update(change)
+                self.assertTrue(gate.validate(report, 'user_e2e', COMMIT, TREE, state))
 
     def test_comment_does_not_clear_requested_changes(self):
         report, state = evidence(True)

@@ -271,6 +271,7 @@ jobs:
           python "$RUNNER_TEMP/release-tools/devin-acceptance/release_guard.py" "${args[@]}"
       - name: Build images and publish manifests
         env:
+          GH_TOKEN: ${{ github.token }}
           DOCKERHUB_USERNAME: ${{ env.PUBLISH_DOCKERHUB == 'true' && secrets.DOCKERHUB_USERNAME || 'skip' }}
         run: bash "$RUNNER_TEMP/release-tools/release-images.sh"
       - name: Get annotated tag notes

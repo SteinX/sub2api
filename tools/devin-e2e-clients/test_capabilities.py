@@ -1,8 +1,11 @@
 import io
 import queue
 import time
+import signal
+import subprocess
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from capabilities import Rpc
 
@@ -18,6 +21,7 @@ def rpc_with(events):
     rpc.failed = False
     rpc.error_categories = set()
     rpc.error_http_status = None
+    rpc.error_vocabulary = set()
     rpc.final_text = ''
     rpc.proc = Mock()
     rpc.proc.stdin = io.BytesIO()
@@ -44,6 +48,21 @@ class RpcProofTests(unittest.TestCase):
         rpc = rpc_with([{'id': 'unrelated', 'type': 'response', 'success': True, 'data': {'wrong': True}},
                         {'id': '1', 'type': 'response', 'success': True, 'data': {'right': True}}])
         self.assertEqual({'right': True}, rpc.call('get_state'))
+
+    def test_cleanup_escalates_and_reaps_without_losing_evidence(self):
+        for permanently_stuck in [False, True]:
+            with self.subTest(permanently_stuck=permanently_stuck):
+                rpc = rpc_with([])
+                rpc.reader = Mock()
+                rpc.reader.is_alive.return_value = False
+                rpc.h = SimpleNamespace(ACTIVE={rpc.proc})
+                rpc.proc.pid = 12345
+                rpc.proc.wait.side_effect = [subprocess.TimeoutExpired('synthetic', 5), subprocess.TimeoutExpired('synthetic', 5) if permanently_stuck else 0]
+                with patch('capabilities.os.killpg') as kill:
+                    self.assertEqual(not permanently_stuck, rpc.close())
+                self.assertEqual([(12345, signal.SIGTERM), (12345, signal.SIGKILL)], [call.args for call in kill.call_args_list])
+                self.assertNotIn(rpc.proc, rpc.h.ACTIVE)
+                self.assertTrue(rpc.proc.stdin.closed)
 
 
 if __name__ == '__main__':

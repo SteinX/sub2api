@@ -130,6 +130,12 @@ def validate(report, mode, commit, tree, state=None):
             extended = case.get('capability_evidence', {})
             if extended.get('status') != 'passed' or any(extended.get(name) != 'passed' for name in ['context_pressure', 'compact', 'fork', 'idle_process_recovery']):
                 errors.append(ident + ':required_client_capabilities_failed')
+        if case.get('capabilities_scope') == 'fork_pressure_idle_only':
+            extended = case.get('capability_evidence', {})
+            if (extended.get('status') != 'partial' or extended.get('compact') != 'not_run' or extended.get('cleanup_passed') is not True
+                    or case.get('native_context_max_bytes', 0) < 131072
+                    or any(extended.get(name) != 'passed' for name in ['context_pressure', 'fork', 'idle_process_recovery'])):
+                errors.append(ident + ':independent_client_capabilities_failed')
     if mode == 'client_mock':
         if report.get('tier') != 'client_mock' or report.get('real_upstream') is not False or report.get('eligible_for_real_e2e') is not False:
             errors.append('mock_tier_misrepresented')
@@ -144,7 +150,16 @@ def validate(report, mode, commit, tree, state=None):
         for capability in ['context_pressure', 'compact', 'fork', 'worker', 'disconnect_recovery']:
             if case.get(capability) != 'passed':
                 errors.append(str(case.get('id')) + ':' + capability + '_not_verified')
-        if (not case.get('client_identity') or not case.get('pricing_contract') or not case.get('physical_lead_uid')
+        pricing = case.get('pricing_contract', {})
+        expected_uids = {case.get('physical_lead_uid')}
+        if case.get('model_kind') == 'fusion':
+            expected_uids.add(case.get('physical_sidekick_uid'))
+        if (pricing.get('identified') is not True or set(pricing.get('physical_model_uids', [])) != expected_uids
+                or not HEX64.fullmatch(str(pricing.get('snapshot_sha256', ''))) or pricing.get('public_key_route_verified') is not True
+                or not HEX64.fullmatch(str(pricing.get('group_config_sha256', '')))
+                or any(pricing.get('sources', {}).get(uid) not in {'group', 'channel', 'catalog_exact', 'catalog_canonical', 'builtin_exact'} for uid in expected_uids)):
+            errors.append(str(case.get('id')) + ':physical_pricing_contract_unverified')
+        if (not case.get('client_identity') or not case.get('physical_lead_uid')
                 or (case.get('model_kind') == 'fusion' and not case.get('physical_sidekick_uid'))):
             errors.append(str(case.get('id')) + ':identity_or_pricing_missing')
     if report.get('unverified'):
