@@ -159,16 +159,5 @@ jobs:
           else
             bash deploy/devin-e2e.sh "$DEVIN_E2E_MODE_INPUT"
           fi
-      - name: Save live verification results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: devin-e2e-live
-          path: |
-            ${{ runner.temp }}/devin-e2e/results.jsonl
-            ${{ runner.temp }}/devin-e2e/provenance.txt
-            ${{ runner.temp }}/devin-e2e/smoke-plan.json
-            ${{ runner.temp }}/devin-e2e/agent-*.json
-            ${{ runner.temp }}/devin-e2e/fusion-*.json
-          if-no-files-found: ignore
-          retention-days: 7
+      # Real-account plans, usage and session evidence remain private; do not
+      # upload them as artifacts of this public repository.

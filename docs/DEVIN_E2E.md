@@ -107,7 +107,7 @@ PAT 和派生会话只暂存在本次隔离实例的 PostgreSQL tmpfs 和 Redis 
 - `backend-private.log`：脱敏后的本地诊断日志。仍不上传或分享。
 - `server`：本次从源码构建的后端。
 
-CI 只上传测试结果、provenance 和模型计划，不上传后端日志、二进制、应用配置或数据库。临时管理员密码、JWT 和用户 Key 不打印；临时应用目录由 Go 测试清理。该目录和本地构建产物默认不纳入 Git。
+Mock CI 只上传合成测试结果、provenance 和模型计划，不上传后端日志、二进制、应用配置或数据库。真实 plan/live 不自动上传任何结果或计划归档，普通断言也不格式化响应正文；真实账号证据只保留在私有执行记录。临时管理员密码、JWT 和用户 Key 不打印；临时应用目录由 Go 测试清理。该目录和本地构建产物默认不纳入 Git。
 
 正常退出或 Ctrl-C 会停止后端并删除本次 Compose 容器和网络。若进程被强制杀死，先用 `docker compose ls` 确认本次 `devin-e2e-<进程号>` project，再清理该 project：
 

@@ -1,5 +1,14 @@
 // These files follow the pinned OMP short-session compatibility profile.
 // JSON is valid YAML 1.2 and preserves model identifiers and keys verbatim.
+export function normalizeDevinWorkspacePath(raw: string): string | null {
+  const value = raw.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  if (!value || value.startsWith('//') || /[*?[\]{}()!|]/.test(value)) return null
+  if ([...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) return null
+  if (!/^\/[^/]/.test(value) && !/^[a-z]:\/[^/]/i.test(value)) return null
+  if (value.split('/').some(part => part === '.' || part === '..')) return null
+  return value
+}
+
 export function devinOmpConfig(baseUrl: string, apiKey: string, model: string, advertisedContext?: unknown) {
   const ref = `devin/${model}`
   const contextWindow = typeof advertisedContext === 'number' && Number.isFinite(advertisedContext) && advertisedContext > 0

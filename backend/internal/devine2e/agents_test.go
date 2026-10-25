@@ -148,8 +148,6 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 			http.Error(w, "E2E request budget exhausted", 402)
 			return
 		}
-		interrupt := p.interruptFile
-		p.interruptFile = ""
 		p.mu.Unlock()
 		select {
 		case p.active <- struct{}{}:
@@ -158,13 +156,23 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 			http.Error(w, "E2E permits one active request", 409)
 			return
 		}
+		// A request may have passed the earlier check before another request
+		// took and released active. Recheck and reserve under the same lock.
+		p.mu.Lock()
+		if p.forwarded >= p.maxForwarded {
+			p.mu.Unlock()
+			http.Error(w, "E2E request budget exhausted", 402)
+			return
+		}
+		interrupt := p.interruptFile
+		p.interruptFile = ""
 		if interrupt != "" {
+			p.mu.Unlock()
 			_ = os.WriteFile(interrupt, []byte("not-forwarded\n"), 0600)
 			<-r.Context().Done()
 			return
 		}
 		// SDK retries also pass this gate. No runner retry after an uncertain send.
-		p.mu.Lock()
 		p.forwarded++
 		record.Forwarded = true
 		p.mu.Unlock()
@@ -392,10 +400,10 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 	}
 	if mode == "live" {
 		if expected := os.Getenv("DEVIN_E2E_EXPECT_LEAD_MODEL"); expected != "" {
-			require.Equal(t, expected, lead, "approved Lead model changed; stop before generation")
+			require.True(t, expected == lead, "approved Lead model changed; stop before generation")
 		}
 		if expected := os.Getenv("DEVIN_E2E_EXPECT_SIDEKICK_MODEL"); expected != "" {
-			require.Equal(t, expected, sidekick, "approved Sidekick model changed; stop before generation")
+			require.True(t, expected == sidekick, "approved Sidekick model changed; stop before generation")
 		}
 		require.Equal(t, "true", os.Getenv("DEVIN_E2E_ALLOW_PAID"))
 		require.True(t, pricesReady, "discovered members lack verified billing prices; stop before generation")

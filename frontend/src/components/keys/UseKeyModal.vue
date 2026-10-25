@@ -159,6 +159,19 @@
           <p v-else-if="codexModelManifestState === 'ready' && !codexCatalogModelSlugs.length" role="status" class="text-xs">
             {{ t('keys.useKeyModal.devin.noModels') }}
           </p>
+          <template v-if="activeClientTab === 'omo'">
+            <label class="input-label" for="devin-workspace-path">{{ t('keys.useKeyModal.devin.workspace') }}</label>
+            <input
+              id="devin-workspace-path"
+              v-model="devinWorkspaceInput"
+              data-testid="devin-workspace-path"
+              class="input"
+              :placeholder="t('keys.useKeyModal.devin.workspacePlaceholder')"
+            />
+            <p v-if="devinWorkspaceInput && !devinWorkspacePath" role="alert" class="text-xs text-amber-700 dark:text-amber-300">
+              {{ t('keys.useKeyModal.devin.workspaceInvalid') }}
+            </p>
+          </template>
           <button
             v-if="devinSelectedModel && (activeClientTab === 'codex' || activeClientTab === 'claude')"
             type="button"
@@ -322,7 +335,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildCodexModelCatalogUrl, fetchCodexModelsManifest } from '@/api/codex'
-import { devinOmpConfig } from '@/utils/devinClientConfig'
+import { devinOmpConfig, normalizeDevinWorkspacePath } from '@/utils/devinClientConfig'
 import type { GroupPlatform } from '@/types'
 import {
   findCodexCatalogModel,
@@ -372,6 +385,8 @@ const codexAuthMode = ref<CodexAuthMode>('legacy')
 type CodexModelManifestState = 'idle' | 'loading' | 'ready' | 'error'
 const codexModelManifestState = ref<CodexModelManifestState>('idle')
 const devinSelectedModel = ref('')
+const devinWorkspaceInput = ref('')
+const devinWorkspacePath = computed(() => normalizeDevinWorkspacePath(devinWorkspaceInput.value))
 const codexModelManifestContent = ref('')
 const codexModelManifestModelCount = ref(0)
 const codexModelCatalogMode = ref<'remote' | 'file'>('remote')
@@ -826,6 +841,7 @@ const currentFiles = computed((): FileConfig[] => {
   }
   const apiBase = ensureV1(baseRoot)
   if (props.platform === 'devin' && (!devinSelectedModel.value || codexModelManifestState.value !== 'ready')) return []
+  if (props.platform === 'devin' && activeClientTab.value === 'omo' && !devinWorkspacePath.value) return []
   const antigravityBase = ensureV1(`${baseRoot}/antigravity`)
   const antigravityGeminiBase = (() => {
     const trimmed = `${baseRoot}/antigravity`.replace(/\/+$/, '')
@@ -864,7 +880,7 @@ const currentFiles = computed((): FileConfig[] => {
         return [generateOpenCodeConfig('grok', apiBase, apiKey)]
       case 'devin':
         return [{
-          path: 'opencode.json',
+          path: activeClientTab.value === 'omo' ? `${devinWorkspacePath.value}/opencode.json` : 'opencode.json',
           content: JSON.stringify({
             $schema: 'https://opencode.ai/config.json',
             model: `devin/${devinSelectedModel.value}`,
@@ -872,7 +888,7 @@ const currentFiles = computed((): FileConfig[] => {
             ...(activeClientTab.value === 'omo' ? {
               plugin: ['oh-my-opencode@5.1.44'],
               default_agent: 'devin-check',
-              permission: { '*': 'deny', read: 'allow' },
+              permission: { '*': 'deny', read: 'allow', external_directory: { [`${devinWorkspacePath.value}/*`]: 'allow' } },
               agent: { 'devin-check': {
                 mode: 'primary', model: `devin/${devinSelectedModel.value}`,
                 prompt: 'Read probe.txt when asked. Use only read; do not spawn workers or modify files.',
@@ -890,7 +906,7 @@ const currentFiles = computed((): FileConfig[] => {
             } }
           }, null, 2)
         }, ...(activeClientTab.value === 'omo' ? [{
-          path: '.omo/omo.jsonc',
+          path: `${devinWorkspacePath.value}/.omo/omo.jsonc`,
           content: JSON.stringify({ model_fallback: false, runtime_fallback: false, disabled_mcps: ['websearch', 'context7', 'grep_app'] }, null, 2),
           hint: t('keys.useKeyModal.devin.mergeConfig')
         }] : [])]

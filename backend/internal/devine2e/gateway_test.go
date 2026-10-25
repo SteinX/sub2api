@@ -576,7 +576,7 @@ func validateResponse(t *testing.T, body []byte, protocol string) {
 	case "messages":
 		path = "content.#.text"
 	}
-	require.Contains(t, gjson.GetBytes(body, path).String(), "E2E_OK", "missing generated answer")
+	require.True(t, strings.Contains(gjson.GetBytes(body, path).String(), "E2E_OK"), "missing generated answer; text withheld")
 	usagePath := "usage.output_tokens"
 	if protocol == "chat/completions" {
 		usagePath = "usage.completion_tokens"
@@ -593,8 +593,8 @@ func validateStream(t *testing.T, body []byte, protocol string) {
 	if protocol == "messages" {
 		terminal = "message_stop"
 	}
-	require.Contains(t, string(body), terminal, "truncated stream")
-	require.NotContains(t, string(body), "response.failed")
+	require.True(t, bytes.Contains(body, []byte(terminal)), "truncated stream; body withheld")
+	require.False(t, bytes.Contains(body, []byte("response.failed")), "stream reported failure; body withheld")
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	scanner.Buffer(make([]byte, 4096), 8<<20)
 	var text strings.Builder
@@ -622,7 +622,7 @@ func validateStream(t *testing.T, body []byte, protocol string) {
 		}
 	}
 	require.NoError(t, scanner.Err())
-	require.Contains(t, text.String(), "E2E_OK", "stream emitted no generated answer")
+	require.True(t, strings.Contains(text.String(), "E2E_OK"), "stream emitted no generated answer; text withheld")
 }
 
 func websocketTools(t *testing.T, a *application, key, model string, fixture *nativeFixture) {
@@ -670,7 +670,7 @@ func websocketTools(t *testing.T, a *application, key, model string, fixture *na
 		map[string]string{"type": "function_call_output", "call_id": "call_e2e", "output": "E2E_TOOL_RESULT"},
 	}})
 	second := readCompleted()
-	require.Contains(t, second.Get("output.#.content.#.text").String(), "E2E_OK")
+	require.True(t, strings.Contains(second.Get("output.#.content.#.text").String(), "E2E_OK"), "WebSocket answer missing; text withheld")
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
 	require.Len(t, fixture.chats, before+2)

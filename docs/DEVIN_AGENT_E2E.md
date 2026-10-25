@@ -106,4 +106,4 @@ DEVIN_E2E_ALLOW_PAID=true DEVIN_E2E_AGENT_BATCH=matrix make test-devin-agent-liv
 
 仓库还提供 Codex Responses 与 Claude Code Messages 配置。候选固定版本已解析为 Codex `0.164.0`、Claude Code `2.1.310`，参考模板在工具目录；这两个 CLI 尚未计入本次实际进程矩阵。只有在完成对应版本、隔离运行和工具/会话合同验证后，才能纳入真实验收，不能据协议探针声称普遍 agent 兼容。
 
-CI 自动跑协议 mock 与真实客户端进程 mock，均不提供真实 PAT。手动 main 工作流可选择 `suite=agents`、`plan/live` 和批次；`live` 仍要求显式 `allow_paid`。归档仅含结构结果、版本/二进制来源、模型计划、角色数量/用量状态及会话哈希；不上传原始 stdout、思考、工具参数/结果、客户端会话文件或后端私有日志。
+CI 自动跑协议 mock 与真实客户端进程 mock，均不提供真实 PAT。手动 main 工作流可选择 `suite=agents`、`plan/live` 和批次；`live` 仍要求显式 `allow_paid`。只有 mock 自动归档结构结果、版本/二进制来源、合成模型计划、角色状态及会话哈希；真实 plan/live 不自动上传归档。原始 stdout、思考、工具参数/结果、客户端会话文件及后端私有日志不上传。

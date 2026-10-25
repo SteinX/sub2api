@@ -125,7 +125,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	if mode == "live" {
 		expected := os.Getenv("DEVIN_E2E_LONG_EXPECT_MODEL")
 		require.NotEmpty(t, expected, "pin the reviewed long-task model before generation")
-		require.Equal(t, expected, lead, "model selection changed since the reviewed plan; stop before generation")
+		require.True(t, expected == lead, "model selection changed since the reviewed plan; stop before generation")
 	}
 	profile := fusion.DefaultProfile("fusion-e2e-long", lead, sidekick)
 	profile.MaxRequests, profile.MaxHandoffs, profile.MaxTools = 64, 2, 20
@@ -196,7 +196,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 			sessionID = returnedSession
 		}
 		require.NotEmpty(t, sessionID)
-		require.Equal(t, sessionID, returnedSession)
+		require.True(t, sessionID == returnedSession, "Fusion session identity changed; values withheld")
 		var results []apicompat.ResponsesInputItem
 		var text strings.Builder
 		for _, item := range response.Output {
@@ -213,7 +213,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 			}
 			decoder := json.NewDecoder(strings.NewReader(item.Arguments))
 			decoder.DisallowUnknownFields()
-			require.NoError(t, decoder.Decode(&args))
+			require.True(t, decoder.Decode(&args) == nil, "invalid tool arguments; details withheld")
 			require.GreaterOrEqual(t, args.Part, 1)
 			require.LessOrEqual(t, args.Part, 16)
 			require.False(t, seenParts[args.Part], "fragment read repeated")
@@ -223,7 +223,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 			results = append(results, apicompat.ResponsesInputItem{Type: "function_call_output", CallID: item.CallID, Output: string(data)})
 		}
 		if len(results) == 0 {
-			require.Contains(t, text.String(), expectedFinal, "reviewed answer must contain independently checked sums")
+			require.True(t, strings.Contains(text.String(), expectedFinal), "reviewed answer must contain independently checked sums; text withheld")
 			require.Len(t, seenParts, 16)
 			finished = true
 			break
@@ -277,8 +277,8 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	require.Equal(t, session.Maintenance.CompactionsApplied, summaryRows)
 	leadBytes, err := json.Marshal(session.Lead)
 	require.NoError(t, err)
-	require.Contains(t, string(leadBytes), longGoal)
-	require.NotContains(t, string(leadBytes), strings.Repeat("Synthetic historical evidence. Preserve the public API. ", 3), "raw Sidekick evidence leaked into the Lead lane")
+	require.True(t, strings.Contains(string(leadBytes), longGoal), "original goal missing; history withheld")
+	require.False(t, strings.Contains(string(leadBytes), strings.Repeat("Synthetic historical evidence. Preserve the public API. ", 3)), "raw Sidekick evidence leaked into the Lead lane; history withheld")
 	writeAgentArtifact(t, "long-context.json", map[string]any{"handoffs": len(session.Handoffs), "compactions_applied": session.Maintenance.CompactionsApplied, "sidekick_epoch": session.Contexts[fusion.Sidekick].Epoch, "goal_preserved": true, "raw_tool_results_isolated": true, "maintenance": session.Maintenance})
 	if fixture != nil {
 		fixture.verifyAgentNativeContexts(t, 0, "long-protocol", lead, sidekick)
