@@ -891,7 +891,7 @@ const currentFiles = computed((): FileConfig[] => {
               permission: { '*': 'deny', read: 'allow', external_directory: { [`${devinWorkspacePath.value}/*`]: 'allow' } },
               agent: { 'devin-check': {
                 mode: 'primary', model: `devin/${devinSelectedModel.value}`,
-                prompt: 'Read probe.txt when asked. Use only read; do not spawn workers or modify files.',
+                prompt: 'Read probe.txt when asked. Use only read; do not spawn client-side workers or modify files. Gateway-internal Fusion Lead/Sidekick delegation remains allowed.',
                 tools: Object.fromEntries(
                   ['read', 'bash', 'edit', 'write', 'task', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'question']
                     .map(name => [name, name === 'read'])
