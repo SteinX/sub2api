@@ -51,6 +51,8 @@ Mock 覆盖：
 
 ## 真实 Devin 上游
 
+长任务的工具往返、角色上下文压缩和中途重启另见[长任务用例](DEVIN_LONG_E2E.md)。该套件使用公开 Responses 工具执行器，不等同于实际客户端进程矩阵。
+
 使用独立测试身份的现有 PAT，通过安全配置提供 **`DEVIN_E2E_PAT`** 运行时凭据引用，测试会自动关联该凭据对应的原生账号并走完账号添加流程。若平台明确支持对该原生请求的凭据替换，也可使用平台提供的代理占位符；测试不自行提取真实 Secret。不要把真实 PAT 写进命令、聊天、仓库或报告；测试不会创建外部 Devin 用户，不会导出或修改用户侧服务的凭据。旧变量 `DEVIN_E2E_CREDENTIAL` 暂保留为兼容别名。
 
 [官方鉴权说明](https://docs.devin.ai/api-reference/authentication)和 [PAT 说明](https://docs.devin.ai/api-reference/personal-access-tokens)区分人类 PAT 与服务用户 Key；两者都使用 `cog_` 前缀。前缀不能证明能通过 Sub2API 所用的原生 CLI 会话交换。测试会实际经过 `GetSelfDevinSessionToken` 和 `GetCliModelConfigs` 验证，遇到 401/403 或空目录立即报告不兼容的阶段，不会改用服务用户、浏览器会话或猜测其他接口。旧 `apk_*`、`apk_user_*`、CLI JWT 和 PAT 不是可互换的凭据。

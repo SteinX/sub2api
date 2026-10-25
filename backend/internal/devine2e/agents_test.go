@@ -41,7 +41,7 @@ func TestDevinAgentClients(t *testing.T) {
 		fixture = newNativeFixture(t)
 		fixture.agentMode.Store(true)
 	}
-	runDevinCloudGatewaySuite(t, mode, fixture, true)
+	runDevinCloudGatewaySuite(t, mode, fixture, "agents")
 }
 
 type agentRequest struct {

@@ -294,11 +294,13 @@ func TestOpaqueCredentialReferenceUsesKeyOnboarding(t *testing.T) {
 }
 
 func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
-	runDevinCloudGatewaySuite(t, mode, fixture, false)
+	runDevinCloudGatewaySuite(t, mode, fixture, "protocol")
 }
 
-func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture, agents bool) {
+func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture, suite string) {
 	t.Helper()
+	require.Contains(t, []string{"protocol", "agents", "long"}, suite)
+	agents, longTask := suite == "agents", suite == "long"
 	require.Contains(t, []string{"mock", "plan", "live"}, mode, "select mock, plan or live explicitly")
 	pat := "cog_e2e_fixture"
 	if fixture != nil && fixture.credentialReference != "" {
@@ -395,7 +397,7 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	require.NoError(t, err)
 	selection.PaidAllowed = mode == "live"
 	selection.Mode = mode
-	if !agents {
+	if !agents && !longTask {
 		saveSmokePlan(t, selection)
 	}
 	model := selection.Model
@@ -407,8 +409,12 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	})
 	user := login(t, a, "user@devin-e2e.invalid", userPassword)
 	keyInput := map[string]any{"name": "e2e-key", "group_id": groupID}
-	if agents {
-		quota, err := agentKeyQuota(mode, os.Getenv("DEVIN_E2E_AGENT_BATCH"), os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
+	if agents || longTask {
+		batch := os.Getenv("DEVIN_E2E_AGENT_BATCH")
+		if longTask {
+			batch = "matrix"
+		}
+		quota, err := agentKeyQuota(mode, batch, os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
 		require.NoError(t, err)
 		keyInput["quota"] = quota
 	}
@@ -417,7 +423,7 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	require.NotEmpty(t, key, "public API key creation")
 	a.redactor.addSecret(key)
 	keyID := keyData.Get("id").Int()
-	if mode == "mock" && !agents {
+	if mode == "mock" && !agents && !longTask {
 		t.Run("administrator_probe", func(t *testing.T) {
 			body := request(t, a, "POST", fmt.Sprintf("/api/v1/admin/accounts/%d/test", accountID), admin,
 				map[string]string{"model_id": model, "prompt": "Reply with E2E_OK only."}, 200)
@@ -440,6 +446,10 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	}
 	if agents {
 		runAgentCases(t, a, fixture, mode, admin, user, key, keyID, accountID, catalog.Models)
+		return
+	}
+	if longTask {
+		runLongWorkflow(t, a, fixture, mode, admin, key, keyID, accountID, catalog.Models)
 		return
 	}
 	if mode == "plan" {
