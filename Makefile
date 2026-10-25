@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
+.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical test-devin-e2e test-devin-plan test-devin-live
 
 FRONTEND_CRITICAL_VITEST := \
 	src/i18n/__tests__/localeKeyCompleteness.spec.ts \
@@ -66,3 +66,35 @@ test-frontend:
 
 test-frontend-critical:
 	@pnpm --dir frontend exec vitest run $(FRONTEND_CRITICAL_VITEST)
+
+# Full production binary, disposable PostgreSQL/Redis, native protocol fixture.
+test-devin-e2e:
+	@bash deploy/devin-e2e.sh mock
+
+# Validate PAT onboarding and public model grants without inference.
+test-devin-plan:
+	@bash deploy/devin-e2e.sh plan
+
+# Explicit opt-in: uses a dedicated Devin account and consumes upstream credits.
+test-devin-live:
+	@bash deploy/devin-e2e.sh live
+
+.PHONY: test-devin-agent-e2e test-devin-agent-plan test-devin-agent-live
+test-devin-agent-e2e:
+	@bash deploy/devin-agent-e2e.sh mock
+
+test-devin-agent-plan:
+	@bash deploy/devin-agent-e2e.sh plan
+
+test-devin-agent-live:
+	@bash deploy/devin-agent-e2e.sh live
+
+.PHONY: test-devin-long-e2e test-devin-long-plan test-devin-long-live
+test-devin-long-e2e:
+	@bash deploy/devin-long-e2e.sh mock
+
+test-devin-long-plan:
+	@bash deploy/devin-long-e2e.sh plan
+
+test-devin-long-live:
+	@bash deploy/devin-long-e2e.sh live

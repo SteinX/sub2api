@@ -147,6 +147,32 @@
           </select>
           <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.useKeyModal.devin.description') }}</p>
           <button
+            type="button"
+            data-testid="devin-models-refresh"
+            class="btn btn-secondary btn-sm"
+            :disabled="codexModelManifestState === 'loading' || !apiKey"
+            @click="loadCodexModelManifest"
+          >{{ t('keys.useKeyModal.devin.refreshModels') }}</button>
+          <p v-if="codexModelManifestState === 'error'" role="alert" class="text-xs text-amber-700 dark:text-amber-300">
+            {{ t('keys.useKeyModal.codexModelCatalog.errorDescription') }}
+          </p>
+          <p v-else-if="codexModelManifestState === 'ready' && !codexCatalogModelSlugs.length" role="status" class="text-xs">
+            {{ t('keys.useKeyModal.devin.noModels') }}
+          </p>
+          <template v-if="activeClientTab === 'omo'">
+            <label class="input-label" for="devin-workspace-path">{{ t('keys.useKeyModal.devin.workspace') }}</label>
+            <input
+              id="devin-workspace-path"
+              v-model="devinWorkspaceInput"
+              data-testid="devin-workspace-path"
+              class="input"
+              :placeholder="t('keys.useKeyModal.devin.workspacePlaceholder')"
+            />
+            <p v-if="devinWorkspaceInput && !devinWorkspacePath" role="alert" class="text-xs text-amber-700 dark:text-amber-300">
+              {{ t('keys.useKeyModal.devin.workspaceInvalid') }}
+            </p>
+          </template>
+          <button
             v-if="devinSelectedModel && (activeClientTab === 'codex' || activeClientTab === 'claude')"
             type="button"
             class="btn btn-secondary btn-sm"
@@ -154,6 +180,19 @@
             @click="emit('ccswitchImport', { clientType: activeClientTab === 'codex' ? 'codex' : 'claude', model: devinSelectedModel })"
           >{{ t('keys.useKeyModal.devin.import') }}</button>
         </div>
+
+        <section
+          v-if="platform === 'devin'"
+          data-testid="devin-instructions"
+          class="space-y-2 rounded-lg border border-gray-200 p-4 text-sm text-gray-600 dark:border-dark-700 dark:text-gray-300"
+        >
+          <h3 class="font-medium text-gray-900 dark:text-white">{{ t('keys.useKeyModal.devin.instructionsTitle') }}</h3>
+          <p>{{ t('keys.useKeyModal.devin.credentials') }}</p>
+          <p>{{ t('keys.useKeyModal.devin.protocols') }}</p>
+          <p>{{ devinClientInstructions }}</p>
+          <p>{{ t('keys.useKeyModal.devin.fusion') }}</p>
+          <p>{{ t('keys.useKeyModal.devin.check') }}</p>
+        </section>
 
         <!-- Code Blocks (Stacked for multi-file platforms) -->
         <div class="space-y-4">
@@ -195,7 +234,7 @@
         </div>
 
         <section
-          v-if="showCodexModelCatalog"
+          v-if="showCodexModelCatalog && (platform !== 'devin' || activeClientTab === 'codex')"
           data-testid="codex-model-catalog"
           class="overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-800/50"
         >
@@ -296,6 +335,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildCodexModelCatalogUrl, fetchCodexModelsManifest } from '@/api/codex'
+import { devinOmpConfig, normalizeDevinWorkspacePath } from '@/utils/devinClientConfig'
 import type { GroupPlatform } from '@/types'
 import {
   findCodexCatalogModel,
@@ -345,6 +385,8 @@ const codexAuthMode = ref<CodexAuthMode>('legacy')
 type CodexModelManifestState = 'idle' | 'loading' | 'ready' | 'error'
 const codexModelManifestState = ref<CodexModelManifestState>('idle')
 const devinSelectedModel = ref('')
+const devinWorkspaceInput = ref('')
+const devinWorkspacePath = computed(() => normalizeDevinWorkspacePath(devinWorkspaceInput.value))
 const codexModelManifestContent = ref('')
 const codexModelManifestModelCount = ref(0)
 const codexModelCatalogMode = ref<'remote' | 'file'>('remote')
@@ -527,6 +569,14 @@ const clientTabs = computed((): TabConfig[] => {
       return [
         { id: 'systemone', label: t('keys.useKeyModal.cliTabs.systemOne'), icon: TerminalIcon }
       ]
+    case 'devin':
+      return [
+        { id: 'codex', label: t('keys.useKeyModal.cliTabs.codexCli'), icon: TerminalIcon },
+        { id: 'claude', label: t('keys.useKeyModal.cliTabs.claudeCode'), icon: TerminalIcon },
+        { id: 'opencode', label: t('keys.useKeyModal.cliTabs.opencode'), icon: TerminalIcon },
+        { id: 'omo', label: 'OMO', icon: TerminalIcon },
+        { id: 'omp', label: 'OMP', icon: TerminalIcon }
+      ]
     case 'deepseek':
     case 'minimax':
     case 'composite':
@@ -557,7 +607,17 @@ const openaiTabs: TabConfig[] = [
   { id: 'windows', label: 'Windows', icon: WindowsIcon }
 ]
 
-const showShellTabs = computed(() => activeClientTab.value !== 'opencode')
+const showShellTabs = computed(() => !['opencode', 'omo'].includes(activeClientTab.value))
+
+const devinClientInstructions = computed(() => {
+  switch (activeClientTab.value) {
+    case 'omp': return t('keys.useKeyModal.devin.ompInstructions')
+    case 'omo': return t('keys.useKeyModal.devin.omoInstructions')
+    case 'opencode': return t('keys.useKeyModal.devin.opencodeInstructions')
+    case 'claude': return t('keys.useKeyModal.devin.claudeInstructions')
+    default: return t('keys.useKeyModal.devin.codexInstructions')
+  }
+})
 
 const showCodexAuthMode = computed(() =>
   props.platform === 'openai' &&
@@ -573,6 +633,7 @@ const currentTabs = computed(() => {
 })
 
 const platformDescription = computed(() => {
+  if (props.platform === 'devin') return t('keys.useKeyModal.devin.description')
   if (activeClientTab.value === 'codex' &&
     props.platform !== 'openai' &&
     props.platform !== 'grok' &&
@@ -619,6 +680,7 @@ const platformDescription = computed(() => {
 })
 
 const platformNote = computed(() => {
+  if (props.platform === 'devin') return t('keys.useKeyModal.devin.note')
   if (activeClientTab.value === 'codex' &&
     props.platform !== 'openai' &&
     props.platform !== 'grok' &&
@@ -779,6 +841,7 @@ const currentFiles = computed((): FileConfig[] => {
   }
   const apiBase = ensureV1(baseRoot)
   if (props.platform === 'devin' && (!devinSelectedModel.value || codexModelManifestState.value !== 'ready')) return []
+  if (props.platform === 'devin' && activeClientTab.value === 'omo' && !devinWorkspacePath.value) return []
   const antigravityBase = ensureV1(`${baseRoot}/antigravity`)
   const antigravityGeminiBase = (() => {
     const trimmed = `${baseRoot}/antigravity`.replace(/\/+$/, '')
@@ -789,7 +852,18 @@ const currentFiles = computed((): FileConfig[] => {
     return trimmed.endsWith('/v1beta') ? trimmed : `${trimmed}/v1beta`
   })()
 
-  if (activeClientTab.value === 'opencode') {
+  if (props.platform === 'devin' && activeClientTab.value === 'omp') {
+    const advertisedContext = findCodexCatalogModel(codexModelManifestContent.value, devinSelectedModel.value)?.context_window
+    const config = devinOmpConfig(apiBase, apiKey, devinSelectedModel.value, advertisedContext)
+    const directory = activeTab.value === 'unix' ? '~/.omp/agent' : '%USERPROFILE%\\.omp\\agent'
+    const separator = activeTab.value === 'unix' ? '/' : '\\'
+    return [
+      { path: `${directory}${separator}models.yml`, content: JSON.stringify(config.models, null, 2), hint: t('keys.useKeyModal.claudeSettingsHint') },
+      { path: `${directory}${separator}config.yml`, content: JSON.stringify(config.settings, null, 2), hint: t('keys.useKeyModal.devin.mergeConfig') }
+    ]
+  }
+
+  if (activeClientTab.value === 'opencode' || (props.platform === 'devin' && activeClientTab.value === 'omo')) {
     switch (props.platform) {
       case 'anthropic':
         return [generateOpenCodeConfig('anthropic', apiBase, apiKey)]
@@ -806,10 +880,24 @@ const currentFiles = computed((): FileConfig[] => {
         return [generateOpenCodeConfig('grok', apiBase, apiKey)]
       case 'devin':
         return [{
-          path: 'opencode.json',
+          path: activeClientTab.value === 'omo' ? `${devinWorkspacePath.value}/opencode.json` : 'opencode.json',
           content: JSON.stringify({
             $schema: 'https://opencode.ai/config.json',
             model: `devin/${devinSelectedModel.value}`,
+            small_model: `devin/${devinSelectedModel.value}`,
+            ...(activeClientTab.value === 'omo' ? {
+              plugin: ['oh-my-opencode@5.1.44'],
+              default_agent: 'devin-check',
+              permission: { '*': 'deny', read: 'allow', external_directory: { [`${devinWorkspacePath.value}/*`]: 'allow' } },
+              agent: { 'devin-check': {
+                mode: 'primary', model: `devin/${devinSelectedModel.value}`,
+                prompt: 'Read probe.txt when asked. Use only read; do not spawn client-side workers or modify files. Gateway-internal Fusion Lead/Sidekick delegation remains allowed.',
+                tools: Object.fromEntries(
+                  ['read', 'bash', 'edit', 'write', 'task', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'question']
+                    .map(name => [name, name === 'read'])
+                )
+              } }
+            } : {}),
             provider: { devin: {
               npm: '@ai-sdk/openai-compatible',
               name: 'Devin via Sub2API',
@@ -817,7 +905,11 @@ const currentFiles = computed((): FileConfig[] => {
               models: Object.fromEntries(codexCatalogModelSlugs.value.map(id => [id, { name: id }]))
             } }
           }, null, 2)
-        }]
+        }, ...(activeClientTab.value === 'omo' ? [{
+          path: `${devinWorkspacePath.value}/.omo/omo.jsonc`,
+          content: JSON.stringify({ model_fallback: false, runtime_fallback: false, disabled_mcps: ['websearch', 'context7', 'grep_app'] }, null, 2),
+          hint: t('keys.useKeyModal.devin.mergeConfig')
+        }] : [])]
       default:
         return [generateOpenCodeConfig('openai', apiBase, apiKey)]
     }

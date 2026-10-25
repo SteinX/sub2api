@@ -82,6 +82,82 @@ describe('UseKeyModal', () => {
     }
   })
 
+  it('generates the bounded OMP compatibility profile with the selected Fusion model', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify({ models: [{ slug: 'direct-test' }, { slug: 'fusion-test', context_window: 16384 }] })
+    }))
+    const apiKey = 'sk-quoted-"-key'
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey, baseUrl: 'https://example.com/v1/', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('fusion-test')
+    await wrapper.get('nav[aria-label="Client"]').findAll('button').find(tab => tab.text() === 'OMP')!.trigger('click')
+    const blocks = wrapper.findAll('pre code').map(node => JSON.parse(node.text()))
+    const provider = blocks[0].providers.devin
+    expect(provider.api).toBe('openai-completions')
+    expect(provider.baseUrl).toBe('https://example.com/v1')
+    expect(provider.apiKey).toBe(apiKey)
+    expect(provider.models[0].id).toBe('fusion-test')
+    expect(provider.models[0].contextWindow).toBe(16384)
+    expect(provider.models[0]).not.toHaveProperty('cost')
+    expect(provider.models[0].compat.supportsStore).toBe(false)
+    expect(new Set(Object.values(blocks[1].modelRoles))).toEqual(new Set(['devin/fusion-test']))
+    expect(blocks[1].compaction).toEqual({ enabled: false, supersedeReads: false, dropUseless: false })
+    expect(blocks[1].retry.enabled).toBe(false)
+    expect(wrapper.get('[data-testid="devin-instructions"]').text()).toContain('keys.useKeyModal.devin.ompInstructions')
+    expect(wrapper.find('[data-testid="codex-model-catalog"]').exists()).toBe(false)
+    await wrapper.findAll('button').find(tab => tab.text() === 'Windows CMD')!.trigger('click')
+    expect(wrapper.text()).toContain('%USERPROFILE%\\.omp\\agent\\models.yml')
+    wrapper.unmount()
+  })
+
+  it('provides a pinned read-only OMO connection check without model fallbacks', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, text: async () => JSON.stringify({ models: [{ slug: 'fusion-test' }] })
+    }))
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-devin', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    await flushPromises()
+    await wrapper.get('nav[aria-label="Client"]').findAll('button').find(tab => tab.text() === 'OMO')!.trigger('click')
+    expect(wrapper.findAll('pre code')).toHaveLength(0)
+    for (const path of ['/', 'C:/', '/tmp/*', '/tmp/../private']) {
+      await wrapper.get('[data-testid="devin-workspace-path"]').setValue(path)
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+    }
+    await wrapper.get('[data-testid="devin-workspace-path"]').setValue('C:\\work\\owned-project')
+    const blocks = wrapper.findAll('pre code').map(node => JSON.parse(node.text()))
+    expect(blocks[0].plugin).toEqual(['oh-my-opencode@5.1.44'])
+    expect(blocks[0].default_agent).toBe('devin-check')
+    expect(blocks[0].agent['devin-check'].model).toBe('devin/fusion-test')
+    expect(blocks[0].agent['devin-check'].tools.task).toBe(false)
+    expect(Object.entries(blocks[0].agent['devin-check'].tools).filter(([, enabled]) => enabled)).toEqual([['read', true]])
+    expect(blocks[0].permission).toEqual({ '*': 'deny', read: 'allow', external_directory: { 'C:/work/owned-project/*': 'allow' } })
+    expect(blocks[1]).toMatchObject({ model_fallback: false, runtime_fallback: false })
+    expect(wrapper.get('[data-testid="devin-instructions"]').text()).toContain('keys.useKeyModal.devin.omoInstructions')
+    wrapper.unmount()
+  })
+
+  it('recovers Devin discovery with an explicit refresh without generating a guessed model', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 403 })
+      .mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'recovered-model' }] }) }))
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-devin', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    await flushPromises()
+    expect(wrapper.findAll('pre code')).toHaveLength(0)
+    await wrapper.get('[data-testid="devin-models-refresh"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('pre code').map(node => node.text()).join('\n')).toContain('recovered-model')
+    wrapper.unmount()
+  })
+
   afterEach(() => {
     vi.unstubAllGlobals()
     saveAsMock.mockClear()

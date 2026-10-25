@@ -147,6 +147,9 @@ docs/*
 !docs/DEVIN_COMPACTION_MIGRATION.md
 !docs/DEVIN_COMPACTION_IMPLEMENTATION_PLAN.md
 !docs/DEVIN_MODEL_ROUTING.md
+!docs/DEVIN_E2E.md
+!docs/DEVIN_AGENT_E2E.md
+!docs/DEVIN_LONG_E2E.md
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/codex-credits.md
 !docs/devin-usage.md

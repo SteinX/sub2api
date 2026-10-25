@@ -4,6 +4,7 @@ export interface CodexCatalogReasoningLevel {
 
 export interface CodexCatalogModel {
   slug: string
+  context_window?: unknown
   default_reasoning_level?: unknown
   supported_reasoning_levels?: CodexCatalogReasoningLevel[]
 }

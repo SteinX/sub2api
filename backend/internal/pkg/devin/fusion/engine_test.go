@@ -528,6 +528,41 @@ func TestFusionLeadUsesAutoAndStableToolsAcrossHandoff(t *testing.T) {
 	}
 }
 
+func TestFusionHandoffGuidancePreservesStableToolsAndHardLimit(t *testing.T) {
+	e := New(newMemoryStore())
+	p := testProfile()
+	p.MaxHandoffs = 2
+	s := &Session{Profile: p, Role: Lead}
+	base := testRequest("complete two phases and review")
+	planning, err := e.roleRequest(s, base)
+	require.NoError(t, err)
+	require.Contains(t, planning.Tools[len(planning.Tools)-1].Description, "at most 2 Sidekick handoffs per user turn")
+	require.Contains(t, planning.Instructions, "do not request another Sidekick verification or rework")
+	s.TurnHandoffs = 2
+	review, err := e.roleRequest(s, base)
+	require.NoError(t, err)
+	require.Equal(t, planning.Instructions, review.Instructions)
+	require.Equal(t, Digest(planning.Tools), Digest(review.Tools), "guidance must not remove historical tool definitions or change the cache prefix")
+
+	store := newMemoryStore()
+	engine := New(store)
+	x := &scriptExecutor{t: t, responses: []*apicompat.ResponsesResponse{
+		delegation("phase-1"), textResponse("phase one evidence"),
+		delegation("phase-2"), textResponse("phase two evidence"),
+		delegation("extra-verification"),
+	}}
+	in := input(base)
+	in.Profile.MaxHandoffs = 2
+	_, err = engine.Advance(context.Background(), in, x)
+	requireCode(t, err, "budget_exhausted")
+	require.Len(t, x.calls, 5, "a third Sidekick must never start")
+	require.Len(t, x.settled, 5, "retain usage for the Lead's rejected extra delegation")
+	saved, _, err := engine.Load(context.Background(), in.Scope, in.SessionID)
+	require.NoError(t, err)
+	require.Equal(t, BudgetExhausted, saved.State)
+	require.Equal(t, 2, saved.TurnHandoffs)
+}
+
 func TestFusionDelegationReminderIsBilledAndResetPerTurn(t *testing.T) {
 	store := newMemoryStore()
 	e := New(store)
