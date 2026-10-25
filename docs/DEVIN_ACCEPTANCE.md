@@ -75,6 +75,38 @@ python3 tools/devin-acceptance/acceptance.py tag-note --mode user_e2e \
 
 只有真实 E2E 完成并审核的结构化报告可用于该命令。当前没有生成器会把模拟报告升级成真实报告。历史上尚无 Devin 功能的版本继续沿用旧发布流程；dry run 可显示阻碍并继续构建，但不会发布。脚本不修改安全设置、权限、secrets 或 branch protection；读取权限不足即停止相关验收。
 
+## 可执行的真实上游入口（尚未获准运行）
+
+入口为 `bash deploy/devin-user-journeys.sh plan|live`。`authorized_journey.py` 先验证批准、计划哈希、干净的最终 SHA/tree、精确目标域名、模型和预算，再构建产品、启动 Docker 或接触原生服务。`plan` 也会传输原生凭据并在临时数据库保存派生凭据，因此同样需要单独批准；它仅做授权、目录、实际价格检查及产品页面配置交付，账本禁止任何生成。当前两种模式均未运行。边界回归要求缺少批准、凭据或精确域名时没有启动子进程。
+
+先在私有文件准备以下计划。数值是 runner 支持的上界示例，不是已经批准的额度，应按实际用例减少。物理 UID 必须来自实际授权目录。`reference_pricing_sha256` 绑定预先审阅的公共价卡；若需要当前真实分组价格，另加 `group_pricing_sha256`，并提供仅含价格规则数组的对应快照。缺价则停，不创建猜测价格。
+
+```json
+{
+  "schema_version": 1,
+  "source": {"commit": "FINAL_COMMIT", "tree": "FINAL_TREE"},
+  "product": "isolated_complete_preview", "dataset": "synthetic_price_project_v1",
+  "upstream_origins": ["https://server.codeium.com"],
+  "models": {"direct": "swe-2-high", "lead": "claude-opus-5-5-medium", "sidekick": "swe-2-high"},
+  "clients": ["opencode", "omo", "omp"], "omp_capabilities": "true",
+  "reference_pricing_sha256": "REVIEWED_SHA256",
+  "stop_on_failure": true, "retry_after_uncertain_send": false,
+  "limits": {"public_requests": 144, "output_tokens": 1024, "wall_seconds": 3600,
+    "turn_seconds": 300, "internal_calls_per_turn": 64, "tools_per_turn": 20,
+    "handoffs_per_turn": 2, "parallelism": 1, "local_usd": 3, "turn_usd": 0.5}
+}
+```
+
+明确取得批准后，维护者记录批准文件：`schema_version:1`、`approved:true`、唯一 `approval_id`、`mode`、24 小时内的 `expires_at`、规范化计划 `plan_sha256`，以及 `native_auth`、`temporary_credential_storage`、`local_preview_accounts` scopes；`live` 另需 `model_generation`。这是维护者可审计的操作联锁，不是授权签名。每个批准 ID 固定使用 `.cache/devin-approved-runs/<ID>.json`，独占创建，不能更换产物目录重置。新 ID 需要新的批准，不能用于重试不明请求。
+
+批准后才可安全注入原生凭据引用，设置 `DEVIN_JOURNEY_PLAN_FILE`、`DEVIN_JOURNEY_APPROVAL_FILE` 和 `DEVIN_E2E_ARTIFACTS`（新的私有目录）；有批准快照时再设置 `DEVIN_JOURNEY_GROUP_PRICING_FILE`。真实值不放到命令行或配置文件。root 启动器保护原生凭据和账本，浏览器、CLI、工程执行降为低权限用户，保留平台代理和 CA。`--validate-only` 不会启动服务或生成验收证据。
+
+所有用例共用同一持久账本，以及一个临时公共 Key 的真实本地配额预留。HTTP/SSE 错误、缺正常终态、发送不明、客户端失败、用量读取失败或预算耗尽均停止，不自动重试；SDK 后续请求也无法越过已停止账本。主摘要和短摘要意图排队，但合计计数，实际转发并发仍为一。退出清理客户端、后端及临时 SQL/Redis；结构化记录仅留私有目录。本地用量不是供应商扣费硬上限。
+
+当前真实 runner 实现基础项目、同会话续接及 OMP direct 的 fork、压力、compact、空闲进程恢复；三客户端 Fusion 高级能力、worker、在途断线和 Senpi 尚未实现。输出明确为 `product_live_partial`，不会自动签发 `user_e2e` 或放行发布。隔离预览中的真实价格也不能证明现有部署的 group/channel 正确。后续新增能力应先完成可复现实现，再单独申请真实请求预算。
+
+本地 `/compact soft` 的 ACK 只证明入队，与同步 compact RPC 的终态不同。探测在原时间边界内查询同一次操作是否结束，再验证新检查点，不重复发送压缩请求。诊断文件损坏不会跳过进程清理；mock fetch 诊断禁止自动跟随重定向。
+
 ## 待批准的真实用户链路计划
 
 当前阶段未授权新一轮真实生成或线上写入。部署管理 Token 已过期，实际 group/channel 的 SWE 规则仍未核明；这些步骤暂停，不能以模拟价格替代。应先安全恢复只读访问并核实两个真实成员的价格来源、group/channel 生效范围和服务版本；不输出或复制秘密。

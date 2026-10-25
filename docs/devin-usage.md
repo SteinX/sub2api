@@ -68,3 +68,5 @@ Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以
 遇到 `devin_fusion_pricing_unavailable` 时，错误会指出未通过检查的真实成员 UID。管理员需分别核对 Lead 和 Sidekick：价格按当前 Key 分组的模型定价、关联渠道中 Devin 平台的模型定价、全局已识别价卡依次解析；仅给虚拟 `fusion-*` 名称配价不够。渠道中给其他分组或其他平台配置的同名规则不会生效。
 
 普通模型请求成功、模型出现在目录中，都不能证明它满足 Fusion 的价格准入。`GET /api/v1/admin/channels/model-pricing?model=<真实 UID>` 只查询全局默认价，不能据其 `identified` 判断分组或渠道覆盖是否生效。没有已发布 token 费率的模型，应先由管理员确认并配置真实费率；不能从 Devin credits 倍率推导美元 token 单价，也不能用另一模型的价格或系列猜测价放行。修改分组／渠道定价应走管理接口，以执行正常的缓存失效流程。
+
+新版支持使用同一 Devin 公共 Key 调用 `GET /v1/models?pricing_models=<Lead UID>,<Sidekick UID>`，分别查看当前授权目录中物理模型的 `identified`、`calculable` 和价格来源。该只读检查沿用 Fusion 的有效分组／渠道和明确价格判定，不生成模型回答、不预留或扣费，也不返回费率、账号或分组标识。`not_advertised` 表示该 UID 不在此 Key 当前可见目录中；`unidentified` 仍应停止在推理前。零有效价格只有在明确规则已识别且可计算时才有意义，不能用它推断供应商免费。

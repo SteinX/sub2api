@@ -102,6 +102,13 @@ func TestDevinFusionMemberPricingUsesPhysicalUIDAndGroupScope(t *testing.T) {
 			call := fusion.Call{Request: &apicompat.ResponsesRequest{Model: lead, MaxOutputTokens: &out}, PricingAt: time.Now()}
 			identified, _ := svc.hasIdentifiedOpenAIResponsePricing(context.Background(), lead, key)
 			require.True(t, identified, "known Lead effort alias must use its built-in card")
+			admission := svc.InspectDevinPricing(context.Background(), key, sidekick)
+			require.Equal(t, tc.wantSource != "", admission.Identified)
+			require.Equal(t, tc.wantSource != "", admission.Calculable)
+			if tc.wantSource != "" {
+				require.Equal(t, tc.wantSource, admission.Source)
+			}
+			require.False(t, svc.InspectDevinPricing(context.Background(), key, public).Identified)
 			estimate, err := x.estimate(context.Background(), call, false)
 			if tc.wantSource == "" {
 				var pricingErr *fusion.Error

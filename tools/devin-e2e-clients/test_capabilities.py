@@ -3,6 +3,7 @@ import queue
 import time
 import signal
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -30,6 +31,21 @@ def rpc_with(events):
 
 
 class RpcProofTests(unittest.TestCase):
+    def test_invalid_or_unreadable_diagnostics_do_not_prevent_cleanup(self):
+        for bad in [b'{"truncated":', OSError('synthetic read failure')]:
+            rpc = rpc_with([])
+            rpc.trace = Path('/synthetic/trace')
+            reader = Mock(side_effect=bad) if isinstance(bad, OSError) else Mock(return_value=bad)
+            rpc.reader = Mock(); rpc.reader.is_alive.return_value = False
+            rpc.h = SimpleNamespace(ACTIVE={rpc.proc}, project_bytes=reader)
+            with patch('capabilities.os.killpg'):
+                try:
+                    self.assertEqual([], rpc.take_fetch_observations())
+                    self.assertEqual('fetch_observation_unavailable_or_invalid', rpc.trace_error)
+                finally:
+                    self.assertTrue(rpc.close())
+            self.assertNotIn(rpc.proc, rpc.h.ACTIVE)
+
     def test_zero_exit_or_response_ack_does_not_complete_a_failed_prompt(self):
         for status, invoked, settled in [('error', True, True), ('completed', False, True), ('completed', True, False)]:
             with self.subTest(status=status, invoked=invoked, settled=settled):

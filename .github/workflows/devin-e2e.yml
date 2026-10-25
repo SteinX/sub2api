@@ -13,6 +13,7 @@ on:
       - 'tools/devin-acceptance/**'
       - 'deploy/devin-user-journeys.sh'
       - 'frontend/src/components/keys/**'
+      - 'frontend/src/views/user/KeysView.vue'
       - 'frontend/src/utils/devinClientConfig.ts'
       - 'frontend/src/i18n/**'
       - 'frontend/test-support/**'
@@ -30,6 +31,7 @@ on:
       - 'tools/devin-acceptance/**'
       - 'deploy/devin-user-journeys.sh'
       - 'frontend/src/components/keys/**'
+      - 'frontend/src/views/user/KeysView.vue'
       - 'frontend/src/utils/devinClientConfig.ts'
       - 'frontend/src/i18n/**'
       - 'frontend/test-support/**'
@@ -161,6 +163,8 @@ jobs:
         run: |
           make test-devin-acceptance
           python3 -m unittest discover -s tools/devin-e2e-clients -p 'test_*.py'
+          cd backend
+          go test -mod=readonly -tags=devine2e ./internal/devine2e -run '^Test(ApprovedJourney|ClientContractAndProject|ProjectAdmission)' -count=1
       - name: Product copy buttons to actual CLI project journeys with synthetic models
         env:
           DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-user-journeys

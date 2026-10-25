@@ -137,7 +137,7 @@ func (a *application) start(t *testing.T) {
 		"SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true", "BATCH_IMAGE_ENABLED=false",
 		"GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true",
 	)
-	if os.Getenv("DEVIN_E2E_MODE") == "live" {
+	if os.Getenv("DEVIN_E2E_MODE") == "live" || os.Getenv("DEVIN_JOURNEY_REAL") == "true" {
 		// The approved batch sends native credentials only to this hostname,
 		// including when GetUserJwt supplies an account-specific API URL.
 		a.command.Env = append(a.command.Env,
@@ -302,6 +302,11 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	require.Contains(t, []string{"protocol", "agents", "long", "journeys"}, suite)
 	agents, longTask, journeys := suite == "agents", suite == "long", suite == "journeys"
 	require.Contains(t, []string{"mock", "plan", "live"}, mode, "select mock, plan or live explicitly")
+	var journeyPlan approvedJourneyPlan
+	if journeys && fixture == nil {
+		journeyPlan = approvedPlan(t)
+		require.Equal(t, journeyPlan.ReferencePricingSHA, os.Getenv("DEVIN_E2E_PRICING_SHA256"), "reviewed reference prices changed; stop before native credential transmission")
+	}
 	pat := "cog_e2e_fixture"
 	if fixture != nil && fixture.credentialReference != "" {
 		pat = fixture.credentialReference
@@ -345,6 +350,10 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 			"input_price": 0.000001, "output_price": 0.000002,
 			"cache_write_price": 0.000001, "cache_read_price": 0.0000001,
 		}}
+	} else if journeys {
+		if prices := approvedGroupPricing(t, journeyPlan); prices != nil {
+			groupInput["model_pricing"] = prices
+		}
 	}
 	group := api(t, a, "POST", "/admin/groups", admin, groupInput)
 	groupID := group.Get("id").Int()
@@ -414,9 +423,13 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 		if longTask || journeys {
 			batch = "matrix"
 		}
-		quota, err := agentKeyQuota(mode, batch, os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
-		require.NoError(t, err)
-		keyInput["quota"] = quota
+		if journeys && fixture == nil {
+			keyInput["quota"] = journeyPlan.Limits.LocalUSD
+		} else {
+			quota, err := agentKeyQuota(mode, batch, os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
+			require.NoError(t, err)
+			keyInput["quota"] = quota
+		}
 	}
 	keyData := api(t, a, "POST", "/keys", user, keyInput)
 	key := keyData.Get("key").String()
@@ -449,7 +462,11 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 		return
 	}
 	if journeys {
-		runUserJourneys(t, a, fixture, admin, key, userPassword, keyID, accountID)
+		if fixture == nil {
+			runAuthorizedUserJourneys(t, a, mode, admin, key, userPassword, keyID, accountID, catalog)
+		} else {
+			runUserJourneys(t, a, fixture, admin, key, userPassword, keyID, accountID)
+		}
 		return
 	}
 	if longTask {

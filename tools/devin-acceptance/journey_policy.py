@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import time
 
 HEX = re.compile(r'^[a-f0-9]{40}$')
 UID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
@@ -34,7 +35,9 @@ def read_json(path):
             raw = source.read(256 * 1024 + 1)
         if len(raw) > 256 * 1024:
             raise Denied('policy_oversized')
-        return json.loads(raw)
+        value = json.loads(raw)
+        if not isinstance(value, dict): raise Denied('policy_object_required')
+        return value
     except (OSError, ValueError, TypeError):
         raise Denied('policy_unavailable_or_invalid') from None
 
@@ -48,6 +51,8 @@ def current_source():
 def validate(plan, approval, mode, source, environment, now=None):
     if not approval or approval.get('approved') is not True:
         raise Denied('explicit_approval_missing')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{8,80}', str(approval.get('approval_id', ''))):
+        raise Denied('stable_approval_id_required')
     if mode not in {'plan', 'live'} or approval.get('mode') != mode:
         raise Denied('approval_mode_mismatch')
     if plan.get('schema_version') != 1 or approval.get('schema_version') != 1:
@@ -94,15 +99,32 @@ def validate(plan, approval, mode, source, environment, now=None):
         raise Denied('single_concurrency_and_failure_stop_required')
     if not re.fullmatch(r'[a-f0-9]{64}', str(plan.get('reference_pricing_sha256', ''))):
         raise Denied('reviewed_reference_price_snapshot_required')
+    if plan.get('omp_capabilities', 'false') not in {'false', 'true'}:
+        raise Denied('unsupported_capability_scope')
+    pricing_file=environment.get('DEVIN_JOURNEY_GROUP_PRICING_FILE')
+    if plan.get('group_pricing_sha256'):
+        if not re.fullmatch(r'[a-f0-9]{64}', str(plan['group_pricing_sha256'])) or not pricing_file:
+            raise Denied('approved_group_price_snapshot_required')
+        try:
+            data=Path(pricing_file).read_bytes()
+            if len(data)>256*1024 or hashlib.sha256(data).hexdigest()!=plan['group_pricing_sha256'] or not isinstance(json.loads(data),list):
+                raise Denied('group_price_snapshot_changed')
+        except (OSError,ValueError):
+            raise Denied('group_price_snapshot_unavailable_or_changed') from None
+    elif pricing_file:
+        raise Denied('unapproved_group_price_snapshot')
     credential = environment.get('DEVIN_E2E_PAT') or environment.get('DEVIN_E2E_CREDENTIAL')
     if not credential or '\n' in credential or '\r' in credential:
         raise Denied('native_runtime_credential_reference_missing')
-    return {'mode': mode, 'plan_sha256': digest(plan), 'limits': limits}
+    return {'mode': mode, 'plan_sha256': digest(plan), 'limits': limits, 'approval_id': approval['approval_id']}
 
 
 def claim(path, plan, mode):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent = path.parent.stat()
+    if parent.st_uid != os.geteuid() or parent.st_mode & 0o077:
+        raise Denied('private_owned_ledger_directory_required')
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except OSError:
@@ -110,6 +132,7 @@ def claim(path, plan, mode):
     state = {'schema_version': 1, 'plan_sha256': digest(plan), 'mode': mode, 'limits': plan['limits'],
              'requests': 0, 'local_cost_usd': 0, 'inflight': None, 'stopped': False, 'closed': False,
              'source': plan['source'], 'provider_spending_hard_cap': False}
+    state['deadline_unix'] = time.time() + plan['limits']['wall_seconds']
     with os.fdopen(fd, 'w') as out:
         json.dump(state, out, allow_nan=False)
         out.flush(); os.fsync(out.fileno())
@@ -129,6 +152,12 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None):
         if action == 'admit':
             if state['mode'] != 'live' or state['closed'] or state['stopped'] or state['inflight'] is not None:
                 raise Denied('run_stopped_or_previous_send_uncertain')
+            if time.time() >= state['deadline_unix']:
+                raise Denied('approved_wall_time_exhausted')
+            if cost is not None:
+                if type(cost) not in {float,int} or not math.isfinite(cost) or cost < state['local_cost_usd']:
+                    raise Denied('current_local_cost_unavailable')
+                state['local_cost_usd'] = cost
             if state['requests'] >= state['limits']['public_requests'] or state['local_cost_usd'] >= state['limits']['local_usd']:
                 raise Denied('approved_run_budget_exhausted')
             state['requests'] += 1

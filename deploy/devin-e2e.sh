@@ -75,4 +75,6 @@ timeout --kill-after=10s 5m go build -mod=readonly -o "$DEVIN_E2E_BINARY" ./cmd/
   sha256sum "$DEVIN_E2E_BINARY"
 } > "$DEVIN_E2E_ARTIFACTS/provenance.txt"
 echo "Running Devin $mode contracts (not product user E2E); private artifacts: $DEVIN_E2E_ARTIFACTS"
-timeout --kill-after=15s 15m go test -mod=readonly -count=1 -tags=devine2e -run "${DEVIN_E2E_RUN:-.}" -skip "${DEVIN_E2E_SKIP:-^$}" -json -timeout=10m ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"
+test_seconds="${DEVIN_E2E_TIMEOUT_SECONDS:-600}"
+[[ "$test_seconds" =~ ^[0-9]+$ ]] && (( test_seconds > 0 && test_seconds <= 3600 )) || { echo 'Invalid test wall time' >&2; exit 2; }
+timeout --kill-after=15s "$((test_seconds+30))s" go test -mod=readonly -count=1 -tags=devine2e -run "${DEVIN_E2E_RUN:-.}" -skip "${DEVIN_E2E_SKIP:-^$}" -json -timeout="${test_seconds}s" ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"

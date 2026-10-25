@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Real CLI project journey, using files copied from the product browser UI.
 
-This entry point supports simulated upstreams only. It cannot certify live E2E.
+Real upstream selection is made only by the separately approved supervisor and
+gateway admission; this child never obtains native credentials. Neither mode
+automatically certifies all user E2E capabilities.
 Model outputs and CLI logs remain in memory; reports contain structural evidence.
 """
 import argparse
@@ -84,6 +86,8 @@ def isolation(client=None):
 def project_environment(directory):
     env = child_environment(directory)
     for name in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "DEVIN_E2E_GATEWAY_KEY", "DEVIN_JOURNEY_GATEWAY_KEY", "DEVIN_JOURNEY_UI_PASSWORD"}:
+        env.pop(name, None)
+    for name in ['DEVIN_JOURNEY_APPROVAL_FILE', 'DEVIN_JOURNEY_PLAN_FILE', 'DEVIN_JOURNEY_RUN_LEDGER']:
         env.pop(name, None)
     return env
 
@@ -209,6 +213,8 @@ def command(client, model, resume):
     prompt = ("Resume this project session. Read out/report.json and confirm the completed project using the existing session history. Reply with exactly PROJECT_REVIEWED."
               if resume else
               "Repair price_math.py so the project tests pass. Read requirements.json and price_math.py, fix the calculation, run python3 run_tests.py, then re-read requirements.json and out/report.json to verify the result. Do not change the requirements, tests or test runner. Reply with exactly PROJECT_COMPLETE after verification.")
+    if model.startswith('fusion-') and not resume:
+        prompt = "Lead: delegate the project implementation to Sidekick, then review its returned work and verify the result. " + prompt
     return cmd + [prompt]
 
 
@@ -324,7 +330,10 @@ def main():
     parser.add_argument("--model", required=True)
     parser.add_argument("--ui-url", required=True)
     parser.add_argument("--profile", choices=("project", "compatibility", "default"), required=True)
+    parser.add_argument('--stage', choices=('task', 'handoff'), default='task')
+    parser.add_argument('--upstream', choices=('synthetic', 'real'), default='synthetic')
     args = parser.parse_args()
+    tier = 'client_mock' if args.upstream == 'synthetic' else 'product_live_partial'
     client_identity = identity(args.client)
     isolation(args.client)  # reject writable personal OMO state before setup
     directory = Path(args.directory).resolve()
@@ -350,10 +359,14 @@ def main():
     handoff = json.loads(stdout)
     if ui.returncode == 0 and handoff.get('blocked') is True:
         print(json.dumps({'status': 'unsupported_by_product', 'handoff': handoff, 'client_identity': client_identity,
-                          'client': args.client, 'profile': args.profile, 'tier': 'client_mock', 'eligible_for_real_e2e': False}))
+                          'client': args.client, 'profile': args.profile, 'tier': tier, 'eligible_for_real_e2e': False}))
         return 0
     if ui.returncode or not handoff.get("passed"):
-        print(json.dumps({"status": "failed", "stage": "product-ui-handoff", "ui": handoff, "tier": "client_mock"})); return 1
+        print(json.dumps({"status": "failed", "stage": "product-ui-handoff", "ui": handoff, "tier": tier})); return 1
+    if args.stage == 'handoff':
+        print(json.dumps({'status':'handoff_only', 'handoff':handoff, 'client_identity':client_identity,
+                          'client':args.client, 'profile':args.profile, 'tier':tier, 'eligible_for_real_e2e':False}))
+        return 0
     first = invoke(args, directory)
     artifact = workspace / "out/report.json"
     valid = artifact.exists() and json.loads(project_bytes(workspace, 'out/report.json')) == expected
@@ -374,7 +387,7 @@ def main():
         extended = capabilities.run(args, directory, first['client_session_sha256'], expected['nonce'], sys.modules[__name__])
     final = final_project_snapshot(workspace, expected, protected, source_before_resume)
     passed = task_passed and resumed is not None and resumed["passed"] and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
-    report = {"tier": "client_mock", "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
+    report = {"tier": tier, "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
               "client_identity": client_identity,
               "client": args.client, "profile": args.profile, "handoff": handoff, "task": first, "resume": resumed,
               "initial_project_test_failed": True, "artifact_verified_before_oracle": valid, **final,

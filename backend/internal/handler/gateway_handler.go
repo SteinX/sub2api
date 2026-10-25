@@ -1185,6 +1185,31 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 	// Get available models from account configurations for the selected group platform.
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, platform)
+	if requested := c.Query("pricing_models"); requested != "" {
+		models := strings.Split(requested, ",")
+		if platform != service.PlatformDevin || apiKey == nil || h.openAIGatewayService == nil || len(models) > 16 || len(requested) > 2048 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_pricing_discovery", "message": "pricing discovery requires a Devin key and at most 16 model UIDs"}})
+			return
+		}
+		visible := availableModels
+		if apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
+			visible = apiKey.Group.ModelAllowlist.FilterForListing(visible)
+		}
+		allowed := make(map[string]bool, len(visible))
+		for _, model := range visible {
+			allowed[model] = true
+		}
+		data := make([]service.DevinPricingAdmission, 0, len(models))
+		for _, model := range models {
+			if !allowed[model] {
+				data = append(data, service.DevinPricingAdmission{Model: model, Source: "not_advertised"})
+				continue
+			}
+			data = append(data, h.openAIGatewayService.InspectDevinPricing(c.Request.Context(), apiKey, model))
+		}
+		c.JSON(http.StatusOK, gin.H{"object": "devin.pricing_admission", "data": data})
+		return
+	}
 	if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
 		source := modelListingSource(platform, availableModels, defaultModelIDsForPlatform(platform))
 		writeAllowlistedModelsList(c, platform, apiKey.Group.ModelAllowlist.FilterForListing(source))

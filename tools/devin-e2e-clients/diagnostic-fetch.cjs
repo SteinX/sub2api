@@ -17,7 +17,7 @@ globalThis.fetch = async function(input, init) {
     throw new Error('journey_fetch_destination_denied')
   }
   try {
-    const response = await original.call(this, input, init)
+    const response = await original.call(this, input, { ...init, redirect: 'error' })
     record.status = response.status
     appendFileSync(process.env.DEVIN_JOURNEY_FETCH_TRACE, JSON.stringify(record) + '\n')
     return response

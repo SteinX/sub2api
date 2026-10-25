@@ -37,6 +37,26 @@ func TestDevinClientUserJourneysMock(t *testing.T) {
 
 func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, admin, key, userPassword string, keyID, accountID int64) {
 	t.Helper()
+	t.Run("public_physical_price_preflight_has_no_inference_or_usage", func(t *testing.T) {
+		fixture.mu.Lock()
+		before := len(fixture.chats)
+		fixture.mu.Unlock()
+		proofs := journeyPricingProof(t, app, key, []string{fixtureModel, fixtureSidekick, "unknown-private-model"})
+		for _, entry := range proofs[:2] {
+			require.Equal(t, true, entry["identified"])
+			require.Equal(t, true, entry["calculable"])
+			require.Equal(t, "group", entry["source"])
+		}
+		require.Equal(t, false, proofs[2]["identified"])
+		require.Equal(t, "not_advertised", proofs[2]["source"])
+		fixture.mu.Lock()
+		require.Equal(t, before, len(fixture.chats))
+		fixture.mu.Unlock()
+		require.Zero(t, agentUsageCount(t, app, keyID))
+		cost, err := (&authorizedJourneyBudget{db: agentDatabase(t, app), keyID: keyID}).cost()
+		require.NoError(t, err)
+		require.Zero(t, cost)
+	})
 	profile := fusion.DefaultProfile("fusion-project-journey", fixtureModel, fixtureSidekick)
 	profile.MaxHandoffs, profile.MaxRequests, profile.MaxTools = 2, 32, 20
 	profile.MaxCostUSD, profile.MaxWallSeconds = 1, 300

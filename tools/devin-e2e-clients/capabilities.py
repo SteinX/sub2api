@@ -162,9 +162,21 @@ class Rpc:
     def take_fetch_observations(self):
         if not self.trace:
             return []
-        records = [json.loads(line) for line in self.h.project_bytes(self.trace.parent, self.trace.name).decode().splitlines()]
+        trace = self.trace
         self.trace = None
-        return records
+        try:
+            records = [json.loads(line) for line in self.h.project_bytes(trace.parent, trace.name).decode().splitlines()]
+            for record in records:
+                if (not isinstance(record, dict) or set(record) - {'destination', 'host', 'path', 'method', 'status', 'transport_error'}
+                        or record.get('destination') not in {'configured_loopback_gateway', 'denied_other_origin'}
+                        or record.get('path') not in {'/v1/chat/completions', '/v1/responses', '/v1/responses/compact', '/v1/models', 'other'}
+                        or record.get('method') not in {'GET', 'POST', 'HEAD', 'OPTIONS'}
+                        or not (record.get('host') in {'127.0.0.1', 'api.openai.com', 'api.anthropic.com', 'server.codeium.com'} or re.fullmatch(r'[a-f0-9]{64}', str(record.get('host'))))):
+                    raise ValueError('invalid_trace')
+            return records
+        except (ValueError, OSError, UnicodeDecodeError):
+            self.trace_error = 'fetch_observation_unavailable_or_invalid'
+            return []
 
 
 def run(args, directory, session_hash, nonce, helpers):
@@ -230,9 +242,15 @@ def run(args, directory, session_hash, nonce, helpers):
             completed = {'local_command_acknowledged': True}
         else:
             raise ValueError('invalid_compact_style')
+        # Local slash commands acknowledge enqueueing, while default compact
+        # RPC waits for completion. Observe that same operation, never resend it.
+        compact_deadline = min(rpc.deadline, time.monotonic() + 90)
+        state = rpc.call('get_state')
+        while state.get('isCompacting') is True and time.monotonic() < compact_deadline:
+            time.sleep(.1)
+            state = rpc.call('get_state')
         entries = rpc.call('get_entries')['entries']
         compact = next((entry for entry in reversed(entries) if entry.get('type') == 'compaction'), {})
-        state = rpc.call('get_state')
         result['compact_checks'] = {'local_acknowledged': completed.get('local_command_acknowledged') is True,
                                     'new_checkpoint': bool(compact.get('id')) and compact.get('id') not in prior_checkpoints,
                                     'summary_present': bool(compact.get('summary')), 'nonce_preserved': nonce in compact.get('summary', ''),
@@ -274,10 +292,16 @@ def run(args, directory, session_hash, nonce, helpers):
             result.update(observed_reads=rpc.reads, context_ready_marker=rpc.final_text.strip() == 'CONTEXT_READY', event_failure=rpc.failed)
             result.update(error_categories=sorted(rpc.error_categories), error_http_status=rpc.error_http_status)
             result['error_vocabulary'] = sorted(rpc.error_vocabulary)
-            fetch_observations.extend(rpc.take_fetch_observations())
-            if fetch_observations:
-                result['fetch_observations'] = fetch_observations
-            result['cleanup_passed'] = rpc.close()
+            try:
+                fetch_observations.extend(rpc.take_fetch_observations())
+                if fetch_observations:
+                    result['fetch_observations'] = fetch_observations
+                if getattr(rpc, 'trace_error', None):
+                    result['diagnostic_error'] = rpc.trace_error
+            except Exception:
+                result['diagnostic_error'] = 'fetch_observation_unavailable_or_invalid'
+            finally:
+                result['cleanup_passed'] = rpc.close()
             if not result['cleanup_passed']:
                 result['status'] = 'failed'
     return result

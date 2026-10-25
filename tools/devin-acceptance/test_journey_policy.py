@@ -3,6 +3,7 @@ import datetime as dt
 from pathlib import Path
 import tempfile
 import unittest
+import unittest.mock
 
 import journey_policy as policy
 
@@ -16,7 +17,7 @@ def proposal():
             'clients': ['opencode', 'omo', 'omp'], 'reference_pricing_sha256': 'c'*64, 'stop_on_failure': True, 'retry_after_uncertain_send': False,
             'limits': {'public_requests': 144, 'output_tokens': 1024, 'wall_seconds': 3600, 'turn_seconds': 300,
                        'internal_calls_per_turn': 64, 'tools_per_turn': 20, 'handoffs_per_turn': 2, 'parallelism': 1, 'local_usd': 3, 'turn_usd': .5}}
-    approval = {'schema_version': 1, 'approved': True, 'mode': 'live', 'plan_sha256': policy.digest(plan), 'expires_at': '2026-10-25T01:00:00Z',
+    approval = {'schema_version': 1, 'approved': True, 'approval_id': 'test-approval-0001', 'mode': 'live', 'plan_sha256': policy.digest(plan), 'expires_at': '2026-10-25T01:00:00Z',
                 'scopes': ['native_auth', 'temporary_credential_storage', 'local_preview_accounts', 'model_generation']}
     return plan, approval, {**source, 'dirty': False}, {'DEVIN_E2E_PAT': 'synthetic-reference'}
 
@@ -78,6 +79,21 @@ class RealJourneyPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             ledger=Path(temporary)/'ledger.json'; policy.claim(ledger,plan,'plan')
             with self.assertRaises(policy.Denied): policy.ledger_action(ledger,'admit')
+
+    def test_deadline_or_changed_group_price_input_cannot_extend_a_batch(self):
+        plan,approval,source,env=proposal()
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger=Path(temporary)/'ledger.json'; policy.claim(ledger,plan,'live')
+            with unittest.mock.patch('journey_policy.time.time',return_value=10**20):
+                with self.assertRaisesRegex(policy.Denied,'wall_time_exhausted'): policy.ledger_action(ledger,'admit')
+            snapshot=Path(temporary)/'group.json'; snapshot.write_text('[]')
+            env['DEVIN_JOURNEY_GROUP_PRICING_FILE']=str(snapshot)
+            with self.assertRaisesRegex(policy.Denied,'unapproved_group_price'): policy.validate(plan,approval,'live',source,env,NOW)
+            import hashlib
+            plan['group_pricing_sha256']=hashlib.sha256(snapshot.read_bytes()).hexdigest(); approval['plan_sha256']=policy.digest(plan)
+            policy.validate(plan,approval,'live',source,env,NOW)
+            snapshot.write_text('[{"changed":true}]')
+            with self.assertRaisesRegex(policy.Denied,'price_snapshot'): policy.validate(plan,approval,'live',source,env,NOW)
 
 
 if __name__ == '__main__':
