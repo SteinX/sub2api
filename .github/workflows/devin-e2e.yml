@@ -1,4 +1,4 @@
-name: Devin E2E
+name: Devin contracts and client regressions
 
 on:
   pull_request:
@@ -10,6 +10,12 @@ on:
       - 'deploy/devin-agent-e2e.sh'
       - 'deploy/devin-long-e2e.sh'
       - 'tools/devin-e2e-clients/**'
+      - 'tools/devin-acceptance/**'
+      - 'deploy/devin-user-journeys.sh'
+      - 'frontend/src/components/keys/**'
+      - 'frontend/src/utils/devinClientConfig.ts'
+      - 'frontend/src/i18n/**'
+      - 'frontend/test-support/**'
       - '.github/workflows/devin-e2e.yml'
   push:
     branches: [main]
@@ -21,6 +27,12 @@ on:
       - 'deploy/devin-agent-e2e.sh'
       - 'deploy/devin-long-e2e.sh'
       - 'tools/devin-e2e-clients/**'
+      - 'tools/devin-acceptance/**'
+      - 'deploy/devin-user-journeys.sh'
+      - 'frontend/src/components/keys/**'
+      - 'frontend/src/utils/devinClientConfig.ts'
+      - 'frontend/src/i18n/**'
+      - 'frontend/test-support/**'
       - '.github/workflows/devin-e2e.yml'
   workflow_dispatch:
     inputs:
@@ -34,7 +46,7 @@ on:
         type: boolean
         default: false
       suite:
-        description: 'Protocol probes or pinned real client processes'
+        description: 'Protocol/client contracts only; neither suite certifies product user E2E'
         type: choice
         options: [protocol, agents]
         default: protocol
@@ -63,11 +75,11 @@ jobs:
       - name: Exercise the production gateway with synthetic Devin RPCs
         env:
           DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-e2e
-        run: make test-devin-e2e
+        run: make test-devin-contracts-mock
       - name: Exercise long Fusion tools, compaction and restart with synthetic RPCs
         env:
           DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-long
-        run: make test-devin-long-e2e
+        run: make test-devin-fusion-contracts-mock
       - name: Save test results (exclude private backend log and binary)
         if: always()
         uses: actions/upload-artifact@v4
@@ -108,7 +120,7 @@ jobs:
       - name: Real clients through current gateway and synthetic Devin
         env:
           DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-agents
-        run: make test-devin-agent-e2e
+        run: make test-devin-client-contracts-mock
       - name: Save structural client and role evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -120,6 +132,51 @@ jobs:
             ${{ runner.temp }}/devin-agents/agent-*.json
             ${{ runner.temp }}/devin-agents/fusion-*.json
           if-no-files-found: ignore
+          retention-days: 7
+
+  user-journeys-mock:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'mock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install pinned clients and production UI dependencies
+        run: |
+          npm ci --prefix tools/devin-e2e-clients --ignore-scripts --omit=optional --no-audit --no-fund
+          pnpm --dir frontend install --frozen-lockfile
+      - name: Validate acceptance negative cases and runner boundaries
+        run: |
+          make test-devin-acceptance
+          python3 -m unittest discover -s tools/devin-e2e-clients -p 'test_*.py'
+      - name: Product copy buttons to actual CLI project journeys with synthetic models
+        env:
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-user-journeys
+        run: make test-devin-user-journeys-mock
+      - name: Validate source-bound mock evidence (never release-eligible)
+        env:
+          REPORT: ${{ runner.temp }}/devin-user-journeys/client-journeys.json
+        run: python3 tools/devin-acceptance/acceptance.py verify --mode client_mock --report "$REPORT" --commit "$(git rev-parse HEAD)" --tree "$(git rev-parse HEAD^{tree})"
+      - name: Save only structural synthetic journey evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-user-journeys-synthetic-upstream
+          path: |
+            ${{ runner.temp }}/devin-user-journeys/client-journeys.json
+            ${{ runner.temp }}/devin-user-journeys/journey-*.json
+          if-no-files-found: error
           retention-days: 7
 
   live:

@@ -70,8 +70,9 @@ timeout --kill-after=10s 5m go build -mod=readonly -o "$DEVIN_E2E_BINARY" ./cmd/
   printf 'test_run=%s\n' "${DEVIN_E2E_RUN:-.}"
   printf 'test_skip=%s\n' "${DEVIN_E2E_SKIP:-^$}"
   printf 'reference_pricing_sha256=%s\n' "${DEVIN_E2E_PRICING_SHA256:-synthetic-group-prices}"
+  printf 'acceptance_tier=protocol_or_client_contract\nreal_user_e2e=false\n'
   go version
   sha256sum "$DEVIN_E2E_BINARY"
 } > "$DEVIN_E2E_ARTIFACTS/provenance.txt"
-echo "Running Devin $mode E2E; private artifacts: $DEVIN_E2E_ARTIFACTS"
+echo "Running Devin $mode contracts (not product user E2E); private artifacts: $DEVIN_E2E_ARTIFACTS"
 timeout --kill-after=15s 15m go test -mod=readonly -count=1 -tags=devine2e -run "${DEVIN_E2E_RUN:-.}" -skip "${DEVIN_E2E_SKIP:-^$}" -json -timeout=10m ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"

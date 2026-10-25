@@ -178,6 +178,7 @@ export default {
         ompProfile: 'OMP 配置模式',
         ompCompatibility: '文档中的 Devin 兼容配置',
         ompDefault: '诊断：保留客户端默认行为',
+        ompDefaultBlocked: 'OMP 默认历史裁剪会破坏 Fusion 会话续接，此组合已停止生成配置。请选择显式兼容模式；该模式关闭裁剪、保留更多历史，长会话仍需单独验证。',
         ompDefaultInstructions: '此模式仅配置 provider 和模型角色，历史裁剪与压缩使用客户端默认值，可能与 Fusion 冲突。这是诊断对照，不代表兼容模式已经通过验证。',
         credentials: '客户端填写本站 API Key 和本站地址；原生 Devin PAT 由管理员添加账号时配置，不填写到客户端。先从上方目录选择模型，目录为空时请检查密钥分组和账号授权。',
         protocols: '接口支持 Responses、Chat Completions 和 Messages。工具、图像和上下文能力取决于具体模型；以下 OMP 模板只配置文本及短流程的输出上限。',

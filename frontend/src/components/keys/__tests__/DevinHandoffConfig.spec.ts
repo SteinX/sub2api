@@ -9,7 +9,7 @@ vi.mock('file-saver', () => ({ saveAs: vi.fn() }))
 afterEach(() => vi.unstubAllGlobals())
 
 function modal() {
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'granted-uid' }] }) }))
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'granted-uid' }, { slug: 'fusion-granted-pair' }] }) }))
   return mount(UseKeyModal, {
     props: { show: true, apiKey: 'synthetic-key-must-not-enter-files', baseUrl: 'https://example.invalid', platform: 'devin' },
     global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
@@ -61,5 +61,20 @@ describe('Devin user configuration handoff', () => {
       expect(normalizeDevinTestCommand(raw)).toBeNull()
     }
     expect(normalizeDevinTestCommand('python3 -m unittest -v')).toBe('python3 -m unittest -v')
+  })
+
+  it('refuses the known incompatible OMP default Fusion configuration without silently switching profiles', async () => {
+    const wrapper = modal()
+    await flushPromises()
+    await wrapper.get('button[data-client="omp"]').trigger('click')
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('fusion-granted-pair')
+    expect(wrapper.findAll('[data-testid="client-config-file"]')).toHaveLength(2)
+    await wrapper.get('[data-testid="devin-omp-profile"]').setValue('default')
+    expect(wrapper.get('[data-testid="devin-omp-incompatible"]').text()).toContain('ompDefaultBlocked')
+    expect(wrapper.findAll('[data-testid="client-config-file"]')).toHaveLength(0)
+    expect(wrapper.get<HTMLSelectElement>('[data-testid="devin-omp-profile"]').element.value).toBe('default')
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('granted-uid')
+    expect(wrapper.findAll('[data-testid="client-config-file"]')).toHaveLength(2)
+    wrapper.unmount()
   })
 })

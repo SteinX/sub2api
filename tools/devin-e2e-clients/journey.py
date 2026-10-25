@@ -345,6 +345,10 @@ def main():
     finally:
         ACTIVE.discard(ui)
     handoff = json.loads(stdout)
+    if ui.returncode == 0 and handoff.get('blocked') is True:
+        print(json.dumps({'status': 'unsupported_by_product', 'handoff': handoff, 'client_identity': client_identity,
+                          'client': args.client, 'profile': args.profile, 'tier': 'client_mock', 'eligible_for_real_e2e': False}))
+        return 0
     if ui.returncode or not handoff.get("passed"):
         print(json.dumps({"status": "failed", "stage": "product-ui-handoff", "ui": handoff, "tier": "client_mock"})); return 1
     first = invoke(args, directory)

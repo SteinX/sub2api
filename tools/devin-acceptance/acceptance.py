@@ -9,7 +9,6 @@ import base64
 import json
 from pathlib import Path
 import re
-import subprocess
 import sys
 
 HEX40 = re.compile(r'^[a-f0-9]{40}$')
@@ -18,6 +17,13 @@ PREFIX = 'Sub2API-Devin-Acceptance-v1: '
 CASE_IDS = {f'{client}/{kind}/{profile}' for client in ['opencode', 'omo', 'omp'] for kind in ['direct', 'fusion']
             for profile in (['default', 'compatibility'] if client == 'omp' else ['project'])}
 CONDITIONAL_CHECKS = {'cla-check', 'cla-lock', 'live', 'sync'}
+REQUIRED_CHECKS = {
+    ('backend-ci.yml', name) for name in ['shell', 'test', 'frontend', 'golangci-lint', 'release-helpers']
+} | {('security-scan.yml', name) for name in ['backend-security', 'frontend-security']} | {
+    ('devin-e2e.yml', name) for name in ['mock', 'clients-mock', 'user-journeys-mock']
+}
+CLIENT_PINS = {'opencode': ('opencode-ai', '1.19.4'), 'omo': ('oh-my-opencode', '5.1.44'),
+               'omp': ('@oh-my-pi/pi-coding-agent', '18.12.6')}
 SECRET_KEYS = {'api_key', 'apikey', 'authorization', 'access_token', 'refresh_token', 'pat', 'cookie', 'raw_log', 'prompt', 'content'}
 
 
@@ -60,15 +66,20 @@ def validate(report, mode, commit, tree, state=None):
         errors.append('incomplete_case_matrix')
     for case in cases:
         ident = str(case.get('id'))
-        known_failure = (mode == 'client_mock' and ident == 'omp/fusion/default'
-                         and case.get('status') == 'failed'
-                         and case.get('error_codes', {}).get('devin_fusion_history_conflict', 0) > 0)
-        if known_failure:
-            continue  # retained FAILED observation, never a passing E2E case
+        parts = ident.split('/')
+        if len(parts) != 3 or case.get('model_kind') != parts[1]:
+            errors.append(ident + ':model_kind_mismatch')
+        refusal = case.get('handoff', {})
+        if (mode == 'client_mock' and ident == 'omp/fusion/default' and case.get('status') == 'unsupported_by_product'
+                and refusal.get('blocked') is True and refusal.get('source') == 'UseKeyModal browser refusal'
+                and refusal.get('reason') == 'omp_default_fusion_history_pruning' and refusal.get('files') == []
+                and case.get('public_requests') == 0 and not case.get('observed_physical_models')):
+            continue  # A successful product refusal is not a completed client task.
         if case.get('status') != 'passed':
             errors.append(ident + ':task_not_passed')
             continue
-        for key in ['initial_project_test_failed', 'protected_project_files_intact', 'artifact_verified_before_oracle', 'independent_project_test_passed', 'same_client_session']:
+        for key in ['initial_project_test_failed', 'protected_project_files_intact', 'artifact_verified_before_oracle', 'artifact_verified_after_resume',
+                    'source_unchanged_after_resume', 'independent_project_test_passed', 'same_client_session']:
             if case.get(key) is not True:
                 errors.append(ident + ':' + key)
         if not HEX64.fullmatch(str(case.get('artifact_sha256', ''))):
@@ -79,14 +90,38 @@ def validate(report, mode, commit, tree, state=None):
         for file in handoff.get('files', []):
             if not HEX64.fullmatch(str(file.get('sha256', ''))):
                 errors.append(ident + ':config_not_fingerprinted')
-        if not handoff.get('files') or handoff.get('selected_model') is None:
+        if not handoff.get('files') or not case.get('public_model_uid') or handoff.get('selected_model') != case.get('public_model_uid'):
             errors.append(ident + ':configuration_missing')
+        client = ident.split('/')[0]
+        identity = case.get('client_identity', {})
+        if ((identity.get('package'), identity.get('version')) != CLIENT_PINS.get(client)
+                or not HEX64.fullmatch(str(identity.get('executable_sha256', ''))) or not identity.get('engine_version')):
+            errors.append(ident + ':client_identity_unverified')
+        lead, sidekick = case.get('physical_lead_uid'), case.get('physical_sidekick_uid')
+        physical = case.get('observed_physical_models', {})
+        if not lead or physical.get(lead, 0) < 1 or case.get('public_requests', 0) < 1:
+            errors.append(ident + ':physical_calls_unverified')
+        if case.get('model_kind') == 'direct' and sidekick:
+            errors.append(ident + ':unexpected_sidekick')
+        if case.get('model_kind') == 'fusion':
+            contexts = case.get('native_context_hashes', {})
+            lead_contexts, sidekick_contexts = set(contexts.get('lead', {})), set(contexts.get('sidekick', {}))
+            if (not sidekick or physical.get(sidekick, 0) < 1 or not lead_contexts or not sidekick_contexts
+                    or lead_contexts & sidekick_contexts):
+                errors.append(ident + ':fusion_roles_unverified')
         for phase in ['task', 'resume']:
             result = case.get(phase) or {}
-            if result.get('exit_code') != 0 or result.get('normal_stop') is not True or result.get('event_error') or result.get('timed_out') or result.get('final_text_matches') is not True:
+            if (result.get('exit_code') != 0 or result.get('normal_stop') is not True or result.get('event_error') is not False
+                    or result.get('timed_out') is not False or result.get('final_text_matches') is not True
+                    or result.get('parse_errors') != 0 or result.get('session_changed') is not False
+                    or result.get('session_seen') is not True or not HEX64.fullmatch(str(result.get('client_session_sha256', '')))):
                 errors.append(ident + ':' + phase + '_terminal_failure')
+        if case.get('task', {}).get('client_session_sha256') != (case.get('resume') or {}).get('client_session_sha256'):
+            errors.append(ident + ':session_identity_mismatch')
         tools = case.get('task', {}).get('tools', {})
-        if tools.get('read', 0) < 3 or tools.get('write', 0) < 1 or tools.get('bash', 0) < 1 or case.get('task', {}).get('client_tests_succeeded') is not True:
+        if (tools.get('read', 0) < 3 or tools.get('write', 0) < 1 or tools.get('bash', 0) < 1
+                or case.get('task', {}).get('client_tests_succeeded') is not True or case.get('task', {}).get('test_command_verified') is not True
+                or case.get('task', {}).get('bash_exit_code') != 0 or case.get('resume', {}).get('tools', {}).get('read', 0) < 1):
             errors.append(ident + ':actual_client_tools_missing')
     if mode == 'client_mock':
         if report.get('tier') != 'client_mock' or report.get('real_upstream') is not False or report.get('eligible_for_real_e2e') is not False:
@@ -102,15 +137,22 @@ def validate(report, mode, commit, tree, state=None):
         for capability in ['context_pressure', 'compact', 'fork', 'worker', 'disconnect_recovery']:
             if case.get(capability) != 'passed':
                 errors.append(str(case.get('id')) + ':' + capability + '_not_verified')
-        if not case.get('client_identity') or not case.get('pricing_contract') or not case.get('physical_lead_uid') or not case.get('physical_sidekick_uid'):
+        if (not case.get('client_identity') or not case.get('pricing_contract') or not case.get('physical_lead_uid')
+                or (case.get('model_kind') == 'fusion' and not case.get('physical_sidekick_uid'))):
             errors.append(str(case.get('id')) + ':identity_or_pricing_missing')
     if report.get('unverified'):
         errors.append('unverified_required_scope')
-    if state is None or state.get('commit') != commit:
+    if (state is None or state.get('commit') != commit or state.get('snapshot_complete') is not True
+            or not isinstance(state.get('pr'), int) or state['pr'] <= 0):
         return errors + ['review_security_state_unavailable']
     checks = state.get('checks', [])
     if not checks:
         errors.append('required_checks_missing')
+    observed = {(check.get('workflow'), check.get('name')) for check in checks}
+    for workflow, name in REQUIRED_CHECKS - observed:
+        errors.append('required_check_missing:' + workflow + '/' + name)
+    if state.get('outstanding_checks'):
+        errors.append('started_check_pending')
     for check in checks:
         if check.get('head_sha') != commit:
             errors.append('check_source_mismatch')
@@ -119,7 +161,8 @@ def validate(report, mode, commit, tree, state=None):
         elif check.get('conclusion') != 'success' and not (check.get('conclusion') == 'skipped' and check.get('name') in CONDITIONAL_CHECKS):
             errors.append('check_not_successful:' + str(check.get('name')))
     independent = state.get('independent_review', {})
-    if independent.get('head') != commit or independent.get('status') != 'cleared' or not HEX64.fullmatch(str(independent.get('patch_sha256', ''))):
+    if (independent.get('head') != commit or independent.get('status') != 'cleared'
+            or not HEX40.fullmatch(str(independent.get('base', ''))) or not HEX64.fullmatch(str(independent.get('patch_sha256', '')))):
         errors.append('independent_review_not_cleared')
     latest_reviews = {}
     for review in state.get('reviews', []):

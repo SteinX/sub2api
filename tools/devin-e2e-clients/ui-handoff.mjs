@@ -60,6 +60,13 @@ async function main() {
     stage = 'config-generation'
     const instructions = await page.getByTestId('devin-instructions').innerText()
     const nodes = page.getByTestId('client-config-file')
+    if (await page.getByTestId('devin-omp-incompatible').count()) {
+      if (input.client !== 'omp' || input.profile !== 'default' || !input.model.startsWith('fusion-') || await nodes.count() !== 0) throw new Error('Invalid product refusal')
+      process.stdout.write(JSON.stringify({ passed: false, blocked: true, reason: 'omp_default_fusion_history_pruning',
+        source: 'UseKeyModal browser refusal', client: input.client, profile: input.profile, selected_model: input.model,
+        files: [], browser: browser.version(), ui_scope: 'isolated product modal; signup/login not covered' }) + '\n')
+      return
+    }
     await nodes.first().waitFor()
     const files = []
     for (let index = 0; index < await nodes.count(); index++) {

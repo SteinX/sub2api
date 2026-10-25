@@ -168,7 +168,7 @@
             <input v-model="devinProjectMode" type="checkbox" data-testid="devin-project-mode" />
             {{ t('keys.useKeyModal.devin.projectMode') }}
           </label>
-          <template v-if="activeClientTab === 'omo' || devinProjectMode">
+          <template v-if="activeClientTab === 'omo' || (activeClientTab === 'opencode' && devinProjectMode)">
             <label class="input-label" for="devin-workspace-path">{{ t('keys.useKeyModal.devin.workspace') }}</label>
             <input
               id="devin-workspace-path"
@@ -194,6 +194,9 @@
               <option value="default">{{ t('keys.useKeyModal.devin.ompDefault') }}</option>
             </select>
           </label>
+          <p v-if="devinOmpDefaultBlocked" role="alert" data-testid="devin-omp-incompatible" class="text-sm text-amber-700 dark:text-amber-300">
+            {{ t('keys.useKeyModal.devin.ompDefaultBlocked') }}
+          </p>
           <button
             v-if="devinSelectedModel && (activeClientTab === 'codex' || activeClientTab === 'claude')"
             type="button"
@@ -415,6 +418,8 @@ const devinProjectMode = ref(false)
 const devinTestCommandInput = ref('')
 const devinTestCommand = computed(() => normalizeDevinTestCommand(devinTestCommandInput.value))
 const devinOmpProfile = ref<'compatibility' | 'default'>('compatibility')
+const devinOmpDefaultBlocked = computed(() => props.platform === 'devin' && activeClientTab.value === 'omp'
+  && devinOmpProfile.value === 'default' && devinSelectedModel.value.toLowerCase().startsWith('fusion-'))
 const devinKeyFromEnv = ref(false)
 const codexModelManifestContent = ref('')
 const codexModelManifestModelCount = ref(0)
@@ -873,6 +878,7 @@ const currentFiles = computed((): FileConfig[] => {
   }
   const apiBase = ensureV1(baseRoot)
   if (props.platform === 'devin' && (!devinSelectedModel.value || codexModelManifestState.value !== 'ready')) return []
+  if (devinOmpDefaultBlocked.value) return []
   if (props.platform === 'devin' && activeClientTab.value === 'omo' && !devinWorkspacePath.value) return []
   if (props.platform === 'devin' && ['opencode', 'omo'].includes(activeClientTab.value) && devinProjectMode.value && (!devinWorkspacePath.value || !devinTestCommand.value)) return []
   const antigravityBase = ensureV1(`${baseRoot}/antigravity`)

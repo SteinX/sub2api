@@ -51,7 +51,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - name: Preserve tooling for releases of older tags
-        run: cp -R .github/release-tools "$RUNNER_TEMP/release-tools"
+        run: |
+          cp -R .github/release-tools "$RUNNER_TEMP/release-tools"
+          cp -R tools/devin-acceptance "$RUNNER_TEMP/devin-acceptance"
       - name: Checkout selected application source
         uses: actions/checkout@v6
         with:
@@ -70,6 +72,15 @@ jobs:
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" plan "${args[@]}"
+      - name: Require actual user journey acceptance and current review/security state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_REF: ${{ inputs.tag || github.ref_name }}
+          ACCEPTANCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          args=(--ref "$ACCEPTANCE_REF" --repository "$ACCEPTANCE_REPOSITORY")
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          python "$RUNNER_TEMP/devin-acceptance/release_guard.py" "${args[@]}"
       - uses: actions/upload-artifact@v7
         with:
           name: release-tooling

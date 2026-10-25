@@ -105,6 +105,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 						}
 					}
 					report["id"], report["model_kind"], report["physical_lead_uid"] = id, kind, fixtureModel
+					report["public_model_uid"] = model
 					report["physical_sidekick_uid"] = ""
 					if kind == "fusion" {
 						report["physical_sidekick_uid"] = fixtureSidekick
@@ -127,9 +128,18 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					report["native_context_hashes"] = contexts
 					report["reasoning_scope"] = map[string]string{"model_uid_effort": "fixture UID swe-2-max", "client_thinking": map[bool]string{true: "off", false: "client default"}[client == "omp"]}
 					report["public_requests"], report["http_attempts"], report["error_codes"] = forwarded, len(requests), errors
+					if report["status"] == "unsupported_by_product" {
+						report["expectation"] = "product refuses known incompatible configuration; task not run"
+					}
 					reports = append(reports, report)
 					writeAgentArtifact(t, "journey-"+strings.ReplaceAll(id, "/", "-")+".json", report)
 					t.Logf("journey=%s status=%v forwarded=%d errors=%v", id, report["status"], forwarded, errors)
+					if client == "omp" && kind == "fusion" && configProfile == "default" && report["status"] == "unsupported_by_product" {
+						require.NoError(t, runErr)
+						require.Zero(t, forwarded)
+						require.Zero(t, nativeCount)
+						return
+					}
 					if client == "omp" && kind == "fusion" && configProfile == "default" && errors["devin_fusion_history_conflict"] > 0 {
 						report["expectation"] = "known default-profile failure observed; not a pass"
 						return

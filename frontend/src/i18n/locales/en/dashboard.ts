@@ -178,6 +178,7 @@ export default {
         ompProfile: 'OMP configuration profile',
         ompCompatibility: 'Documented Devin compatibility profile',
         ompDefault: 'Diagnostic: retain client defaults',
+        ompDefaultBlocked: 'OMP default history pruning breaks Fusion session continuation. Configuration generation is blocked for this combination. Select the explicit compatibility profile, which disables pruning and retains more history; long sessions require separate validation.',
         ompDefaultInstructions: 'This profile configures only the provider and model roles. Client history pruning and compaction retain their defaults and may conflict with Fusion. It is a diagnostic comparison, not a verified compatibility profile.',
         credentials: 'Use this site’s API key and base URL in your client. Administrators configure the native Devin PAT when adding accounts; do not put that PAT in the client. Select a discovered model above; an empty catalog requires checking the key’s group and account grants.',
         protocols: 'Responses, Chat Completions and Messages are supported. Tool, image and context capabilities depend on the concrete model. The OMP template configures text and bounded short-session output.',

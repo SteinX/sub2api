@@ -1,4 +1,7 @@
-# Devin 长任务 E2E
+# Devin Fusion 长任务合同测试
+
+本套件使用内部工具执行器，不是 OpenCode/OMO/OMP 长任务 E2E。 分层定义、用户旅程与发布门槛见 [Devin 验收流程](DEVIN_ACCEPTANCE.md)。
+
 
 ## 用例与验证边界
 

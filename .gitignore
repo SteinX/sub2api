@@ -150,6 +150,7 @@ docs/*
 !docs/DEVIN_E2E.md
 !docs/DEVIN_AGENT_E2E.md
 !docs/DEVIN_LONG_E2E.md
+!docs/DEVIN_ACCEPTANCE.md
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/codex-credits.md
 !docs/devin-usage.md
