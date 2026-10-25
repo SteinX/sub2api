@@ -70,7 +70,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		}
 		require.NoError(t, json.Unmarshal(quote, &quoted))
 		require.Len(t, quoted.Data, 1)
-		require.InDelta(t, 32768*(.000001+.000001+.0000001)+1024*.000002, quoted.Data[0].Cost, 1e-12)
+		require.GreaterOrEqual(t, quoted.Data[0].Cost, 32768*(.000001+.000001+.0000001)+1024*.000002, "a cache TTL upper bound may be larger but must never underquote the explicit flat card")
 		request(t, app, "GET", "/v1/models?pricing_models="+url.QueryEscape(fixtureModel)+"&context_tokens=0&output_tokens=1024", key, nil, 400)
 		fixture.mu.Lock()
 		require.Equal(t, before, len(fixture.chats))

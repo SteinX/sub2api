@@ -4,12 +4,48 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import signal
 from unittest.mock import patch
 
 import process_cleanup
 
 
 class ProcessIdentityTests(unittest.TestCase):
+    def test_exited_group_leader_cannot_hide_a_surviving_tool(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            registry=Path(temporary)/'registry'; registry.touch(mode=0o600)
+            registry.write_text(json.dumps({'pid':12345,'start_ticks':100})+'\n')
+            # TERM removes the leader, but its already observed tool survives.
+            with patch.object(process_cleanup,'start_ticks',return_value=100), patch.object(process_cleanup,'group_members',side_effect=[{12345:100,12346:101},{12346:101},{},{}]), patch.object(process_cleanup.os,'killpg') as kill, patch.object(process_cleanup.time,'monotonic',side_effect=[0,3,4]):
+                self.assertTrue(process_cleanup.cleanup(registry))
+            self.assertEqual([signal.SIGTERM,signal.SIGKILL],[call.args[1] for call in kill.call_args_list])
+            with patch.object(process_cleanup,'start_ticks',return_value=100), patch.object(process_cleanup,'group_members',side_effect=[{12345:100},{12346:101}]), patch.object(process_cleanup.os,'killpg') as kill, patch.object(process_cleanup.time,'monotonic',side_effect=[0,3]):
+                self.assertFalse(process_cleanup.cleanup(registry))
+            self.assertEqual([signal.SIGTERM],[call.args[1] for call in kill.call_args_list])
+
+    def test_group_cleanup_kills_a_tool_that_ignores_term_after_its_leader_exits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            registry=Path(temporary)/'registry'; registry.touch(mode=0o600)
+            script='''import os,signal,time
+if os.fork()==0:
+ signal.signal(signal.SIGTERM,signal.SIG_IGN)
+ print('ready',flush=True)
+ time.sleep(30)
+else:
+ time.sleep(30)
+'''
+            proc=subprocess.Popen(['python3','-c',script],start_new_session=True,stdout=subprocess.PIPE)
+            try:
+                self.assertEqual(b'ready\n',proc.stdout.readline())
+                with patch.dict(os.environ,{'DEVIN_JOURNEY_PROCESS_REGISTRY':str(registry)}): process_cleanup.register(proc)
+                self.assertTrue(process_cleanup.cleanup(registry))
+                proc.wait(timeout=3)
+                self.assertEqual({},process_cleanup.group_members(proc.pid))
+            finally:
+                try: os.killpg(proc.pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+                proc.wait(timeout=3); proc.stdout.close()
+
     def test_tracked_session_is_reaped_and_reused_identity_is_never_signaled(self):
         for mismatch in [False,True]:
             with tempfile.TemporaryDirectory() as temporary:

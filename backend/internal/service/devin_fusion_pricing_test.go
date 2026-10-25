@@ -44,6 +44,46 @@ func TestDevinFusionIdentifiedClaude55FallbackTiers(t *testing.T) {
 	}
 }
 
+func TestDevinContextQuoteRejectsNonMonotonicPriceIntervals(t *testing.T) {
+	const model = "e2e-tiered-price"
+	for _, mode := range []BillingMode{BillingModePerRequest, BillingModeToken} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := &config.Config{RunMode: config.RunModeSimple}
+			cfg.Default.RateMultiplier = 1
+			billing := NewBillingService(cfg, nil)
+			maxShort := 1000
+			card := ChannelModelPricing{Platform: PlatformDevin, Models: []string{model}, BillingMode: mode, InputPrice: testPtrFloat64(.001), OutputPrice: testPtrFloat64(.001), PerRequestPrice: testPtrFloat64(.5), Intervals: []PricingInterval{
+				{MinTokens: 0, MaxTokens: &maxShort, PerRequestPrice: testPtrFloat64(.5), InputPrice: testPtrFloat64(.001)},
+				{MinTokens: 1001, PerRequestPrice: testPtrFloat64(.01), InputPrice: testPtrFloat64(.000000001)},
+			}}
+			group := &Group{ID: 1, Platform: PlatformDevin, RateMultiplier: 1, LongContextPricingEnabled: true}
+			channel := &ChannelService{}
+			if mode == BillingModePerRequest {
+				group.ModelPricing = []ChannelModelPricing{card}
+			} else {
+				channel.cache.Store(populateChannelCache([]Channel{{ID: 7, Status: StatusActive, GroupIDs: []int64{group.ID}, ModelPricing: []ChannelModelPricing{card}}}, map[int64]string{group.ID: PlatformDevin}))
+			}
+			bills := &fusionBillingRepo{}
+			svc := &OpenAIGatewayService{cfg: cfg, billingService: billing, resolver: NewModelPricingResolver(channel, billing), usageBillingRepo: bills}
+			key := &APIKey{ID: 2, GroupID: &group.ID, Group: group, User: &User{ID: 3, Balance: 10}}
+			price := svc.InspectDevinContextPrice(context.Background(), key, model, 32768, 1024)
+			require.True(t, price.Identified)
+			require.True(t, price.Calculable)
+			require.Nil(t, price.ContextCostUpperUSD, "a low long-context tier must not authorize a more expensive short request")
+			require.Equal(t, "non_flat_token_pricing", price.CostBoundUnavailable)
+			if mode == BillingModePerRequest {
+				x := &devinFusionExecutor{service: svc, key: key}
+				short, err := x.cost(context.Background(), model, UsageTokens{InputTokens: 1, OutputTokens: 1}, time.Now())
+				require.NoError(t, err)
+				long, err := x.cost(context.Background(), model, UsageTokens{InputTokens: 32768, OutputTokens: 1024}, time.Now())
+				require.NoError(t, err)
+				require.Greater(t, short.TotalCost, long.TotalCost, "prove the non-monotonic configuration is actually active before testing its refusal")
+			}
+			require.Empty(t, bills.commands)
+		})
+	}
+}
+
 func TestDevinFusionMemberPricingUsesPhysicalUIDAndGroupScope(t *testing.T) {
 	const lead = "claude-opus-5-5-medium"
 	const sidekick = "swe-2-high"

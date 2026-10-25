@@ -72,3 +72,5 @@ Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以
 新版支持使用同一 Devin 公共 Key 调用 `GET /v1/models?pricing_models=<Lead UID>,<Sidekick UID>`，分别查看当前授权目录中物理模型的 `identified`、`calculable` 和价格来源。该只读检查沿用 Fusion 的有效分组／渠道和明确价格判定，不生成模型回答、不预留或扣费，也不返回费率、账号或分组标识。`not_advertised` 表示该 UID 不在此 Key 当前可见目录中；`unidentified` 仍应停止在推理前。零有效价格只有在明确规则已识别且可计算时才有意义，不能用它推断供应商免费。
 
 同时传入正数 `context_tokens` 和 `output_tokens` 可获得保守的 `context_cost_upper_usd`：全部上下文分别计入输入和两类缓存，加上最大输出，使用当前 Key 的有效价格。它只用于本地准入，可能高于实际请求费用，不是供应商账单或扣费硬上限。
+
+该估价当前仅支持可证明上界的平坦 token 费率。按次收费、上下文阶梯、分时费率或无法验证的区间价会返回 `cost_bound_unavailable`，不会把最长窗口所在区间的低价当作短请求的上界；此时真实 runner 停在推理前。

@@ -12,6 +12,18 @@ def start_ticks(pid):
     return int(Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[19])
 
 
+def group_members(pgid):
+    members={}
+    for path in Path('/proc').iterdir():
+        if not path.name.isdigit(): continue
+        try:
+            values=(path/'stat').read_text().rsplit(')',1)[1].split()
+            if int(values[2])==pgid and values[0]!='Z': members[int(path.name)]=int(values[19])
+        except FileNotFoundError:
+            continue
+    return members
+
+
 def register(proc):
     path=os.environ.get('DEVIN_JOURNEY_PROCESS_REGISTRY')
     if not path:
@@ -47,24 +59,29 @@ def cleanup(path):
                 if start_ticks(pid)!=row['start_ticks']:
                     # Never signal a reused PID.
                     verified=False; continue
+                original_members=group_members(pid)
                 os.killpg(pid,signal.SIGTERM)
             except ProcessLookupError:
                 continue
             except FileNotFoundError:
-                try: os.killpg(pid,0)
-                except ProcessLookupError: continue
-                verified=False; continue  # an orphaned group cannot be identified safely
+                if group_members(pid): verified=False
+                continue  # no identity anchor remains; never signal a reused group
             deadline=time.monotonic()+2
             while time.monotonic()<deadline:
-                try:
-                    if start_ticks(pid)!=row['start_ticks']: break
-                    status=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[0]
-                    if status=='Z': break
-                except FileNotFoundError: break
+                if not group_members(pid): break
                 time.sleep(.02)
-            try:
-                if start_ticks(pid)==row['start_ticks']: os.killpg(pid,signal.SIGKILL)
-            except (ProcessLookupError,FileNotFoundError): pass
+            remaining=group_members(pid)
+            if not remaining: continue
+            # A still-live member with the same PID/start identity anchors the
+            # original PGID even after its leader exits. Without an anchor,
+            # refuse to claim cleanup or signal a possibly reused group.
+            if not any(original_members.get(member)==ticks for member,ticks in remaining.items()):
+                verified=False; continue
+            try: os.killpg(pid,signal.SIGKILL)
+            except ProcessLookupError: continue
+            deadline=time.monotonic()+2
+            while group_members(pid) and time.monotonic()<deadline: time.sleep(.02)
+            if group_members(pid): verified=False
         return verified
     except (ValueError,OSError,KeyError,TypeError):
         return False
