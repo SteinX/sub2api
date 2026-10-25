@@ -43,6 +43,12 @@ func TestDevinLongToolWorkflow(t *testing.T) {
 		fixture = newNativeFixture(t)
 		fixture.agentMode.Store(true)
 		fixture.longWorkflow = &longNativeWorkflow{}
+		fault := os.Getenv("DEVIN_E2E_LONG_MOCK_FAILURE")
+		require.Contains(t, []string{"", "sidekick_incomplete_tool"}, fault)
+		fixture.longWorkflow.failSidekick = fault != ""
+	}
+	if mode != "mock" {
+		require.Empty(t, os.Getenv("DEVIN_E2E_LONG_MOCK_FAILURE"), "synthetic faults cannot be selected for real accounts")
 	}
 	if mode == "live" {
 		require.Equal(t, "true", os.Getenv("DEVIN_E2E_LONG_ALLOW_PAID"), "approve the long-task plan separately from the short client matrix")
@@ -61,7 +67,25 @@ func longTurnBudget(raw string) (float64, error) {
 	return value, nil
 }
 
+func longPublicRequestLimit(raw string) (int, error) {
+	if raw == "" {
+		return 24, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 || value > 24 {
+		return 0, fmt.Errorf("long-task public request limit must be between 1 and 24")
+	}
+	return value, nil
+}
+
 func TestLongWorkflowBudgetBounds(t *testing.T) {
+	for _, raw := range []string{"0", "25", "-1", "NaN", "1.5"} {
+		_, err := longPublicRequestLimit(raw)
+		require.Error(t, err)
+	}
+	limit, err := longPublicRequestLimit("23")
+	require.NoError(t, err)
+	require.Equal(t, 23, limit)
 	for _, raw := range []string{"NaN", "Inf", "0", "-1", ".51", "invalid"} {
 		_, err := longTurnBudget(raw)
 		require.Error(t, err)
@@ -76,6 +100,8 @@ func TestLongWorkflowBudgetBounds(t *testing.T) {
 func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mode, admin, key string, keyID, accountID int64, models []*pb.ClientModelConfig) {
 	t.Helper()
 	budget, err := longTurnBudget(os.Getenv("DEVIN_E2E_LONG_MAX_TURN_USD"))
+	require.NoError(t, err)
+	maxPublicRequests, err := longPublicRequestLimit(os.Getenv("DEVIN_E2E_LONG_MAX_PUBLIC_REQUESTS"))
 	require.NoError(t, err)
 	lead, sidekick, err := selectAgentModels(models)
 	require.NoError(t, err)
@@ -112,7 +138,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	require.NoError(t, err)
 	writeAgentArtifact(t, "long-plan.json", map[string]any{
 		"mode": mode, "profile": profile, "prices_ready": pricesReady, "prices": prices,
-		"max_public_requests": 24, "concurrency": 1, "gateway_key_quota_usd": quota,
+		"max_public_requests": maxPublicRequests, "concurrency": 1, "gateway_key_quota_usd": quota,
 		"provider_spending_hard_cap": false, "automatic_retries": 0,
 		"task":     "two handoffs; read 16 synthetic fragments; preserve the goal through compaction; review two sums; restart after read 8",
 		"boundary": "public Responses API tool executor; not a pinned CLI client process",
@@ -153,7 +179,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 		if t.Failed() && sessionID != "" {
 			// Retain structural state/cost before the disposable Redis is removed.
 			// This helper does not serialize tool contents or credentials.
-			diagnoseAgentHistory(t, app, keyID, []agentRequest{{Session: sessionID}})
+			savePrivateLongFailure(t, app, keyID, sessionID)
 		}
 	}()
 	seenIDs, seenParts := map[string]bool{}, map[int]bool{}
@@ -162,10 +188,10 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	defer func() {
 		writeAgentArtifact(t, "long-workflow.json", map[string]any{"passed": !t.Failed() && finished, "public_requests": requests, "unique_tools": len(seenIDs), "unique_parts": len(seenParts), "backend_restarted": restarted, "seconds": time.Since(started).Seconds(), "mode": mode, "boundary": "public protocol executor; not a CLI process"})
 	}()
-	for requests < 24 && !finished {
+	for requests < maxPublicRequests && !finished {
 		payload := map[string]any{"model": profile.PublicModel, "input": input, "tools": []any{tool}, "max_output_tokens": 1024, "stream": false}
 		requests++ // A failed/uncertain send consumes admission and is never retried.
-		response, returnedSession := longRequest(t, app, key, sessionID, payload)
+		response, returnedSession := longRequest(t, app, key, &sessionID, payload)
 		if sessionID == "" {
 			sessionID = returnedSession
 		}
@@ -264,7 +290,38 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	}
 }
 
-func longRequest(t *testing.T, app *application, key, sessionID string, payload any) (*apicompat.ResponsesResponse, string) {
+func savePrivateLongFailure(t *testing.T, app *application, keyID int64, sessionID string) {
+	t.Helper()
+	evidence := map[string]any{"available": false}
+	defer func() { writeAgentArtifact(t, "private-long-failure-state.json", evidence) }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	db := agentDatabase(t, app)
+	var userID int64
+	if db.QueryRowContext(ctx, "SELECT user_id FROM api_keys WHERE id=$1", keyID).Scan(&userID) != nil {
+		return
+	}
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT")})
+	defer rdb.Close()
+	stored, err := rdb.Get(ctx, "devin:fusion:session:"+fusion.Scope(userID, keyID)+":"+fusion.Digest(sessionID)).Bytes()
+	if err != nil {
+		return
+	}
+	var session fusion.Session
+	if json.Unmarshal(stored, &session) != nil {
+		return
+	}
+	var attempts []map[string]any
+	for _, a := range session.Attempts {
+		attempts = append(attempts, map[string]any{"role": a.Role, "purpose": a.Purpose, "status": a.Status,
+			"settled": a.Settled, "applied": a.Applied, "usage_observed": a.Response != nil && a.Response.Usage != nil,
+			"cost_usd": a.CostUSD, "failure": a.Failure})
+	}
+	evidence = map[string]any{"available": true, "state": session.State, "turn_requests": session.TurnRequests,
+		"turn_tools": session.TurnTools, "turn_handoffs": session.TurnHandoffs, "turn_cost_usd": session.TurnCostUSD, "attempts": attempts}
+}
+
+func longRequest(t *testing.T, app *application, key string, sessionID *string, payload any) (*apicompat.ResponsesResponse, string) {
 	t.Helper()
 	data, err := json.Marshal(payload)
 	require.NoError(t, err)
@@ -272,12 +329,16 @@ func longRequest(t *testing.T, app *application, key, sessionID string, payload 
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	if sessionID != "" {
-		req.Header.Set(fusion.HeaderSession, sessionID)
+	if *sessionID != "" {
+		req.Header.Set(fusion.HeaderSession, *sessionID)
 	}
 	response, err := (&http.Client{Timeout: 90 * time.Second}).Do(req)
 	require.NoError(t, err, "long-task send failed or uncertain; no retry permitted")
 	defer response.Body.Close()
+	// Persist the first error response's identity before an assertion exits.
+	if *sessionID == "" {
+		*sessionID = response.Header.Get(fusion.HeaderSession)
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
 	require.NoError(t, err)
 	// Never emit raw model/error bodies, identifiers or credentials.
@@ -303,6 +364,7 @@ type longNativeWorkflow struct {
 	values                                         []int
 	sums                                           [2]int
 	final                                          string
+	failSidekick                                   bool
 }
 
 func (w *longNativeWorkflow) reply(request *pb.GetChatMessageRequest, reply *pb.GetChatMessageResponse) {
@@ -340,6 +402,9 @@ func (w *longNativeWorkflow) reply(request *pb.GetChatMessageRequest, reply *pb.
 		w.tools++
 		part := (w.phase-1)*8 + w.phaseTools
 		call("read_fragment", fmt.Sprintf(`{"part":%d}`, part), fmt.Sprintf("long-read-%d", part))
+		if w.failSidekick {
+			reply.DeltaToolCalls[0].ArgumentsJson = `{"part":`
+		}
 		return
 	}
 	reply.DeltaText = fmt.Sprintf("Reviewed phase %d: all eight fragment values checked; sum=%d. %s.", w.phase, w.sums[w.phase-1], longGoal)

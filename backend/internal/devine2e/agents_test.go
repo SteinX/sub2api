@@ -296,6 +296,36 @@ func TestAgentKeyQuotaCanOnlyReduceTheBatchLimit(t *testing.T) {
 	}
 }
 
+func agentTurnCostBudget(raw string) (float64, error) {
+	if raw == "" {
+		return .10, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 || value > .20 {
+		return 0, fmt.Errorf("explicit Fusion turn budget must be positive and at most USD 0.20")
+	}
+	return value, nil
+}
+
+func TestAgentTurnCostBudgetStaysBounded(t *testing.T) {
+	for _, test := range []struct {
+		raw   string
+		want  float64
+		valid bool
+	}{
+		{"", .10, true}, {"0.20", .20, true}, {"0.05", .05, true},
+		{"0.21", 0, false}, {"NaN", 0, false}, {"Inf", 0, false}, {"0", 0, false},
+	} {
+		got, err := agentTurnCostBudget(test.raw)
+		if test.valid {
+			require.NoError(t, err)
+			require.Equal(t, test.want, got)
+		} else {
+			require.Error(t, err)
+		}
+	}
+}
+
 func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode, admin, user, key string, keyID, accountID int64, models []*pb.ClientModelConfig) {
 	t.Helper()
 	lead, sidekick, err := selectAgentModels(models)
@@ -310,6 +340,10 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 	}
 	quota, err := agentKeyQuota(mode, batch, os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
 	require.NoError(t, err)
+	turnBudget, err := agentTurnCostBudget(os.Getenv("DEVIN_E2E_FUSION_MAX_TURN_COST_USD"))
+	require.NoError(t, err)
+	recoveryGroup := os.Getenv("DEVIN_E2E_RECOVERY_GROUP")
+	require.Contains(t, []string{"", "opencode/fusion"}, recoveryGroup, "unreviewed recovery group; stop before generation")
 	pricesReady := fixture != nil
 	var priceEvidence []map[string]any
 	if fixture == nil {
@@ -337,11 +371,11 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 	}
 	plan := map[string]any{
 		"mode": mode, "batch": batch, "direct_model": lead, "fusion_lead": lead, "fusion_sidekick": sidekick, "fusion_members_same_model": lead == sidekick,
-		"test_run": os.Getenv("DEVIN_E2E_RUN"), "test_skip": os.Getenv("DEVIN_E2E_SKIP"),
+		"test_run": os.Getenv("DEVIN_E2E_RUN"), "test_skip": os.Getenv("DEVIN_E2E_SKIP"), "recovery_group": recoveryGroup,
 		"client_versions": map[string]string{"opencode": "1.19.4", "omo": "5.1.44", "omp": "18.12.6", "bun": "1.4.4"},
 		"prices_ready":    pricesReady, "prices": priceEvidence, "provider_spending_hard_cap": false, "gateway_key_quota_usd": quota,
 		"concurrency": 1, "max_output_tokens": 1024, "max_client_seconds": 75, "runner_retries_after_uncertain_send": 0,
-		"fusion_limits":         map[string]any{"max_handoffs_per_turn": 1, "max_internal_requests_per_turn": 6, "max_external_tool_calls_per_turn": 2, "max_turn_wall_seconds": 90, "max_cost_usd_per_turn": .10, "max_output_tokens": 1024, "compaction": false, "cache_keepalive": false},
+		"fusion_limits":         map[string]any{"max_handoffs_per_turn": 1, "max_internal_requests_per_turn": 6, "max_external_tool_calls_per_turn": 2, "max_turn_wall_seconds": 90, "max_cost_usd_per_turn": turnBudget, "max_output_tokens": 1024, "compaction": false, "cache_keepalive": false},
 		"compatibility_profile": map[string]any{"omp_supersede_reads": false, "omp_drop_useless": false, "default_omp_pruning_result": "known incompatible after repeated reads; not passed"},
 		"matrix":                map[string]any{"client_process_launches": 42, "minimum_forwarded_gateway_requests": 42, "max_forwarded_gateway_requests": 48, "max_http_attempts_including_rejections": 72, "fusion_max_internal_requests_per_turn": 6},
 		"canary":                map[string]any{"client": "omp", "model_kind": "direct", "client_process_launches": 1, "expected_forwarded_gateway_requests": 2, "max_forwarded_gateway_requests": 3},
@@ -357,6 +391,12 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 		return
 	}
 	if mode == "live" {
+		if expected := os.Getenv("DEVIN_E2E_EXPECT_LEAD_MODEL"); expected != "" {
+			require.Equal(t, expected, lead, "approved Lead model changed; stop before generation")
+		}
+		if expected := os.Getenv("DEVIN_E2E_EXPECT_SIDEKICK_MODEL"); expected != "" {
+			require.Equal(t, expected, sidekick, "approved Sidekick model changed; stop before generation")
+		}
 		require.Equal(t, "true", os.Getenv("DEVIN_E2E_ALLOW_PAID"))
 		require.True(t, pricesReady, "discovered members lack verified billing prices; stop before generation")
 	}
@@ -364,7 +404,7 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 	profile.MaxRequests, profile.MaxHandoffs, profile.MaxTools = 6, 1, 2
 	profile.Compaction = &fusion.CompactionPolicy{Enabled: false}
 	profile.Keepalive = &fusion.KeepalivePolicy{Enabled: false}
-	profile.MaxOutputTokens, profile.MaxWallSeconds, profile.MaxCostUSD = 1024, 90, .10
+	profile.MaxOutputTokens, profile.MaxWallSeconds, profile.MaxCostUSD = 1024, 90, turnBudget
 	current := api(t, app, "GET", fmt.Sprintf("/admin/accounts/%d", accountID), admin, nil)
 	var extra map[string]any
 	require.NoError(t, json.Unmarshal([]byte(current.Get("extra").Raw), &extra))
@@ -441,14 +481,29 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 					observed[name] = after[len(before):]
 					return evidence
 				}
-				if batch != "canary" {
+				recoveryOnly := recoveryGroup == client+"/"+kind
+				if batch != "canary" && !recoveryOnly {
 					run("text_and_streaming", filepath.Join(root, "text"), "text", false, "")
 				}
 				tools := filepath.Join(root, "tools")
-				evidence := run("client_read_and_result", tools, "tool", true, "")
+				readName := "client_read_and_result"
+				if recoveryOnly {
+					readName = "recovery_setup_read"
+				}
+				evidence := run(readName, tools, "tool", true, "")
+				if recoveryOnly {
+					observed["client_read_and_result"] = observed[readName]
+				}
 				require.Positive(t, evidence.ToolCount, "real client did not report completing read")
 				if batch != "canary" {
-					run("continue", tools, "continue", false, "")
+					continueName := "continue"
+					if recoveryOnly {
+						continueName = "recovery_setup_continue"
+					}
+					run(continueName, tools, "continue", false, "")
+					if recoveryOnly {
+						observed["continue"] = observed[continueName]
+					}
 					app.stop(t)
 					app.start(t)
 					run("continue_after_backend_restart", tools, "continue", false, "")

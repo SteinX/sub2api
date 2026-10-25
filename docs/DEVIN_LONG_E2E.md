@@ -23,6 +23,8 @@ make test-devin-long-plan  # 真实账号接入与价格核验，零生成
 
 单 turn 金额默认保留 `$0.10`，`DEVIN_E2E_LONG_MAX_TURN_USD` 可在明确批准后设为不大于 `$0.50` 的正有限数。临时 Key 默认额度 `$1`；`DEVIN_E2E_AGENT_KEY_QUOTA` 只能降低额度。多批测试须在创建新 Key 前扣除既有用量，不能把每次新 Key 的额度当作累计上限。上述值均为本地保护，不是供应商账单硬上限；达到保护、首个失败或发送结果不明即停止，不自动提高限制。
 
+`DEVIN_E2E_LONG_MAX_PUBLIC_REQUESTS` 只能把单批默认 24 降到 1–24，供已审阅的续跑扣除既有请求。错误响应的会话头在断言失败前保存，清理前仅向 `private-long-failure-state.json` 写入角色、尝试状态、用量是否已观察及本地成本，不写入凭据、会话 ID 或工具正文。尝试审计的 `failure_kind` 只使用固定枚举，不暴露原始上游错误。合成故障 `DEVIN_E2E_LONG_MOCK_FAILURE=sidekick_incomplete_tool` 仅允许 mock，用于确认首个失败也能保留诊断；它不代表任何真实故障的根因。
+
 真实运行需要同时设置 `DEVIN_E2E_ALLOW_PAID=true` 和 `DEVIN_E2E_LONG_ALLOW_PAID=true`，将 `DEVIN_E2E_LONG_EXPECT_MODEL` 固定为已审阅计划的模型，并使用已经批准的预算与额度。选模结果变化时在生成前停止。短客户端矩阵的开关不单独授权新的长任务限额。GitHub 自动作业只运行 mock；本套件不增加自动 live 作业。
 
 结果默认写入被 Git 忽略的 `.cache/devin-e2e/`。`long-plan.json` 记录计划，`long-workflow.json` 记录请求和真实文件读取数量，`long-context.json` 记录结构性上下文检查，`private-usage-long-protocol-fusion.json` 记录本地累计计费。真实账号计划、用量和诊断仅留私有记录；自动 CI 只归档合成运行的结构结果。

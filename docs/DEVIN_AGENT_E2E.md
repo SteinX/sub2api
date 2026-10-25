@@ -70,6 +70,8 @@ GOTOOLCHAIN=go1.27.3 GOMAXPROCS=2 GOFLAGS=-p=2 make test-devin-agent-e2e
 
 修复后续跑可以用 `DEVIN_E2E_SKIP` 排除已完成的组；Go 测试过滤器及公共价目目录校验值会记录在 provenance 中。只在已有证据确认失败阶段及请求结果后续跑，累计请求仍须落在获准批次的总额内。`DEVIN_E2E_AGENT_KEY_QUOTA` 只允许降低该批次默认本地额度，以扣除前一段已经记录的费用；不能用它提高默认上限。各段结果和模型选择分别保留，不将单段筛选结果声明为整套通过。
 
+`DEVIN_E2E_FUSION_MAX_TURN_COST_USD` 保持默认 `$0.10`；明确审阅批准后可设为不大于 `$0.20` 的正有限值，超出或 NaN/Inf 会拒绝。`DEVIN_E2E_EXPECT_LEAD_MODEL` 和 `DEVIN_E2E_EXPECT_SIDEKICK_MODEL` 可固定已审阅的选择，变化时在生成前停止。`DEVIN_E2E_RECOVERY_GROUP=opencode/fusion` 跳过已完成的独立文本流程，明确标记重建读取与续接的必要准备，随后验证剩余恢复流程；仍须配合过滤器排除已完成组。重建流程不能复活已删除的原隔离会话，也不能抹去历史失败或自动增加批次上限。
+
 真实运行仍仅需要安全配置 `DEVIN_E2E_PAT`，不要求用户手工提供 model UID。账号目录必须提供直接调用、工具能力、至少 32768 context 和 1024 output 的可用模型。按正数已知 credit multiplier 排序，优先使用不同的两个成员；只有一个成员时明确记录同型号双角色，不能声称跨型号验收。计划查询已验证的公共目录，要求本地价卡能通过 Fusion 相同的确定性价格准入；系列回退不满足此条件，价格缺失时禁止 live 生成。
 
 ```bash

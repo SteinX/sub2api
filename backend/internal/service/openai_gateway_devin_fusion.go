@@ -266,8 +266,53 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 	if x.attemptPrefix == "context" {
 		event, component = "devin.context_attempt", "audit.devin.context"
 	}
-	logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("model", devin.DiagnosticModelID(wire.ChatModelUid)), zap.Bool("usage_observed", decoder.Response.Usage != nil))
+	toolCalls, invalidArguments := 0, 0
+	for _, item := range decoder.Response.Output {
+		if item.Type == "function_call" {
+			toolCalls++
+			if !json.Valid([]byte(item.Arguments)) {
+				invalidArguments++
+			}
+		}
+	}
+	logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("model", devin.DiagnosticModelID(wire.ChatModelUid)), zap.Bool("usage_observed", decoder.Response.Usage != nil), zap.String("failure_kind", devinFusionFailureKind(err)), zap.Int("tool_calls", toolCalls), zap.Int("invalid_tool_arguments", invalidArguments))
 	return outcome, err
+}
+
+// Report only enumerated categories: raw provider messages, trace IDs and tool
+// contents may contain private data and must not enter the attempt audit.
+func devinFusionFailureKind(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	var native *devin.Error
+	if errors.As(err, &native) {
+		switch native.Code {
+		case "unauthenticated", "permission_denied", "invalid_argument", "resource_exhausted", "deadline_exceeded":
+			return "native_" + native.Code
+		default:
+			return "native_error"
+		}
+	}
+	for inner := err; inner != nil; inner = errors.Unwrap(inner) {
+		switch inner.Error() {
+		case "devin returned incomplete tool arguments":
+			return "incomplete_tool_arguments"
+		case "devin tool argument delta has no call":
+			return "tool_delta_missing_call"
+		case "devin tool call has no name":
+			return "tool_call_missing_name"
+		case "devin returned no content":
+			return "empty_response"
+		}
+	}
+	return "transport_or_decode_error"
 }
 func (x *devinFusionExecutor) Settle(ctx context.Context, a fusion.Attempt) (float64, error) {
 	if a.Response == nil || a.Response.Usage == nil {

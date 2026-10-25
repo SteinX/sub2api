@@ -16,6 +16,14 @@ Devin 支持长期 API Key、浏览器登录和导入会话。添加时保存名
 
 “使用密钥”和 CC Switch 导入先读取当前 Key 可用的真实模型目录，再选择模型。Codex、Claude Code 和 OpenCode 配置使用同一个选择，包括 Fusion 的上游 UID；目录获取失败或为空时不会生成猜测的 GPT / Claude 配置。可先检查分组权限、模型白名单，再同步上游模型并刷新目录。
 
+在“密钥 → 使用 Key”中选择 Devin 模型后，切换客户端标签并复制生成配置。客户端使用本站公开 Key 和本站地址，原生 PAT 只由管理员在账号管理中配置。直接模型与已启用的 `fusion-*` 使用相同的客户端接入流程；更换模型时新建会话，续接时保持原有消息和工具结果不变。
+
+- OpenCode 使用 OpenAI-compatible Chat provider；可用 `--pure` 进行无插件检查。OMO 模板固定插件版本并提供只读 `devin-check` primary agent，关闭模型和运行时 fallback，供接入检查使用；不将外层 Worker 派发视为已验证能力。
+- OMP 标签生成用户目录下 `models.yml` 和 `config.yml`。JSON 也是合法的 YAML 1.2；配置使用 Chat Completions，关闭自动 compact、`supersedeReads`、`dropUseless` 及自动重试，并把模型角色指向选择的同一模型。读取裁剪的默认行为可能改写 Fusion 历史而触发冲突，不能把兼容配置的结果当作默认配置通过。保留更多历史会增加上下文占用，长会话需单独验证。
+- Codex 的 Responses 与 Claude Code 的 Messages 标签继续提供相应协议配置；不要仅依据协议适配成功声称对应 CLI 版本的全部会话和工具能力通过。非 Fusion 的 HTTP Responses 应关闭存储，由客户端发送完整历史。
+
+将配置与已有用户配置合并后，新建会话先测试简短回复，再在工作目录放置 `probe.txt`，检查真实读取与结果续接。预算或历史冲突应先检查本地用量和客户端配置，不反复自动发送请求。验证边界及固定客户端版本见[客户端进程验收](DEVIN_AGENT_E2E.md)。
+
 Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以下适配：
 
 | 接口 | 行为 |
