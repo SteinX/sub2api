@@ -11,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -82,6 +83,25 @@ func TestDevinContextQuoteRejectsNonMonotonicPriceIntervals(t *testing.T) {
 			require.Empty(t, bills.commands)
 		})
 	}
+}
+
+func TestDevinContextQuoteRejectsGroupPeakBoundaries(t *testing.T) {
+	const model = "e2e-peak-price"
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Default.RateMultiplier = 1
+	billing := NewBillingService(cfg, nil)
+	group := &Group{ID: 1, Platform: PlatformDevin, RateMultiplier: 1, SubscriptionType: SubscriptionTypeSubscription, PeakRateEnabled: true, PeakStart: "01:00", PeakEnd: "02:00", PeakRateMultiplier: 2,
+		ModelPricing: []ChannelModelPricing{{Models: []string{model}, Platform: PlatformDevin, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(.000001), OutputPrice: testPtrFloat64(.000002)}},
+	}
+	require.NoError(t, ValidatePeakRateConfig(group.SubscriptionType, true, group.PeakStart, group.PeakEnd, group.PeakRateMultiplier))
+	require.Equal(t, 2.0, group.PeakMultiplierAt(time.Date(2026, 10, 25, 1, 30, 0, 0, timezone.Location())), "prove the subscribed caller has a valid higher-price period")
+	svc := &OpenAIGatewayService{cfg: cfg, billingService: billing, resolver: NewModelPricingResolver(nil, billing)}
+	key := &APIKey{ID: 2, GroupID: &group.ID, Group: group, User: &User{ID: 3, Balance: 10}}
+	price := svc.InspectDevinContextPrice(context.Background(), key, model, 32768, 1024)
+	require.True(t, price.Identified)
+	require.True(t, price.Calculable)
+	require.Nil(t, price.ContextCostUpperUSD)
+	require.Equal(t, "time_varying_pricing", price.CostBoundUnavailable)
 }
 
 func TestDevinFusionMemberPricingUsesPhysicalUIDAndGroupScope(t *testing.T) {

@@ -41,7 +41,7 @@ func (s *OpenAIGatewayService) InspectDevinContextPrice(ctx context.Context, key
 		result.CostBoundUnavailable = "context_tier_pricing"
 		return result
 	}
-	if resolved.channelPricing != nil && resolved.channelPricing.TimePricing != nil || resolved.Source == PricingSourceLiteLLM && isDeepSeekModel(model) {
+	if key.Group.PeakRateEnabled || resolved.channelPricing != nil && resolved.channelPricing.TimePricing != nil || resolved.Source == PricingSourceLiteLLM && isDeepSeekModel(model) {
 		result.CostBoundUnavailable = "time_varying_pricing"
 		return result
 	}
