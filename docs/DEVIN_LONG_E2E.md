@@ -2,7 +2,7 @@
 
 ## 用例与验证边界
 
-`backend/internal/devine2e/long_workflow_test.go` 从当前 checkout 编译生产后端，接入一次性的 PostgreSQL、Redis 和普通用户 Key。Lead 分两次委派 Sidekick 读取 16 个合成文件，Sidekick 报告两组数值之和，Lead 审查后给出结果。工具执行器实际读取文件并独立核对唯一调用 ID、文件覆盖和最终数值，不以模型声称完成作为通过条件。
+`backend/internal/devine2e/long_workflow_test.go` 从当前 checkout 编译生产后端，接入一次性的 PostgreSQL、Redis 和普通用户 Key。Lead 分两次委派 Sidekick 读取 16 个合成文件，Sidekick 报告两组数值之和，Lead 审查后给出结果。每次生成随机三位数，正确答案由测试端独立计算且不放入提示。工具执行器实际读取文件并独立核对唯一调用 ID、文件覆盖和最终数值，不以模型声称完成作为通过条件。
 
 第八次读取后重启后端，工具结果提交到原有持久会话。Sidekick 使用较低的上下文阈值以实际触发压缩；最终检查原始目标、两个完整报告、独立角色上下文、压缩归档，以及每个普通推理和摘要各自唯一的 SQL 计费记录。
 

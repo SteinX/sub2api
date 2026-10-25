@@ -5,10 +5,12 @@ package devine2e
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,7 +30,6 @@ import (
 )
 
 const longGoal = "Preserve the public API and use only synthetic fragment files"
-const longFinal = "E2E_LONG_OK phase1=36 phase2=100"
 
 // This is a public-protocol tool executor, not an OpenCode/OMO/OMP process.
 // The compiled backend, SQL/Redis state, native serialization and billing are real.
@@ -129,9 +130,20 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	require.Equal(t, int64(1), api(t, app, "GET", fmt.Sprintf("/admin/accounts/%d", accountID), admin, nil).Get("concurrency").Int(), "one account slot keeps summary inference inline")
 	defer savePrivateAgentUsage(t, app, keyID, "long-protocol", "fusion")
 	root := t.TempDir()
+	values, sums := make([]int, 16), [2]int{}
 	for part := 1; part <= 16; part++ {
-		data := fmt.Sprintf("PART=%d VALUE=%d\n%s\nEND_PART=%d\n", part, part, strings.Repeat("Synthetic historical evidence. Preserve the public API. ", 25), part)
+		sample, err := rand.Int(rand.Reader, big.NewInt(900))
+		require.NoError(t, err)
+		values[part-1] = int(sample.Int64()) + 100
+		sums[(part-1)/8] += values[part-1]
+		data := fmt.Sprintf("PART=%d VALUE=%d\n%s\nEND_PART=%d\n", part, values[part-1], strings.Repeat("Synthetic historical evidence. Preserve the public API. ", 25), part)
 		require.NoError(t, os.WriteFile(filepath.Join(root, fmt.Sprintf("fragment-%02d.txt", part)), []byte(data), 0600))
+	}
+	expectedFinal := fmt.Sprintf("E2E_LONG_OK phase1=%d phase2=%d", sums[0], sums[1])
+	if fixture != nil {
+		fixture.longWorkflow.mu.Lock()
+		fixture.longWorkflow.values, fixture.longWorkflow.sums, fixture.longWorkflow.final = values, sums, expectedFinal
+		fixture.longWorkflow.mu.Unlock()
 	}
 	tool := map[string]any{"type": "function", "name": "read_fragment", "description": "Read one synthetic fragment; part is 1 through 16", "parameters": map[string]any{"type": "object", "properties": map[string]any{"part": map[string]any{"type": "integer", "minimum": 1, "maximum": 16}}, "required": []string{"part"}, "additionalProperties": false}}
 	goal := longGoal + ". Lead must delegate exactly two phases to Sidekick: phase 1 reads parts 1-8, phase 2 reads parts 9-16. Sidekick must read each part exactly once, one tool call at a time, and report the sum of VALUE fields with evidence. Lead reviews both reports and returns E2E_LONG_OK phase1=<sum> phase2=<sum>. Retain completed parts and running sums in any context summary. No other tools or delegated client agents."
@@ -178,7 +190,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 			results = append(results, apicompat.ResponsesInputItem{Type: "function_call_output", CallID: item.CallID, Output: string(data)})
 		}
 		if len(results) == 0 {
-			require.Contains(t, text.String(), longFinal, "reviewed answer must contain independently checked sums")
+			require.Contains(t, text.String(), expectedFinal, "reviewed answer must contain independently checked sums")
 			require.Len(t, seenParts, 16)
 			finished = true
 			break
@@ -236,6 +248,7 @@ func runLongWorkflow(t *testing.T, app *application, fixture *nativeFixture, mod
 	require.NotContains(t, string(leadBytes), strings.Repeat("Synthetic historical evidence. Preserve the public API. ", 3), "raw Sidekick evidence leaked into the Lead lane")
 	writeAgentArtifact(t, "long-context.json", map[string]any{"handoffs": len(session.Handoffs), "compactions_applied": session.Maintenance.CompactionsApplied, "sidekick_epoch": session.Contexts[fusion.Sidekick].Epoch, "goal_preserved": true, "raw_tool_results_isolated": true, "maintenance": session.Maintenance})
 	if fixture != nil {
+		fixture.verifyAgentNativeContexts(t, 0, "long-protocol", lead, sidekick)
 		fixture.longWorkflow.mu.Lock()
 		defer fixture.longWorkflow.mu.Unlock()
 		require.Equal(t, 3, fixture.longWorkflow.leadCalls)
@@ -280,17 +293,26 @@ func longRequest(t *testing.T, app *application, key, sessionID string, payload 
 type longNativeWorkflow struct {
 	mu                                             sync.Mutex
 	leadCalls, phase, phaseTools, tools, summaries int
+	values                                         []int
+	sums                                           [2]int
+	final                                          string
 }
 
 func (w *longNativeWorkflow) reply(request *pb.GetChatMessageRequest, reply *pb.GetChatMessageResponse) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	reply.DeltaText, reply.DeltaToolCalls = longFinal, nil
+	reply.DeltaText, reply.DeltaToolCalls = w.final, nil
 	reply.StopReason = pb.StopReason_STOP_REASON_STOP_PATTERN
 	reply.Usage.BillingModelUid = request.ChatModelUid
 	if len(request.Tools) == 0 {
 		w.summaries++
-		reply.DeltaText = fmt.Sprintf(`{"goal":%q,"current_state":"phase %d; completed %d reads in this phase","decisions":["Read each fragment once"],"changes":[],"evidence":["Tool results are retained in the archived prefix"],"checks":[],"open_questions":[],"next_steps":["Continue the active phase"],"files":["synthetic fragments"]}`, longGoal, w.phase, w.phaseTools)
+		partial := 0
+		if w.phase > 0 {
+			for _, value := range w.values[(w.phase-1)*8 : (w.phase-1)*8+w.phaseTools] {
+				partial += value
+			}
+		}
+		reply.DeltaText = fmt.Sprintf(`{"goal":%q,"current_state":"phase %d; completed %d reads in this phase; running sum %d","decisions":["Read each fragment once"],"changes":[],"evidence":["Tool results are retained in the archived prefix"],"checks":[],"open_questions":[],"next_steps":["Continue the active phase"],"files":["synthetic fragments"]}`, longGoal, w.phase, w.phaseTools, partial)
 		return
 	}
 	call := func(name, args, id string) {
@@ -313,5 +335,5 @@ func (w *longNativeWorkflow) reply(request *pb.GetChatMessageRequest, reply *pb.
 		call("read_fragment", fmt.Sprintf(`{"part":%d}`, part), fmt.Sprintf("long-read-%d", part))
 		return
 	}
-	reply.DeltaText = fmt.Sprintf("Reviewed phase %d: all eight fragment values checked; sum=%d. %s.", w.phase, map[int]int{1: 36, 2: 100}[w.phase], longGoal)
+	reply.DeltaText = fmt.Sprintf("Reviewed phase %d: all eight fragment values checked; sum=%d. %s.", w.phase, w.sums[w.phase-1], longGoal)
 }
