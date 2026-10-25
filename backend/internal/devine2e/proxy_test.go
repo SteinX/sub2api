@@ -106,7 +106,7 @@ func TestEnvironmentProxyRoutesPATOnboarding(t *testing.T) {
 	require.Empty(t, fixture.chats, "proxy regression must not generate content")
 }
 
-func TestVerifiedPricingCacheInitializesDefaultCard(t *testing.T) {
+func TestVerifiedPricingCacheSurvivesUnavailableRemoteHash(t *testing.T) {
 	if os.Getenv("DEVIN_E2E_MODE") != "mock" {
 		t.Skip("verified cache regression uses synthetic prices")
 	}
@@ -115,7 +115,11 @@ func TestVerifiedPricingCacheInitializesDefaultCard(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, data, 0600))
 	t.Setenv("DEVIN_E2E_PRICING_CATALOG", path)
 	t.Setenv("DEVIN_E2E_PRICING_SHA256", fmt.Sprintf("%x", sha256.Sum256(data)))
-	a := newApplication(t, newNativeFixture(t))
+	fixture := newNativeFixture(t)
+	// Keep this test independent of Internet availability: the fixture proxy
+	// rejects ordinary GETs, so a hash refresh cannot replace the seeded card.
+	t.Setenv("PRICING_HASH_URL", fixture.proxy.URL+"/unavailable-pricing-hash")
+	a := newApplication(t, fixture)
 	admin := login(t, a, "admin@devin-e2e.invalid", a.password)
 	compliance := api(t, a, "GET", "/admin/compliance", admin, nil)
 	api(t, a, "POST", "/admin/compliance/accept", admin, map[string]string{"language": "en", "phrase": compliance.Get("ack_phrase_en").String()})
