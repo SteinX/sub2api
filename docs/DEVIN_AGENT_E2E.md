@@ -94,23 +94,6 @@ DEVIN_E2E_ALLOW_PAID=true DEVIN_E2E_AGENT_BATCH=matrix make test-devin-agent-liv
 
 真实 PAT → `server.codeium.com` 的运行时凭据引用、现有任务的配置版本绑定及出站放行必须先核实，详见[运行时说明](DEVIN_E2E.md#托管域名-secret-与版本绑定)。发布配置不等于既有实例已应用；不能提取 Secret、猜测引用或绕过策略。
 
-### 2026-10-25 新环境检查点
-
-北京时间 10:26:32 的平台观测确认新实例为 `running`、网络策略为 `enforced`，`DEVIN_E2E_PAT` 为 `ready`；绑定版本为 `cecfgver_6adceccbc1b48196805a0077b2262aa9`。此前的旧实例绑定阻碍已解除。
-
-本次补齐了运行器对平台代理的显式账号绑定及 CA 信任。首次新增合成回归因只覆盖大写代理变量而失败；修正测试同时设置大小写变量后，最终结果如下。该次失败保留在私有测试产物中，不计为通过。
-
-| 验证 | 新环境结果 |
-| --- | --- |
-| 协议及运行器回归 | 30 项通过，1 个按需客户端套件跳过；84.896 秒 |
-| 配置后的三客户端 × Fusion/非 Fusion | 47 项通过，其中 42 个实际进程用例；0 失败、0 跳过；223.816 秒 |
-| Python 运行器边界 | 8 项通过 |
-| 真实 PAT 零生成 `agent-plan` | 54.990 秒通过：原生交换、模型发现、临时账号提交、公开 Key 目录与价卡 |
-| 真实客户端生成 | 尚未执行；具体付费批次待确认 |
-| OMP 默认裁剪 | 沿用已记录的 `devin_fusion_history_conflict` 失败；配置后的通过不覆盖此项 |
-
-真实目录提供 239 个满足工具与上下文要求的候选，其中 193 个有可用本地价卡。计划选定 `deepseek-v4-flash-high` 为普通模型和 Lead，`deepseek-v4-1-flash-1017-low` 为 Sidekick；两者输入/输出价卡分别为每 token `$0.00000015` / `$0.00000060`，不代表供应商费用保证。完整计划与 Go JSON 事件分别保留在本地 `.cache/devin-e2e/newenv-agent-plan-final/agent-plan.json`、各运行目录的 `results.jsonl`。运行使用 Go 1.27.3，测试容器、网络和后端均已清理。真实生成次数为 0，PAT 与派生会话未写入归档产物。
-
 本矩阵不证明 OMO Sisyphus 外层派发、OMP `task` 子 Worker、两个 Worker 交错或完整开发工具链。它们应追加使用 [PR #17 的两个开发 smoke](https://github.com/SteinX/sub2api/blob/f2de531383945df2fb0b456ab9c417ee013bdebb/tools/fusion-eval/LOCAL_SMOKE.md)，并观察真实派发与文件断言；不能将 primary probe 的通过当作 Worker 通过。
 
 模型已实际执行后的中断、未知结果核对、带副作用工具去重、compact/fork、动态 MCP、图像和客户端 UI 应单列批次。现有协议测试覆盖原生输出前后错误和不重放规则，但不能冒充这些真实客户端场景的执行记录；未知结果须停止并核对原会话和账务后再决定重试。
