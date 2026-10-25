@@ -58,5 +58,6 @@ func diagnoseAgentHistory(t *testing.T, app *application, keyID int64, records [
 			"content_equal": string(a.Content) == string(b.Content), "stored_content_bytes": len(a.Content), "incoming_content_bytes": len(b.Content),
 			"output_equal": a.Output == b.Output, "output_equal_after_trim": strings.TrimSpace(a.Output) == strings.TrimSpace(b.Output), "stored_output_bytes": len(a.Output), "incoming_output_bytes": len(b.Output), "replay_json_text_blocks": jsonBlocks, "replay_text_matches_stored": jsonBlocks && joined.String() == a.Output})
 	}
-	writeAgentArtifact(t, "agent-history-difference.json", map[string]any{"stored_count": len(session.Public), "incoming_count": len(last.items), "items": shapes})
+	writeAgentArtifact(t, "agent-history-difference.json", map[string]any{"stored_count": len(session.Public), "incoming_count": len(last.items), "items": shapes,
+		"state": session.State, "native_attempts": len(session.Attempts), "turn_requests": session.TurnRequests, "turn_cost_usd": session.TurnCostUSD})
 }

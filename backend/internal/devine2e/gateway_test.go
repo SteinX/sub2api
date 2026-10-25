@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -70,6 +71,17 @@ func newApplication(t *testing.T, fixture *nativeFixture) *application {
 	_, err = db.Exec("CREATE DATABASE " + pq.QuoteIdentifier(a.database))
 	_ = db.Close()
 	require.NoError(t, err)
+	if os.Getenv("DEVIN_E2E_PRICING_CATALOG") != "" {
+		pricing, err := os.ReadFile(os.Getenv("DEVIN_E2E_PRICING_CATALOG"))
+		require.NoError(t, err)
+		digest := sha256.Sum256(pricing)
+		require.Equal(t, os.Getenv("DEVIN_E2E_PRICING_SHA256"), hex.EncodeToString(digest[:]), "reference pricing must retain its verified checksum")
+		require.True(t, json.Valid(pricing), "reference pricing must be JSON")
+		pricingDir := filepath.Join(dir, "pricing")
+		require.NoError(t, os.MkdirAll(pricingDir, 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(pricingDir, "model_pricing.json"), pricing, 0600))
+		require.NoError(t, os.WriteFile(filepath.Join(pricingDir, "model_pricing.sha256"), []byte(hex.EncodeToString(digest[:])+"\n"), 0600))
+	}
 	if fixture != nil || os.Getenv("CODEX_PROXY_CERT") != "" {
 		bundle, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt")
 		require.NoError(t, err)
@@ -114,6 +126,7 @@ func (a *application) start(t *testing.T) {
 	a.command.Env = append(inherited,
 		"DATA_DIR="+a.dir, "AUTO_SETUP=true", "RUN_MODE=standard",
 		"CONFIG_FILE=",
+		"PRICING_DATA_DIR="+filepath.Join(a.dir, "pricing"),
 		"SERVER_HOST=127.0.0.1", "SERVER_PORT="+port, "SERVER_MODE=release",
 		"DATABASE_HOST=127.0.0.1", "DATABASE_PORT="+os.Getenv("DEVIN_E2E_PG_PORT"),
 		"DATABASE_USER=devin_e2e", "DATABASE_DBNAME="+a.database, "DATABASE_SSLMODE=disable",
@@ -395,10 +408,8 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	user := login(t, a, "user@devin-e2e.invalid", userPassword)
 	keyInput := map[string]any{"name": "e2e-key", "group_id": groupID}
 	if agents {
-		quota := 0.25
-		if mode == "mock" || os.Getenv("DEVIN_E2E_AGENT_BATCH") == "matrix" {
-			quota = 1
-		}
+		quota, err := agentKeyQuota(mode, os.Getenv("DEVIN_E2E_AGENT_BATCH"), os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
+		require.NoError(t, err)
 		keyInput["quota"] = quota
 	}
 	keyData := api(t, a, "POST", "/keys", user, keyInput)

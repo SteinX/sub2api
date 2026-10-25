@@ -43,7 +43,7 @@ def configuration(directory, client, endpoint, model):
             "provider": {"sub2api-e2e": {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": endpoint, "apiKey": "{env:DEVIN_E2E_GATEWAY_KEY}"},
                 "models": {model: {"name": "Isolated Devin E2E", "limit": {"context": 32768, "output": 1024}}}}},
             "agent": {"probe": {"mode": "primary", "model": ref,
-                "prompt": "Follow the short test instruction. Only read probe.txt when requested. Never delegate, edit or execute commands.",
+                "prompt": "Follow the short test instruction. Only read probe.txt when requested. Never spawn client-side worker agents, edit or execute commands.",
                 "tools": {name: name == "read" for name in ("read", "bash", "edit", "write", "task", "glob", "grep", "webfetch", "websearch", "todowrite", "question")}}},
             "permission": {"*": "deny", "read": "allow", "external_directory": {str(directory / "workspace") + "/*": "allow"}},
         }
@@ -98,6 +98,9 @@ def execute(args):
     prompt = "Reply with E2E_OK only. Do not call tools."
     if args.action == "tool":
         prompt = "Read the local probe.txt with the read tool, verify it contains E2E_TOOL_RESULT, then reply E2E_OK only."
+    if args.model == "fusion-e2e-agents":
+        prompt = prompt.replace("Do not call tools.", "Do not call client-side tools for this text-only check.")
+        prompt = "Use gateway-internal Lead/Sidekick delegation: have the Sidekick independently verify this task, then have the Lead review the report before the final answer. " + prompt
     result = {"client": args.client, "action": args.action, "saw_expected_text": False, "tool_completed": 0, "frames": 0, "parse_errors": 0, "timed_out": False, "interrupted_before_forward": False, "event_types": {}, "tool_statuses": {}}
     proc = subprocess.Popen(command(args.client, args.model, args.action, prompt), cwd=directory / "workspace", env=child_environment(directory),
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)

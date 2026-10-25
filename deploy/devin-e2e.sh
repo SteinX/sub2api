@@ -23,6 +23,20 @@ mkdir -p "$DEVIN_E2E_ARTIFACTS"
 export DEVIN_E2E_ARTIFACTS="$(cd "$DEVIN_E2E_ARTIFACTS" && pwd)"
 export DEVIN_E2E_BINARY="$DEVIN_E2E_ARTIFACTS/server"
 
+if [ "$mode" != mock ]; then
+  # Fetch the same public catalog configured by the backend, through the inherited
+  # proxy/CA. Its remote client need not have direct DNS/network access here.
+  pricing_source=https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window
+  export DEVIN_E2E_PRICING_CATALOG="$DEVIN_E2E_ARTIFACTS/reference-prices.json"
+  curl --fail --silent --show-error --max-time 30 --output "$DEVIN_E2E_PRICING_CATALOG" "$pricing_source.json"
+  curl --fail --silent --show-error --max-time 30 --output "$DEVIN_E2E_ARTIFACTS/reference-prices.sha256" "$pricing_source.sha256"
+  read -r expected_pricing_hash _ < "$DEVIN_E2E_ARTIFACTS/reference-prices.sha256"
+  [[ "$expected_pricing_hash" =~ ^[a-fA-F0-9]{64}$ ]] || { echo 'Invalid reference pricing checksum' >&2; exit 2; }
+  actual_pricing_hash="$(sha256sum "$DEVIN_E2E_PRICING_CATALOG")"
+  export DEVIN_E2E_PRICING_SHA256="${actual_pricing_hash%% *}"
+  [ "$DEVIN_E2E_PRICING_SHA256" = "${expected_pricing_hash,,}" ] || { echo 'Reference pricing checksum mismatch' >&2; exit 2; }
+fi
+
 # Select the managed local daemon explicitly; preserve proxy and registry config.
 unset DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH
 docker_cli=(docker --host=unix:///var/run/docker.sock)
@@ -53,8 +67,11 @@ timeout --kill-after=10s 5m go build -mod=readonly -o "$DEVIN_E2E_BINARY" ./cmd/
   printf 'mode=%s\n' "$mode"
   printf 'commit=%s\n' "$(git rev-parse HEAD)"
   printf 'dirty_files=%s\n' "$(git status --porcelain | wc -l | tr -d ' ')"
+  printf 'test_run=%s\n' "${DEVIN_E2E_RUN:-.}"
+  printf 'test_skip=%s\n' "${DEVIN_E2E_SKIP:-^$}"
+  printf 'reference_pricing_sha256=%s\n' "${DEVIN_E2E_PRICING_SHA256:-synthetic-group-prices}"
   go version
   sha256sum "$DEVIN_E2E_BINARY"
 } > "$DEVIN_E2E_ARTIFACTS/provenance.txt"
 echo "Running Devin $mode E2E; private artifacts: $DEVIN_E2E_ARTIFACTS"
-timeout --kill-after=15s 15m go test -mod=readonly -count=1 -tags=devine2e -run "${DEVIN_E2E_RUN:-.}" -json -timeout=10m ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"
+timeout --kill-after=15s 15m go test -mod=readonly -count=1 -tags=devine2e -run "${DEVIN_E2E_RUN:-.}" -skip "${DEVIN_E2E_SKIP:-^$}" -json -timeout=10m ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"

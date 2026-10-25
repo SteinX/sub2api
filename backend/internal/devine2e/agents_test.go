@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -259,6 +260,42 @@ func selectAgentModels(models []*pb.ClientModelConfig) (string, string, error) {
 	return first.Model, second.Model, nil
 }
 
+func agentKeyQuota(mode, batch, cap string) (float64, error) {
+	limit := .25
+	if mode == "mock" || batch == "matrix" {
+		limit = 1
+	}
+	if cap == "" {
+		return limit, nil
+	}
+	value, err := strconv.ParseFloat(cap, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 || value > limit {
+		return 0, fmt.Errorf("temporary key quota must be positive and no greater than the batch limit")
+	}
+	return value, nil
+}
+
+func TestAgentKeyQuotaCanOnlyReduceTheBatchLimit(t *testing.T) {
+	for _, test := range []struct {
+		batch, cap string
+		want       float64
+		valid      bool
+	}{
+		{"canary", "", .25, true}, {"matrix", "", 1, true},
+		{"matrix", "0.75", .75, true}, {"canary", "0.1", .1, true},
+		{"canary", "1", 0, false}, {"matrix", "2", 0, false},
+		{"matrix", "NaN", 0, false}, {"matrix", "Inf", 0, false}, {"matrix", "-1", 0, false},
+	} {
+		got, err := agentKeyQuota("live", test.batch, test.cap)
+		if test.valid {
+			require.NoError(t, err)
+			require.Equal(t, test.want, got)
+		} else {
+			require.Error(t, err)
+		}
+	}
+}
+
 func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode, admin, user, key string, keyID, accountID int64, models []*pb.ClientModelConfig) {
 	t.Helper()
 	lead, sidekick, err := selectAgentModels(models)
@@ -271,10 +308,8 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 	if mode == "mock" {
 		batch = "matrix"
 	}
-	quota := .25
-	if batch == "matrix" {
-		quota = 1
-	}
+	quota, err := agentKeyQuota(mode, batch, os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
+	require.NoError(t, err)
 	pricesReady := fixture != nil
 	var priceEvidence []map[string]any
 	if fixture == nil {
@@ -287,9 +322,10 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 			}
 			seen[model] = true
 			pricing := api(t, app, "GET", "/admin/channels/model-pricing?model="+url.QueryEscape(model), admin, nil)
-			found := pricing.Get("found").Bool() && pricing.Get("output_price").Float() > 0
-			priceEvidence = append(priceEvidence, map[string]any{"model": model, "found": found, "input_price": pricing.Get("input_price").Float(), "output_price": pricing.Get("output_price").Float()})
-			if found {
+			found := pricing.Get("found").Bool()
+			identified := pricing.Get("identified").Bool()
+			priceEvidence = append(priceEvidence, map[string]any{"model": model, "found": found, "identified": identified, "input_price": pricing.Get("input_price").Float(), "output_price": pricing.Get("output_price").Float()})
+			if found && identified && pricing.Get("output_price").Float() > 0 {
 				priced = append(priced, candidate)
 			}
 		}
@@ -301,6 +337,7 @@ func runAgentCases(t *testing.T, app *application, fixture *nativeFixture, mode,
 	}
 	plan := map[string]any{
 		"mode": mode, "batch": batch, "direct_model": lead, "fusion_lead": lead, "fusion_sidekick": sidekick, "fusion_members_same_model": lead == sidekick,
+		"test_run": os.Getenv("DEVIN_E2E_RUN"), "test_skip": os.Getenv("DEVIN_E2E_SKIP"),
 		"client_versions": map[string]string{"opencode": "1.19.4", "omo": "5.1.44", "omp": "18.12.6", "bun": "1.4.4"},
 		"prices_ready":    pricesReady, "prices": priceEvidence, "provider_spending_hard_cap": false, "gateway_key_quota_usd": quota,
 		"concurrency": 1, "max_output_tokens": 1024, "max_client_seconds": 75, "runner_retries_after_uncertain_send": 0,

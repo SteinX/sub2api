@@ -16,6 +16,8 @@ Mock 不证明真实 Devin 可用；测试已有远端 Sub2API 只能证明该�
 
 live 的上游域名白名单固定为 `server.codeium.com`，也约束原生准备接口返回的其他 API 地址；未获授权的主机在凭据发送前拒绝。域名解析沿用既有代理，不依赖执行容器的公共 DNS。合成回归同时验证允许域名的代理接入和未获授权域名的拒绝。认证失败只报告白名单内的 RPC 阶段与错误类别，不输出上游原始错误或凭据。
 
+plan/live 还需要 curl：运行器经继承的代理与 CA 下载后端默认配置的公共价目目录及其 SHA-256，验证后加载到本次临时价格缓存。目录与价格不作修改；校验失败在账号接入前停止。模型价格接口的 `found` 可能包含系列回退，`identified` 才表示可被原有确定性价格准入识别，真实 Fusion 成员必须满足后者。
+
 ## 启动与测试
 
 需要 Linux、Bash、GNU coreutils `timeout`、Docker Engine（本地 `/var/run/docker.sock`）、Docker Compose v2，以及 `backend/go.mod` 要求的 Go 版本。协议测试不要求前端、额外 Python 包或真实账号。Docker 可拉取 `postgres:18-alpine`、`redis:8-alpine`；Go 模块需可下载。

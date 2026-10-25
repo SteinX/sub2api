@@ -5,6 +5,7 @@ package devine2e
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -17,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -102,6 +104,26 @@ func TestEnvironmentProxyRoutesPATOnboarding(t *testing.T) {
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
 	require.Empty(t, fixture.chats, "proxy regression must not generate content")
+}
+
+func TestVerifiedPricingCacheInitializesDefaultCard(t *testing.T) {
+	if os.Getenv("DEVIN_E2E_MODE") != "mock" {
+		t.Skip("verified cache regression uses synthetic prices")
+	}
+	data := []byte(`{"synthetic-priced-card":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}`)
+	path := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(path, data, 0600))
+	t.Setenv("DEVIN_E2E_PRICING_CATALOG", path)
+	t.Setenv("DEVIN_E2E_PRICING_SHA256", fmt.Sprintf("%x", sha256.Sum256(data)))
+	a := newApplication(t, newNativeFixture(t))
+	admin := login(t, a, "admin@devin-e2e.invalid", a.password)
+	compliance := api(t, a, "GET", "/admin/compliance", admin, nil)
+	api(t, a, "POST", "/admin/compliance/accept", admin, map[string]string{"language": "en", "phrase": compliance.Get("ack_phrase_en").String()})
+	pricing := api(t, a, "GET", "/admin/channels/model-pricing?model=synthetic-priced-card", admin, nil)
+	require.True(t, pricing.Get("found").Bool())
+	require.True(t, pricing.Get("identified").Bool(), "verified catalog card must satisfy the Fusion pricing gate")
+	require.Equal(t, .000001, pricing.Get("input_price").Float())
+	require.Equal(t, .000002, pricing.Get("output_price").Float())
 }
 
 // Use the existing account proxy option to exercise new-account onboarding at
