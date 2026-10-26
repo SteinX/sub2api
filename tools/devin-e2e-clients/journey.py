@@ -217,7 +217,7 @@ def prepare(directory):
             for name in files:
                 os.chown(Path(base) / name, 65534, 65534)
     before = run_project_python(directory, ['run_tests.py'])
-    if before.returncode != 1 or b"AssertionError" not in before.stdout + before.stderr:
+    if before.returncode != 1 or b"AssertionError" not in before.stderr:
         raise ValueError("project bug was not reproduced before the client task")
     # Remove intentionally incorrect outputs so a no-op client cannot pass.
     (workspace / "out/report.json").unlink(missing_ok=True)

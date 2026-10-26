@@ -26,7 +26,7 @@ sha = lambda data: hashlib.sha256(data).hexdigest()
 protected = {name: sha(Path(name).read_bytes()) for name in ("requirements.json", "test_project.py", "run_tests.py")}
 source_before = sha(Path("price_math.py").read_bytes())
 nonce = json.loads(Path("requirements.json").read_text())["nonce"]
-result = unittest.TextTestRunner(stream=sys.stdout, verbosity=2).run(unittest.defaultTestLoader.discover("."))
+result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("."))
 passed = result.wasSuccessful() and result.testsRun > 0 and not result.skipped and not result.expectedFailures
 exit_code = 0 if passed else 1
 proof = {"schema": "devin_project_test_v1", "run_id": uuid.uuid4().hex,
@@ -46,7 +46,8 @@ with temporary.open("x") as output:
     output.flush()
     os.fsync(output.fileno())
 os.replace(temporary, target)
-print("SUB2API_TEST_RECEIPT_V1:" + encoded, flush=True)
+reference = {"run_id": proof["run_id"], "sha256": sha(encoded.encode())}
+print("SUB2API_TEST_RECEIPT_V1:" + json.dumps(reference, sort_keys=True, separators=(",", ":")), flush=True)
 sys.exit(exit_code)
 '''
 
@@ -144,27 +145,35 @@ class TestReceipts:
         record['receipt_output_sha256'] = digest(lines[0].encode())
         record['receipt_output_closed_object'] = lines[0].rstrip().endswith('}')
         try:
-            proof = json.loads(lines[0])
+            reference = json.loads(lines[0])
         except ValueError:
             record['receipt_status'] = 'output_invalid_json'
             return
         try:
+            if (not isinstance(reference, dict) or set(reference) != {'run_id', 'sha256'}
+                    or not RUN_ID.fullmatch(str(reference['run_id'])) or not HEX.fullmatch(str(reference['sha256']))):
+                record['receipt_status'] = 'invalid_output_reference'
+                return
+            run_id = reference['run_id']
+            raw = self.read('out/test-receipts/' + run_id + '.json')
+            if digest(raw) != reference['sha256']:
+                record['receipt_status'] = 'file_output_mismatch'
+                return
+            proof = json.loads(raw)
+            if not isinstance(proof, dict) or proof.get('run_id') != run_id:
+                record['receipt_status'] = 'run_identity_mismatch'
+                return
             status = self.validate(proof, code, blocked)
             record['receipt_status'] = status
             if status != 'verified':
                 return
-            run_id = proof['run_id']
             if run_id in self.run_ids and self.run_ids[run_id] != call_hash:
                 record['receipt_status'] = 'reused_by_another_call'
                 self.failed = True
                 return
             self.run_ids[run_id] = call_hash
-            raw = self.read('out/test-receipts/' + run_id + '.json')
-            if json.loads(raw) != proof:
-                record['receipt_status'] = 'file_output_mismatch'
-                return
             record.update(execution_verified=True, passed=proof['passed'], exit_code=proof['exit_code'],
-                receipt_sha256=digest(raw), run_sha256=digest(run_id.encode()), project_nonce_sha256=proof['project_nonce_sha256'],
+                receipt_sha256=digest(raw), output_reference_sha256=reference['sha256'], run_sha256=digest(run_id.encode()), project_nonce_sha256=proof['project_nonce_sha256'],
                 protected_sha256=proof['protected_sha256'], source_before_sha256=proof['source_before_sha256'],
                 source_after_sha256=proof['source_after_sha256'], started_ns=proof['started_ns'], finished_ns=proof['finished_ns'],
                 tests_run=proof['tests_run'], failures=proof['failures'], errors=proof['errors'], skipped=proof['skipped'],

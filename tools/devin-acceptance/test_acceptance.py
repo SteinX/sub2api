@@ -52,13 +52,13 @@ def evidence(live=False):
             result['tool_events'] = copy.deepcopy(result['tool_states'])
             result['incomplete_tool_calls'] = 0
             result['tool_calls'] = [{'name': name, 'call_sha256': hashlib.sha256((phase + name + str(index)).encode()).hexdigest(),
-                                     'status': 'completed', 'states': ['completed'],
+                                     'status': 'completed', 'states': ['completed'], 'source_targeted': name == 'write' and phase == 'task',
                                      **({'command_class': 'configured_project_tests', 'command_sha256': DIGEST} if name == 'bash' else {})}
                                     for name, count in result['tools'].items() for index in range(count)]
             bash = next(call for call in result['tool_calls'] if call['name'] == 'bash')
             receipt = {'call_sha256': bash['call_sha256'], 'command_class': 'configured_project_tests', 'command_sha256': DIGEST,
                        'state': 'completed', 'completion_sequence': 1, 'execution_verified': True, 'receipt_status': 'verified',
-                       'passed': True, 'exit_code': 0, 'exit_source': 'client_metadata', 'receipt_sha256': DIGEST, 'run_sha256': DIGEST,
+                       'passed': True, 'exit_code': 0, 'exit_source': 'client_metadata', 'receipt_sha256': DIGEST, 'output_reference_sha256': DIGEST, 'run_sha256': DIGEST,
                        'project_nonce_sha256': DIGEST, 'source_before_sha256': '2' * 64, 'source_after_sha256': '2' * 64,
                        'protected_sha256': dict(case['protected_project_sha256']), 'tests_run': 1, 'failures': 0, 'errors': 0,
                        'skipped': 0, 'expected_failures': 0, 'unexpected_successes': 0, 'started_ns': 2, 'finished_ns': 3}
@@ -73,7 +73,7 @@ def evidence(live=False):
             attempts = [{'attempt_sha256': hashlib.sha256(str(index).encode()).hexdigest(), 'role': role,
                          'model_uid': 'physical-' + ('lead' if role == 'lead' else 'sidekick'),
                          'purpose': 'inference', 'status': 'completed', 'settled': True, 'applied': True, 'failure_present': False,
-                         'usage_available': True, 'usage_matches': True, 'usage_rows': 1,
+                         'usage_query_available': True, 'usage_available': True, 'usage_matches': True, 'usage_rows': 1,
                          'cost_usd': .001, 'actual_cost_usd': .001, 'total_cost_usd': .001,
                          'input_tokens': 4, 'output_tokens': 2, 'cache_creation_tokens': 0, 'cache_read_tokens': 0}
                         for index, role in enumerate(['lead', 'sidekick', 'lead'])]

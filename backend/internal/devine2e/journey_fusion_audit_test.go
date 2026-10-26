@@ -67,6 +67,7 @@ func collectFusionAudit(ctx context.Context, records []agentRequest, readers fus
 		reportsOK := len(session.Handoffs) > 0
 		for _, handoff := range session.Handoffs {
 			present := strings.TrimSpace(handoff.Report) != ""
+			reportsOK = reportsOK && present
 			linked := reportInLead(session.Lead, handoff)
 			handoffs = append(handoffs, map[string]any{"handoff_sha256": fusion.Digest(handoff.ID), "turn": handoff.Turn,
 				"report_present": present, "report_bytes": len(handoff.Report), "report_sha256": fusion.Digest(handoff.Report), "lead_report_linked": linked})

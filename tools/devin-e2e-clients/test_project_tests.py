@@ -51,6 +51,7 @@ class ProjectTestReceiptTests(unittest.TestCase):
     def test_real_runner_receipt_and_allowed_whitespace_do_not_need_english_markers(self):
         result = self.run_tests()
         receipt_line = next(line for line in result.stdout.decode().splitlines() if line.startswith(PREFIX))
+        self.assertLessEqual(len(receipt_line.encode()), 256, 'keep the reference below pinned OMP\'s default 768-byte line cap')
         self.event(result, command='python3   run_tests.py', output=receipt_line)
         report = self.receipts.report()
         self.assertTrue(report['client_tests_succeeded'])
@@ -110,7 +111,9 @@ class ProjectTestReceiptTests(unittest.TestCase):
 
     def test_stale_wrong_nonce_changed_protected_source_and_zero_tests_are_rejected(self):
         result = self.run_tests()
-        original = json.loads(next(line[len(PREFIX):] for line in result.stdout.decode().splitlines() if line.startswith(PREFIX)))
+        reference = json.loads(next(line[len(PREFIX):] for line in result.stdout.decode().splitlines() if line.startswith(PREFIX)))
+        receipt = self.root / ('out/test-receipts/' + reference['run_id'] + '.json')
+        original = json.loads(receipt.read_bytes())
         for mutation in ['stale', 'nonce', 'protected', 'source', 'zero', 'exit']:
             proof = {**original}
             if mutation == 'stale': proof['started_ns'] = self.started - 1
@@ -119,10 +122,26 @@ class ProjectTestReceiptTests(unittest.TestCase):
             elif mutation == 'source': proof['source_after_sha256'] = '0' * 64
             elif mutation == 'zero': proof['tests_run'] = 0
             else: proof['exit_code'] = 1
-            self.event(result, call_id='bad-' + mutation, output=PREFIX + json.dumps(proof))
+            raw = json.dumps(proof).encode()
+            receipt.write_bytes(raw)  # Explicitly corrupt an actual receipt for the negative test.
+            self.event(result, call_id='bad-' + mutation, output=PREFIX + json.dumps({'run_id': reference['run_id'], 'sha256': digest(raw)}))
             self.assertFalse(self.receipts.report()['client_tests_succeeded'], mutation)
         # The observer has not created or rewritten any receipt file.
         self.assertEqual(1, len(list((self.root / 'out/test-receipts').glob('*.json'))))
+
+    def test_reference_cannot_bless_a_changed_file_or_unrelated_run(self):
+        result = self.run_tests()
+        reference = json.loads(next(line[len(PREFIX):] for line in result.stdout.decode().splitlines() if line.startswith(PREFIX)))
+        receipt = self.root / ('out/test-receipts/' + reference['run_id'] + '.json')
+        receipt.write_bytes(receipt.read_bytes() + b' ')
+        self.event(result)
+        self.assertEqual('file_output_mismatch', self.receipts.report()['test_execution']['calls'][0]['receipt_status'])
+        self.assertFalse(self.receipts.report()['client_tests_succeeded'])
+
+    def test_omp_malformed_explicit_exit_is_not_a_documented_omission(self):
+        result = self.run_tests()
+        self.event(result, client='omp', code=False)
+        self.assertFalse(self.receipts.report()['client_tests_succeeded'])
 
     def test_receipt_reuse_across_call_ids_and_changed_terminal_are_rejected(self):
         result = self.run_tests()

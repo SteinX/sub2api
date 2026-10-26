@@ -70,13 +70,21 @@ def valid_tool_evidence(result):
             or len({call['call_sha256'] for call in calls}) != len(calls)):
         return False
     completed = Counter()
+    mutations = Counter()
     for call in calls:
         if (not HEX64.fullmatch(str(call.get('call_sha256', ''))) or call.get('name') not in tools
                 or call.get('status') != 'completed' or not isinstance(call.get('states'), list) or not call['states']
                 or call['states'][-1] != 'completed' or any(status not in {'pending', 'running', 'completed'} for status in call['states'])):
             return False
         completed[call['name']] += 1
+        if type(call.get('source_targeted')) is not bool:
+            return False
+        if call['source_targeted']:
+            if call['name'] not in FILE_MUTATORS:
+                return False
+            mutations[call['name']] += 1
     return (all(completed[name] == count for name, count in tools.items())
+            and dict(mutations) == result.get('source_mutation_tools')
             and all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
                     and events[name].get('completed', 0) >= tools[name] for name, counts in states.items()))
 
@@ -110,6 +118,7 @@ def valid_client_test_receipt(case):
             or selected.get('receipt_status') != 'verified' or selected.get('passed') is not True or type(selected.get('exit_code')) is not int or selected['exit_code'] != 0
             or selected.get('state') != 'completed' or selected.get('exit_source') not in {'client_metadata', 'omp_success_and_runner_receipt'}
             or not all(HEX64.fullmatch(str(selected.get(key, ''))) for key in ['receipt_sha256', 'run_sha256'])
+            or selected.get('output_reference_sha256') != selected.get('receipt_sha256')
             or selected.get('project_nonce_sha256') != case.get('project_nonce_sha256')
             or selected.get('source_before_sha256') != case.get('source_after_task_sha256')
             or selected.get('source_after_sha256') != case.get('source_after_task_sha256')
@@ -147,7 +156,7 @@ def valid_fusion_audit(case):
             identity, role = attempt.get('attempt_sha256'), attempt.get('role')
             if (not HEX64.fullmatch(str(identity)) or identity in attempts or role not in {'lead', 'sidekick'}
                     or attempt.get('model_uid') != case.get('physical_' + role + '_uid') or attempt.get('status') != 'completed'
-                    or any(attempt.get(field) is not True for field in ['settled', 'applied', 'usage_available', 'usage_matches'])
+                    or any(attempt.get(field) is not True for field in ['settled', 'applied', 'usage_query_available', 'usage_available', 'usage_matches'])
                     or attempt.get('failure_present') is not False or attempt.get('usage_rows') != 1
                     or any(not amount(attempt.get(field)) for field in ['cost_usd', 'actual_cost_usd', 'total_cost_usd'])
                     or abs(attempt['cost_usd'] - max(attempt['actual_cost_usd'], attempt['total_cost_usd'])) > 1e-9
