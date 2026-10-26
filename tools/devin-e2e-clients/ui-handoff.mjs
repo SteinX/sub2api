@@ -10,7 +10,7 @@ import { createModelDiagnostics, modelControlSnapshot } from './ui-model-diagnos
 let stage = 'input'
 let diagnostics = {}
 const journey = { auth_method: 'login_form', login_http_status: null, key_list_http_status: null, selected_key_matches: false, routes: [] }
-const catalogRecovery = { loading_visible: false, timeout_visible: false, no_configuration_on_error: false, manual_refresh: false, models_after_retry: 0, blocked_fixture_model_visible: false }
+const catalogRecovery = { loading_visible: false, timeout_visible: false, no_configuration_on_error: false, manual_refresh: false, models_after_retry: 0, blocked_fixture_model_visible: false, observer_delay_ms: 0 }
 const uiScope = 'full product application: login, key list, selection and configuration copy'
 async function main() {
   let raw = ''
@@ -77,6 +77,8 @@ async function main() {
     await page.getByTestId('devin-client-model').waitFor()
     Object.assign(diagnostics, await page.evaluate(modelControlSnapshot, input.model))
     if (input.catalog_recovery_probe) {
+      catalogRecovery.observer_delay_ms = input.catalog_observer_delay_ms ?? 0
+      if (catalogRecovery.observer_delay_ms) await new Promise(resolve => setTimeout(resolve, catalogRecovery.observer_delay_ms))
       catalogRecovery.loading_visible = await page.getByTestId('devin-models-loading').isVisible()
       if (catalogRecovery.loading_visible) {
         stage = 'catalog-timeout'
