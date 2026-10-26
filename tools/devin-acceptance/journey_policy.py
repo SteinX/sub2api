@@ -23,16 +23,24 @@ STOP_REASONS = frozenset({'tool_error', 'permission_rejection', 'test_failed', '
     'client_exit', 'protocol_error', 'transport_uncertain', 'control_lost', 'supervisor_failure', 'deadline',
     'missing_terminal', 'source_or_oracle_failure', 'tool_budget_exhausted', 'tool_budget_unavailable'})
 TOOL_OPERATIONS = [f'opencode/{kind}/project/{phase}' for kind in ('direct', 'fusion') for phase in ('task', 'resume')]
+LONG_OPERATIONS = ['opencode/fusion/long/task', 'opencode/fusion/long/resume']
 
 
 def validate_tool_budget(plan):
-    """Four explicitly approved CLI operations, never inferred from sessions.
+    """Explicitly approved bounded CLI operations, never inferred from sessions.
 
     This bounds the implemented real pilot, not the product's client support.
     Further clients/capabilities need their own reviewed finite operation plan.
     """
-    expected = {'operations': TOOL_OPERATIONS, 'per_operation': plan['limits']['tools_per_turn'],
-                'total': 4 * plan['limits']['tools_per_turn']}
+    long = plan.get('journey_set', 'short_v1') == 'core_with_long_v1'
+    if plan.get('journey_set','short_v1') not in {'short_v1','core_with_long_v1'}:
+        raise Denied('explicit_fixed_tool_operation_scope_required')
+    expected = {'operations': TOOL_OPERATIONS + (LONG_OPERATIONS if long else []), 'per_operation': plan['limits']['tools_per_turn'],
+                'total': (5 if long else 4) * plan['limits']['tools_per_turn']}
+    if long:
+        expected['no_tools_operations'] = [LONG_OPERATIONS[1]]
+    if long != (plan.get('dataset') == 'synthetic_price_project_long_v1'):
+        raise Denied('long_dataset_and_operation_scope_mismatch')
     if (plan.get('clients') != ['opencode'] or plan.get('omp_capabilities', 'false') != 'false'
             or plan.get('tool_budget') != expected):
         raise Denied('explicit_fixed_tool_operation_scope_required')
@@ -88,7 +96,7 @@ def validate(plan, approval, mode, source, environment, now=None):
         raise Denied('approval_expired_or_invalid') from None
     if plan.get('upstream_origins') != ['https://server.codeium.com']:
         raise Denied('upstream_destination_not_allowed')
-    if plan.get('product') != 'isolated_complete_preview' or plan.get('dataset') != 'synthetic_price_project_v1':
+    if plan.get('product') != 'isolated_complete_preview' or plan.get('dataset') not in {'synthetic_price_project_v1','synthetic_price_project_long_v1'}:
         raise Denied('preview_or_data_scope_not_allowed')
     scopes = approval.get('scopes', [])
     required = {'native_auth', 'temporary_credential_storage', 'local_preview_accounts'}
@@ -109,6 +117,10 @@ def validate(plan, approval, mode, source, environment, now=None):
         value = limits.get(key)
         if type(value) is not int or not 0 < value <= cap:
             raise Denied('invalid_' + key + '_limit')
+    if type(limits.get('cli_seconds',150)) is not int or not 1 <= limits.get('cli_seconds',150) <= 300:
+        raise Denied('invalid_cli_seconds_limit')
+    if plan.get('journey_set') == 'core_with_long_v1' and 'cli_seconds' not in limits:
+        raise Denied('explicit_long_cli_seconds_required')
     for key, cap in [('local_usd', 3), ('turn_usd', .5)]:
         value = limits.get(key)
         if type(value) not in {float, int} or not math.isfinite(value) or not 0 < value <= cap:
@@ -205,7 +217,8 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated
                     raise Denied('invalid_tool_reservation')
                 if any(value in prior for prior in operations.values() for value in calls):
                     raise Denied('reused_tool_identity')
-                if (len(operations[operation]) + len(calls) > budget['per_operation']
+                per_operation = 0 if operation in budget.get('no_tools_operations',[]) else budget['per_operation']
+                if (len(operations[operation]) + len(calls) > per_operation
                         or state['tools_reserved'] + len(calls) > budget['total']):
                     # Persist the stop with the rejecting decision; no partial
                     # reservation and no refund on failure, ACK or cancellation.

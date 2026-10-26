@@ -77,6 +77,8 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		}
 	}
 	resume := strings.Contains(userTask, "Resume this project session")
+	longRecall := strings.Contains(userTask, "BOUNDED_LONG_RECALL")
+	longTask := strings.Contains(userTask, "BOUNDED_LONG_PROJECT")
 	pressure := strings.Contains(userTask, "Exercise context pressure")
 	if strings.Contains(userTask, "Recall the shared CONTEXT_NONCE") {
 		if len(checkpointNonce) == 2 {
@@ -166,9 +168,73 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 				call(tool, map[string]any{"task": userTask, "acceptance_criteria": "Complete the project task, run tests and report the verified result"})
 			} else {
 				reply.DeltaText = final
+				if longRecall {
+					reply.DeltaText = longRecallText(history.String(), testScenario)
+				}
 			}
 			return
 		}
+	}
+	if longRecall {
+		if testScenario == "bounded_long_tool_recall" {
+			for _, tool := range request.Tools {
+				if tool.Name == "read" {
+					call(tool, journeyPathArgs(tool, filepath.Join(workspace, "context/part00.txt"), map[string]any{}))
+					return
+				}
+			}
+		}
+		reply.DeltaText = longRecallText(history.String(), testScenario)
+		return
+	}
+	if longTask {
+		path := ""
+		if reads["price_math.py"] == 0 {
+			path = "price_math.py"
+		} else {
+			for index := 0; index < 8; index++ {
+				if testScenario == "bounded_long_missing_part" && index == 7 {
+					continue
+				}
+				name := fmt.Sprintf("part%02d.txt", index)
+				if reads[name] == 0 {
+					path = filepath.Join("context", name)
+					break
+				}
+			}
+		}
+		if path != "" {
+			for _, tool := range request.Tools {
+				if tool.Name == "read" {
+					call(tool, journeyPathArgs(tool, filepath.Join(workspace, path), map[string]any{}))
+					return
+				}
+			}
+		} else if !wrote {
+			for _, tool := range request.Tools {
+				if tool.Name == "edit" {
+					call(tool, journeyPathArgs(tool, filepath.Join(workspace, "price_math.py"), map[string]any{"oldString": "return subtotal + discount", "newString": "return subtotal - discount"}))
+					return
+				}
+			}
+		} else if !tested {
+			for _, tool := range request.Tools {
+				if tool.Name == "bash" {
+					call(tool, map[string]any{"command": "python3 run_tests.py", "description": "Test bounded long project"})
+					return
+				}
+			}
+		} else if reads["report.json"] == 0 {
+			for _, tool := range request.Tools {
+				if tool.Name == "read" {
+					call(tool, journeyPathArgs(tool, filepath.Join(workspace, "out/report.json"), map[string]any{}))
+					return
+				}
+			}
+		} else {
+			reply.DeltaText = final
+		}
+		return
 	}
 	readPath := ""
 	if pressure {
@@ -305,6 +371,21 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 			return
 		}
 	}
+}
+
+// Values come only from actual forwarded model history/tool results, never
+// from opening project files or an oracle injecting the expected answer.
+func longRecallText(history, scenario string) string {
+	facts := map[string]string{}
+	pattern := regexp.MustCompile(`\b(part0[0-7])\b[\s"']*[:=][\s"']*([a-f0-9]{32})\b`)
+	for _, match := range pattern.FindAllStringSubmatch(history, -1) {
+		facts[match[1]] = match[2]
+	}
+	if scenario == "bounded_long_wrong_fact" {
+		facts["part00"] = strings.Repeat("0", 32)
+	}
+	encoded, _ := json.Marshal(facts)
+	return string(encoded)
 }
 
 func journeyPathArgs(tool *pb.ChatToolDefinition, path string, args map[string]any) map[string]any {

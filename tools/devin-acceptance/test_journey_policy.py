@@ -192,5 +192,32 @@ class RealJourneyPolicyTests(unittest.TestCase):
             self.assertEqual(11, policy.read_json(ledger)['tools_reserved'])
 
 
+
+    def test_long_plan_is_explicit_and_resume_zero_budget_is_durable(self):
+        plan,approval,source,env=proposal()
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger=Path(temporary)/'short.json';policy.claim(ledger,plan,'live')
+            with self.assertRaisesRegex(policy.Denied,'unapproved_tool_operation'):
+                policy.ledger_action(ledger,'tool_begin',operation=policy.LONG_OPERATIONS[0])
+        plan.update(journey_set='core_with_long_v1',dataset='synthetic_price_project_long_v1')
+        plan['limits']['cli_seconds']=300
+        plan['tool_budget'].update(operations=policy.TOOL_OPERATIONS+policy.LONG_OPERATIONS,total=60,no_tools_operations=[policy.LONG_OPERATIONS[1]])
+        approval['plan_sha256']=policy.digest(plan)
+        policy.validate(plan,approval,'live',source,env,NOW)
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger=Path(temporary)/'long.json';policy.claim(ledger,plan,'live')
+            policy.ledger_action(ledger,'tool_begin',operation=policy.LONG_OPERATIONS[1])
+            policy.ledger_action(ledger,'admit')
+            state=policy.ledger_action(ledger,'tool_reserve',operation=policy.LONG_OPERATIONS[1],calls=['a'*64])
+            self.assertTrue(state['stopped']);self.assertEqual(0,state['tools_reserved'])
+        for mutation in ('scope','no_tools','total','cli'):
+            changed=copy.deepcopy(plan)
+            if mutation=='scope':changed['tool_budget']['operations']=policy.TOOL_OPERATIONS
+            if mutation=='no_tools':changed['tool_budget']['no_tools_operations']=[]
+            if mutation=='total':changed['tool_budget']['total']=72
+            if mutation=='cli':changed['limits'].pop('cli_seconds')
+            approval['plan_sha256']=policy.digest(changed)
+            with self.subTest(mutation=mutation),self.assertRaises(policy.Denied):policy.validate(changed,approval,'live',source,env,NOW)
+
 if __name__ == '__main__':
     unittest.main()

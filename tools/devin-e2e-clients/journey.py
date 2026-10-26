@@ -22,6 +22,7 @@ from run import ROOT, PINS, SENSITIVE_ENV, child_environment, write_json
 import process_cleanup
 import container_sandbox
 import batch_control
+import long_project
 from ui_evidence import parse_ui_output, communicate_ui
 from project_evidence import ToolEvidence
 from project_completion import CompletionEvidence
@@ -207,15 +208,16 @@ def prepare_pressure(directory,nonce):
         os.close(workspace)
 
 
-def prepare(directory):
+def prepare(directory, project_kind='short'):
     workspace = directory / "workspace"
     workspace.mkdir(parents=True)
     data = {"nonce": os.urandom(12).hex(), "rows": [[100 + int.from_bytes(os.urandom(2), "big"), 1 + byte] for byte in os.urandom(8)]}
+    expected = (long_project.generate(workspace, data) if project_kind == 'long' else
+                {"nonce": data["nonce"], "totals": [a-b for a,b in data["rows"]]})
     write_json(workspace / "requirements.json", data)
-    (workspace / "price_math.py").write_text(INITIAL_SOURCE)
+    (workspace / "price_math.py").write_text(long_project.SOURCE if project_kind == 'long' else INITIAL_SOURCE)
     (workspace / "test_project.py").write_text(TEST_SOURCE)
     (workspace / "run_tests.py").write_text(TEST_RUNNER)
-    expected = {"nonce": data["nonce"], "totals": [a - b for a, b in data["rows"]]}
     for name in ("config/opencode", "data", "cache/client-tmp", "state", "claude", "omp-agent", "omp-root"):
         (directory / name).mkdir(parents=True, exist_ok=True)
     # Install dependencies before credential use via npm ci. Mirror its genuine
@@ -242,7 +244,7 @@ def prepare(directory):
     (workspace / "out/report.json").unlink(missing_ok=True)
     for receipt in (workspace / 'out/test-receipts').glob('*.json'):
         receipt.unlink()
-    protected = {name: digest(project_bytes(workspace, name)) for name in ("requirements.json", "test_project.py", "run_tests.py")}
+    protected = {name: digest(project_bytes(workspace, name)) for name in ("requirements.json", "test_project.py", "run_tests.py", *data.get('parts',[]))}
     return workspace, expected, protected
 
 
@@ -262,7 +264,7 @@ def identity(client):
             'platform': 'linux-x64', 'omo_senpi_equivalent': False if client == 'omo' else None}
 
 
-def command(client, model, resume):
+def command(client, model, resume, project_kind='short'):
     if client in {"opencode", "omo"}:
         cmd = [str(ROOT / "node_modules/opencode-linux-x64/bin/opencode"), "run", "--agent", "devin-project", "--model", "devin/" + model, "--format", "json", "--title", "Synthetic project acceptance"]
         if client == "opencode":
@@ -272,6 +274,8 @@ def command(client, model, resume):
                "--model", "devin/" + model, "--tools", "read,write,bash", "--no-lsp", "--no-pty", "--no-extensions", "--no-skills", "--no-rules", "--no-title", "--thinking", "off", "--max-time", "120", "--mode", "json", "-p"]
     if resume:
         cmd.append("--continue")
+    if project_kind == 'long':
+        return cmd + [long_project.prompt(resume)]
     prompt = ("Resume this project session. Read out/report.json and confirm the completed project using the existing session history. Summarize what you verified."
               if resume else
               "Repair price_math.py so the project tests pass. Read requirements.json and price_math.py, fix the calculation, run python3 run_tests.py, then re-read requirements.json and out/report.json to verify the result. Do not change the requirements, tests or test runner. Summarize the verified result.")
@@ -299,8 +303,14 @@ def invoke(args, directory, resume=False, protected=None):
     nonce = json.loads(project_bytes(directory / 'workspace', 'requirements.json'))['nonce']
     protected = dict(protected) if protected is not None else {name: digest(project_bytes(directory / 'workspace', name)) for name in ('requirements.json', 'test_project.py', 'run_tests.py')}
     tests = TestReceipts(lambda name: project_bytes(directory / 'workspace', name), nonce, protected, client_started_ns)
-    proc = start_child(command(args.client,args.model,resume),directory,env,gateway=args.ui_url,client=args.client,
+    is_long = getattr(args, 'project_kind', 'short') == 'long'
+    reads = long_project.ReadEvidence(directory/'workspace', lambda name: project_bytes(directory/'workspace', name)) if is_long and not resume else None
+    proc = start_child(command(args.client,args.model,resume,getattr(args,'project_kind','short')),directory,env,gateway=args.ui_url,client=args.client,
                        stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    instance = None
+    if is_long:
+        instance = ('container:'+proc.cid if isinstance(proc,container_sandbox.ContainerProcess) else
+                    f'process:{proc.pid}:{process_cleanup.start_ticks(proc.pid)}')
     result = {"exit_code": None, "timed_out": False, "event_error": False, "final_text_matches": False,
               "normal_stop": False, "tools": {"read": 0, "write": 0, "bash": 0}, "client_tests_succeeded": False,
               "frames": 0, "parse_errors": 0, "session_seen": False, "client_session_sha256": None, "session_changed": False,
@@ -351,6 +361,8 @@ def invoke(args, directory, resume=False, protected=None):
                 return False
             try:
                 tool = tool_evidence.observe(event)
+                if reads is not None:
+                    reads.observe(event, tool)
                 tests.observe(tool, event)
                 completion.observe(event)
                 if tool and tool['status'] == 'error':
@@ -391,7 +403,7 @@ def invoke(args, directory, resume=False, protected=None):
     thread = threading.Thread(target=consume, daemon=True)
     thread.start()
     try:
-        proc.wait(timeout=150)
+        proc.wait(timeout=getattr(args,'cli_seconds',150))
     except subprocess.TimeoutExpired:
         result["timed_out"] = True
         fatal('deadline')
@@ -404,6 +416,9 @@ def invoke(args, directory, resume=False, protected=None):
         ACTIVE.discard(proc)
     result["exit_code"] = proc.returncode
     result.update(client_started_ns=client_started_ns, client_finished_ns=time.time_ns())
+    if is_long:
+        result['client_instance_sha256'] = digest(instance.encode())
+        result['client_exit_cleanup_verified'] = (proc.cleaned if isinstance(proc,container_sandbox.ContainerProcess) else not process_cleanup.group_members(proc.pid))
     result.update(tool_evidence.report())
     result.update(tests.report())
     result.update(completion.report('PROJECT_REVIEWED' if resume else 'PROJECT_COMPLETE'))
@@ -418,6 +433,17 @@ def invoke(args, directory, resume=False, protected=None):
                         and not result['event_error'] and not result['timed_out'] and result['parse_errors'] == 0
                         and result['incomplete_tool_calls'] == 0 and result['session_seen'] and result['client_session_sha256'] is not None
                         and not result['session_changed'] and (args.client != 'omo' or result['plugin_runtime_started']))
+    if reads is not None:
+        result['long_reads'] = reads.report()
+        result['passed'] &= result['long_reads']['complete']
+    if is_long:
+        result['passed'] &= result['client_exit_cleanup_verified']
+    if is_long and resume:
+        result['memory_recall'] = long_project.recall(''.join(completion.parts.values()).strip(), args.long_facts)
+        result['memory_recall']['zero_public_tools'] = len(result['tool_calls']) == 0
+        result['passed'] &= result['memory_recall']['passed'] and result['memory_recall']['zero_public_tools']
+    if is_long and not result['passed']:
+        control.stop('source_or_oracle_failure')
     control.end(result['passed'])
     result['batch_stop_observed'] = control.stopped
     return result
@@ -432,9 +458,13 @@ def main():
     parser.add_argument("--profile", choices=("project", "compatibility", "default"), required=True)
     parser.add_argument('--stage', choices=('task', 'handoff'), default='task')
     parser.add_argument('--upstream', choices=('synthetic', 'real'), default='synthetic')
+    parser.add_argument('--project-kind', choices=('short', 'long'), default='short')
+    parser.add_argument('--cli-seconds', type=int, default=150)
     parser.add_argument('--catalog-recovery-probe', action='store_true')
     parser.add_argument('--catalog-observer-delay-ms', type=int, default=0)
     args = parser.parse_args()
+    if not 1 <= args.cli_seconds <= 300 or args.project_kind == 'long' and args.client != 'opencode':
+        parser.error('bounded long project supports only OpenCode; CLI limit must be1..300seconds')
     if args.catalog_recovery_probe and args.upstream != 'synthetic':
         parser.error('catalog recovery probe requires synthetic upstream')
     if args.catalog_observer_delay_ms and (not args.catalog_recovery_probe or not 0 <= args.catalog_observer_delay_ms <= 17000):
@@ -444,7 +474,10 @@ def main():
     isolation(args.client)  # reject writable personal OMO state before setup
     isolated=isolation_evidence()
     directory = Path(args.directory).resolve()
-    workspace, expected, protected = prepare(directory)
+    workspace, expected, protected = prepare(directory, 'long') if args.project_kind=='long' else prepare(directory)
+    if args.project_kind == 'long':
+        args.long_facts = long_project.fact_values(lambda name: project_bytes(workspace,name))
+        long_parts = {name:digest(project_bytes(workspace,name)) for name in json.loads(project_bytes(workspace,'requirements.json'))['parts']}
     project_nonce_hash = digest(expected['nonce'].encode())
     ui_input = {"directory": str(directory), "workspace": str(workspace), "client": args.client, "model": args.model, "ui_url": args.ui_url, "profile": args.profile, "test_command": TEST_COMMAND}
     if args.catalog_recovery_probe:
@@ -501,6 +534,9 @@ def main():
                    'source_mutation_tool': sum(first['source_mutation_tools'].values()) >= 1,
                    'source_changed': source_before_task != source_after_task,
                    'client_tests': first['client_tests_succeeded'], 'oracle': after.returncode == 0 if after is not None else None}
+    if args.project_kind=='long':
+        task_checks['all_long_files_read'] = first.get('long_reads',{}).get('complete') is True
+        task_checks['long_files_unchanged'] = all(digest(project_bytes(workspace,name))==fingerprint for name,fingerprint in long_parts.items())
     task_passed = all(task_checks.values())
     source_before_resume = source_after_task
     resumed = invoke(args, directory, True, protected=protected) if task_passed else None
@@ -514,7 +550,17 @@ def main():
     final = final_project_snapshot(workspace, expected, protected, source_before_resume)
     if resumed is None:
         final['artifact_verified_after_resume'] = final['source_unchanged_after_resume'] = None
-    passed = task_passed and resumed is not None and resumed["passed"] and resume_nonce_valid and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
+    resume_contract = (resumed is not None and resumed.get('memory_recall',{}).get('passed') is True and len(resumed['tool_calls'])==0
+                       if args.project_kind=='long' else resumed is not None and resumed['tools']['read']>=1)
+    passed = task_passed and resumed is not None and resumed["passed"] and resume_nonce_valid and resume_contract and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
+    if args.project_kind=='long':
+        final['long_files_unchanged_after_resume'] = (all(digest(project_bytes(workspace,name))==fingerprint for name,fingerprint in long_parts.items()) if resumed is not None else None)
+        passed &= final['long_files_unchanged_after_resume'] is True
+        restarted = (resumed is not None and first['client_exit_cleanup_verified'] and resumed['client_exit_cleanup_verified']
+                     and first['client_instance_sha256'] != resumed['client_instance_sha256']
+                     and first['client_finished_ns'] <= resumed['client_started_ns'])
+        final['client_restarted_verified'] = bool(restarted) if resumed is not None else None
+        passed &= restarted
     report = {"tier": tier, "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
               "execution_isolation": "separate_uid" if os.geteuid()==0 else "networkless_container_fixed_unix_relay",
               "isolation":isolated,
@@ -531,6 +577,10 @@ def main():
               "context_pressure": extended.get('context_pressure', 'not_run'), "compact": extended.get('compact', 'not_run'),
               "fork": extended.get('fork', 'not_run'), "disconnect_recovery": 'not_run', "worker": "not_run",
               "capability_evidence": extended}
+    if args.project_kind=='long':
+        report.update(project_kind='long', context_pressure='passed' if first.get('long_reads',{}).get('complete') else 'failed',
+                      compact='not_claimed', compression_claim=False, dataset_bytes=long_project.PARTS*long_project.PART_BYTES,
+                      long_file_sha256=long_parts)
     print(json.dumps(report, sort_keys=True))
     return 0 if passed else 1
 

@@ -63,7 +63,7 @@ except Denied as error:
  print(json.dumps({'authorized':False,'reason':str(error)}))
 `
 
-func newFixtureLedgerBudget(t *testing.T, accounting *authorizedJourneyBudget) *fixtureLedgerBudget {
+func newFixtureLedgerBudget(t *testing.T, accounting *authorizedJourneyBudget, longScope ...bool) *fixtureLedgerBudget {
 	t.Helper()
 	policyRoot, err := filepath.Abs("../../../tools/devin-acceptance")
 	require.NoError(t, err)
@@ -78,16 +78,23 @@ func newFixtureLedgerBudget(t *testing.T, accounting *authorizedJourneyBudget) *
 	b := &fixtureLedgerBudget{accounting: accounting, plan: filepath.Join(directory, "plan.json"), scope: filepath.Join(directory, "nonexecuting-scope.json"), ledger: ledger, policyRoot: policyRoot, settled: make(chan error, 64)}
 	initialize := `import json,sys
 sys.path.insert(0,sys.argv[1])
-from journey_policy import claim,digest,TOOL_OPERATIONS
+from journey_policy import claim,digest,TOOL_OPERATIONS,LONG_OPERATIONS
 plan={'source':{'commit':'a'*40,'tree':'b'*40},'clients':['opencode'],
       'tool_budget':{'operations':TOOL_OPERATIONS,'per_operation':12,'total':48},
       'limits':{'public_requests':40,'local_usd':1,'turn_usd':.5,'wall_seconds':300,'tools_per_turn':12}}
+if sys.argv[6]=='long':
+ plan.update(journey_set='core_with_long_v1',dataset='synthetic_price_project_long_v1')
+ plan['tool_budget'].update(operations=TOOL_OPERATIONS+LONG_OPERATIONS,total=60,no_tools_operations=[LONG_OPERATIONS[1]])
 scope={'schema_version':1,'approved':False,'approval_id':sys.argv[5],'plan_sha256':digest(plan)}
 for path,value in [(sys.argv[2],plan),(sys.argv[3],scope)]:
  with open(path,'w') as file:json.dump(value,file)
 claim(sys.argv[4],plan,'live')
 `
-	_, err = b.command("-c", initialize, policyRoot, b.plan, b.scope, b.ledger, identity)
+	kind := "short"
+	if len(longScope) > 0 && longScope[0] {
+		kind = "long"
+	}
+	_, err = b.command("-c", initialize, policyRoot, b.plan, b.scope, b.ledger, identity, kind)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, os.Remove(b.ledger)) })
 	for _, path := range []string{b.plan, b.scope} {

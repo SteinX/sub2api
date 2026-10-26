@@ -16,9 +16,19 @@ import (
 // Limits apply to a trusted CLI task/resume operation spanning HTTP requests.
 // They are NOT model-provided session IDs, nor a fresh quota on every response.
 type journeyToolLimits struct {
-	Operations   []string `json:"operations"`
-	PerOperation int      `json:"per_operation"`
-	Total        int      `json:"total"`
+	Operations        []string `json:"operations"`
+	PerOperation      int      `json:"per_operation"`
+	Total             int      `json:"total"`
+	NoToolsOperations []string `json:"no_tools_operations,omitempty"`
+}
+
+func (l journeyToolLimits) perOperation(operation string) int {
+	for _, name := range l.NoToolsOperations {
+		if name == operation {
+			return 0
+		}
+	}
+	return l.PerOperation
 }
 
 type journeyToolGate struct {
@@ -47,6 +57,11 @@ func (f *journeyFence) installToolLimits(limits journeyToolLimits) error {
 			return errors.New("invalid fixed tool operation scope")
 		}
 		seen[operation] = true
+	}
+	for _, operation := range limits.NoToolsOperations {
+		if !seen[operation] || !strings.HasSuffix(operation, "/resume") {
+			return errors.New("invalid no-tool operation scope")
+		}
 	}
 	f.tools = &journeyToolGate{limits: limits, operations: map[string]int{}, calls: map[string]bool{}, completed: map[string]bool{}}
 	return nil
@@ -151,7 +166,7 @@ func (f *journeyFence) reserveTools(calls []string) error {
 		f.stop("protocol_error", time.Now().UnixNano())
 		return errors.New("invalid tool reservation")
 	}
-	if g.operations[operation]+len(calls) > g.limits.PerOperation || g.reserved+len(calls) > g.limits.Total {
+	if g.operations[operation]+len(calls) > g.limits.perOperation(operation) || g.reserved+len(calls) > g.limits.Total {
 		f.journal = append(f.journal, map[string]any{"action": "tool_delivery_rejected", "operation": operation, "count": len(calls), "at_ns": time.Now().UnixNano()})
 		f.mu.Unlock()
 		f.stop("tool_budget_exhausted", time.Now().UnixNano())
@@ -192,8 +207,9 @@ func (f *journeyFence) toolSnapshotLocked() map[string]any {
 	}
 	return map[string]any{"installed": true, "per_operation": g.limits.PerOperation, "batch_max": g.limits.Total,
 		"reserved": g.reserved, "completed": len(g.completed), "operations": operations, "scope": "fixed trusted task/resume slots, never public session IDs",
-		"delivery": "complete SSE event inspected before forwarding; JSON bounded before forwarding",
-		"refunds":  false, "handoffs_direct": "not_applicable", "handoffs_fusion": "separate engine limit; not public tools"}
+		"no_tools_operations": append([]string(nil), g.limits.NoToolsOperations...),
+		"delivery":            "complete SSE event inspected before forwarding; JSON bounded before forwarding",
+		"refunds":             false, "handoffs_direct": "not_applicable", "handoffs_fusion": "separate engine limit; not public tools"}
 }
 
 // Holds one bounded SSE event, NOT the complete streaming response. Original

@@ -30,6 +30,7 @@ type approvedJourneyPlan struct {
 		Sidekick string `json:"sidekick"`
 	} `json:"models"`
 	Clients             []string          `json:"clients"`
+	JourneySet          string            `json:"journey_set"`
 	ReferencePricingSHA string            `json:"reference_pricing_sha256"`
 	GroupPricingSHA     string            `json:"group_pricing_sha256"`
 	ToolBudget          journeyToolLimits `json:"tool_budget"`
@@ -42,6 +43,7 @@ type approvedJourneyPlan struct {
 		Handoffs    int     `json:"handoffs_per_turn"`
 		LocalUSD    float64 `json:"local_usd"`
 		TurnUSD     float64 `json:"turn_usd"`
+		CLISeconds  int     `json:"cli_seconds"`
 	} `json:"limits"`
 }
 
@@ -100,6 +102,10 @@ func journeyPricingProof(t *testing.T, app *application, key string, models []st
 func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key, password string, keyID, accountID int64, catalog devin.CatalogSnapshot) {
 	t.Helper()
 	plan := approvedPlan(t)
+	cliSeconds := plan.Limits.CLISeconds
+	if cliSeconds == 0 {
+		cliSeconds = 150
+	}
 	for _, uid := range []string{plan.Models.Direct, plan.Models.Lead, plan.Models.Sidekick} {
 		_, err := selectSmokeModel(eligibleAgentModels(catalog.Models), uid, plan.Limits.Output)
 		require.NoError(t, err, "every exact approved model must be granted and tool capable; do not silently substitute a model")
@@ -150,6 +156,9 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 	for _, client := range plan.Clients {
 		for _, kind := range []string{"direct", "fusion"} {
 			profiles := []string{"project"}
+			if client == "opencode" && kind == "fusion" && plan.JourneySet == "core_with_long_v1" {
+				profiles = append(profiles, "long")
+			}
 			if client == "omp" {
 				profiles = []string{"default", "compatibility"}
 			}
@@ -172,13 +181,17 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					ui := journeyUIServer(t, app.base, admission.server.URL)
 					script, err := filepath.Abs("../../../tools/devin-e2e-clients/journey.py")
 					require.NoError(t, err)
-					ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+					ctx, cancel := context.WithTimeout(context.Background(), time.Duration(2*cliSeconds+60)*time.Second)
 					defer cancel()
 					stage := "task"
 					if mode == "plan" {
 						stage = "handoff"
 					}
-					cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", client, "--model", model, "--ui-url", ui.URL, "--profile", configProfile, "--stage", stage, "--upstream", "real")
+					uiProfile, projectKind := configProfile, "short"
+					if configProfile == "long" {
+						uiProfile, projectKind = "project", "long"
+					}
+					cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", client, "--model", model, "--ui-url", ui.URL, "--profile", uiProfile, "--stage", stage, "--upstream", "real", "--project-kind", projectKind, "--cli-seconds", fmt.Sprint(cliSeconds))
 					gracefulJourneyCommand(cmd)
 					for _, variable := range os.Environ() {
 						name, _, _ := strings.Cut(variable, "=")
@@ -229,6 +242,9 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					if mode == "live" && kind == "fusion" && forwarded > 0 {
 						report["fusion_execution"] = snapshotFusionAudit(budget.db, keyID, records, true)
 					}
+					if configProfile == "long" && mode == "live" {
+						report["public_context_witness"] = longPublicContext(directory, records, report)
+					}
 					savePrivateAgentUsage(t, app, keyID, client, kind)
 					require.NoError(t, parseErr, "retain private structural evidence; never repeat an unknown send")
 					require.NoError(t, cleanupErr, "client cleanup not verified; stop this batch")
@@ -245,6 +261,9 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 						return
 					}
 					require.Equal(t, "passed", report["status"])
+					if configProfile == "long" {
+						require.Equal(t, true, report["public_context_witness"].(map[string]any)["complete"])
+					}
 					if kind == "direct" {
 						require.Eventually(t, func() bool {
 							var current int
