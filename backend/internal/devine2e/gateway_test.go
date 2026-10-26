@@ -542,6 +542,10 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 		})
 		t.Run("configured_and_inferred_fusion_routing", func(t *testing.T) {
 			profile := fusion.DefaultProfile("fusion-e2e-configured", model, model)
+			var resumeOldWriter func() map[string]any
+			if fixture != nil {
+				resumeOldWriter = delayedDevinCachePublication(t, a, key, accountID, model, profile.PublicModel)
+			}
 			current := api(t, a, "GET", fmt.Sprintf("/admin/accounts/%d", accountID), admin, nil)
 			var extra map[string]any
 			require.NoError(t, json.Unmarshal([]byte(current.Get("extra").Raw), &extra))
@@ -560,11 +564,24 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 						"input_price": 0.000001, "output_price": 0.000002,
 					}},
 				})
+				publication := map[string]any{}
+				if resumeOldWriter != nil {
+					publication = resumeOldWriter()
+				}
+				defer func() { writeAgentArtifact(t, "fusion-delayed-publication.json", publication) }()
 				fixture.mu.Lock()
 				before := len(fixture.chats)
 				fixture.mu.Unlock()
 				body := request(t, a, "POST", "/v1/responses", key, map[string]any{"model": profile.PublicModel, "input": "Reply with E2E_OK only."}, 400)
+				publication["public_error_code"] = gjson.GetBytes(body, "error.code").String()
+				fixture.mu.Lock()
+				publication["native_calls_added"] = len(fixture.chats) - before
+				fixture.mu.Unlock()
 				require.Equal(t, "devin_fusion_pricing_unavailable", gjson.GetBytes(body, "error.code").String())
+				if resumeOldWriter != nil {
+					require.Equal(t, true, publication["stale_write_rejected"], "late row publication must be fenced")
+					require.Equal(t, true, publication["configured_route_preserved"], "cached model grant must retain the committed profile")
+				}
 				require.True(t, strings.Contains(gjson.GetBytes(body, "error.message").String(), model), "missing physical UID must be reported; body withheld")
 				fixture.mu.Lock()
 				defer fixture.mu.Unlock()
