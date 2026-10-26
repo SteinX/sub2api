@@ -28,6 +28,7 @@ class Rpc:
         self.error_http_status = None
         self.error_vocabulary = set()
         self.serial = 0
+        self.closing = False
         self.control = batch_control.current()
         self.tools = ToolEvidence(directory/'workspace', helpers.TEST_COMMAND)
         self.deadline = time.monotonic() + 180
@@ -56,15 +57,14 @@ class Rpc:
 
     def consume(self):
         size = 0
-        for raw in iter(lambda: self.proc.stdout.readline(4 * 1024 * 1024 + 1), b''):
-            size += len(raw)
-            if len(raw) > 4 * 1024 * 1024 or size > 32 * 1024 * 1024:
-                self.failed = True
-                self.control.stop('reader_error')
-                self.h.kill_child(self.proc)
-                return
-            try:
+        try:
+            for raw in iter(lambda: self.proc.stdout.readline(4 * 1024 * 1024 + 1), b''):
+                size += len(raw)
+                if len(raw) > 4 * 1024 * 1024 or size > 32 * 1024 * 1024:
+                    raise ValueError('reader_limit')
                 event = json.loads(raw)
+                if not isinstance(event,dict):
+                    raise ValueError('event_not_object')
                 tool = self.tools.observe(event)
                 self.control.tool(tool)
                 self.control.observe_terminal(event)
@@ -73,11 +73,20 @@ class Rpc:
                     self.h.kill_child(self.proc)
                     return
                 self.events.put(event, timeout=1)
-            except (ValueError, UnicodeDecodeError, queue.Full):
-                self.parse_errors += 1
-                self.control.stop('parse_error')
-                self.h.kill_child(self.proc)
-                return
+            if not self.closing:
+                self.reader_failed('control_lost')
+        except (ValueError,TypeError,AttributeError,OSError,queue.Full):
+            self.parse_errors += 1
+            self.reader_failed('reader_error')
+
+    def reader_failed(self, reason):
+        self.failed=True
+        try:
+            self.control.stop(reason)
+        except (ValueError,OSError):
+            pass  # Unknown control outcome is never resent.
+        finally:
+            self.h.kill_child(self.proc)
 
     def call(self, kind, local_prompt=False, **fields):
         model_operation = kind in {'prompt', 'compact'}
@@ -89,8 +98,7 @@ class Rpc:
                 self.control.end(True)
             return result
         except (ValueError, OSError):
-            self.control.stop('protocol_error')
-            self.h.kill_child(self.proc)
+            self.reader_failed('protocol_error')
             raise
 
     def _call(self, kind, local_prompt=False, **fields):
@@ -159,6 +167,7 @@ class Rpc:
         raise ValueError('rpc_timeout')
 
     def close(self, abrupt=False):
+        self.closing=True
         clean = True
         try:
             if self.proc.poll() is None:

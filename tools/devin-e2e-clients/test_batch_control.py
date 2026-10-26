@@ -55,5 +55,24 @@ class BatchControlTests(unittest.TestCase):
         finally:
             control.finish(False)
 
+    def test_unknown_control_reply_immediately_closes_the_parent_channel(self):
+        for reply in [b'null\n',None]:
+            with self.subTest(reply=reply):
+                left,right=socket.socketpair();left.settimeout(.03);right.settimeout(2)
+                control=batch_control.Control();control.socket=left;control.reader=left.makefile('rb')
+                eof=[]
+                def parent():
+                    right.recv(4096)
+                    if reply is not None: right.sendall(reply)
+                    eof.append(right.recv(4096))
+                thread=threading.Thread(target=parent);thread.start()
+                try:
+                    with self.assertRaisesRegex(ValueError,'batch_control_lost'):control.begin()
+                    thread.join(timeout=3)
+                    self.assertFalse(thread.is_alive());self.assertEqual([b''],eof)
+                    self.assertTrue(control.stopped)
+                finally:
+                    right.close();control.finish(False)
+
 
 if __name__=='__main__': unittest.main()

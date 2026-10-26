@@ -34,9 +34,23 @@ class Control:
                 line = self.reader.readline(4097)
                 if len(line)>4096 or not line.endswith(b'\n'):
                     raise ValueError('control_incomplete')
-                accepted = json.loads(line).get('accepted') is True
+                decision=json.loads(line)
+                if not isinstance(decision,dict) or set(decision)!={'accepted'} or type(decision['accepted']) is not bool:
+                    raise ValueError('control_invalid_decision')
+                accepted = decision['accepted']
             except (OSError, ValueError):
                 self.stopped = True
+                # Force EOF at the trusted parent even if only our decoding
+                # failed. Do not leave a live but unusable control connection.
+                try:
+                    self.socket.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                self.socket.close()
+                try:
+                    self.reader.close()
+                except OSError:
+                    pass
                 raise ValueError('batch_control_lost') from None
             if not accepted:
                 self.stopped = True

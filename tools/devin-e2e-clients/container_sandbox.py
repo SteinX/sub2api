@@ -287,7 +287,7 @@ def popen(command,directory,env,*,gateway=None,on_start=None,**kwargs):
         args+=['--mount','type=bind,src='+str(directory)+',dst='+str(directory)]
         if relay:
             args+=['--mount','type=bind,src='+str(private/'relay.sock')+',dst=/run/devin-fixed-relay.sock,readonly']
-        child_env={k:v for k,v in env.items() if not k.startswith('DOCKER_') and k not in {'DEVIN_JOURNEY_CONTAINER_REGISTRY','DEVIN_JOURNEY_PROCESS_REGISTRY','DEVIN_JOURNEY_UI_PASSWORD'}}
+        child_env={k:v for k,v in env.items() if not k.startswith('DOCKER_') and k not in {'DEVIN_JOURNEY_CONTAINER_REGISTRY','DEVIN_JOURNEY_PROCESS_REGISTRY','DEVIN_JOURNEY_UI_PASSWORD','DEVIN_JOURNEY_CONTROL_SOCKET'}}
         for name in sorted(child_env): args+=['--env',name]
         args += [IMAGE,str(ROOT/'container_entry.py'),str(relay.port if relay else 0),*command]
         # Only the explicitly supplied child environment reaches the container.
