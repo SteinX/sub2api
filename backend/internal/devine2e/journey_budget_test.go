@@ -177,9 +177,31 @@ type journeyResponseBody struct {
 	data      []byte
 	eof       bool
 	oversized bool
+	preloaded bool
+}
+
+// A normal SDK may close its downstream stream immediately after [DONE]. The
+// guarded observer must finish reading the owned gateway response first, rather
+// than confusing that normal client behavior with an unknown upstream send.
+// This buffers only the test admission boundary, preserves original bytes, and
+// deliberately does not claim unbuffered first-token/stream timing coverage.
+func preloadJourneyResponse(body io.ReadCloser) (*journeyResponseBody, error) {
+	data, err := io.ReadAll(io.LimitReader(body, (4<<20)+1))
+	_ = body.Close()
+	capture := &journeyResponseBody{ReadCloser: io.NopCloser(bytes.NewReader(data)), data: data, eof: err == nil, preloaded: true}
+	if len(data) > 4<<20 {
+		capture.data = nil
+		capture.eof = false
+		capture.oversized = true
+		return capture, errors.New("guarded response exceeds capture bound")
+	}
+	return capture, err
 }
 
 func (b *journeyResponseBody) Read(p []byte) (int, error) {
+	if b.preloaded {
+		return b.ReadCloser.Read(p)
+	}
 	n, err := b.ReadCloser.Read(p)
 	if len(b.data)+n <= 4<<20 {
 		b.data = append(b.data, p[:n]...)

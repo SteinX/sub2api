@@ -3,6 +3,7 @@
 package devine2e
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -281,4 +282,51 @@ func TestJourneyStopExpiredDeadlineAndSnapshotDoNotShareMutableState(t *testing.
 	require.False(t, changed, "a snapshot handed to JSON encoding must not share the stop goroutine's mutable map")
 	require.Equal(t, true, f.snapshot()["owned_backend_death_verified"])
 	require.Equal(t, "deadline", f.snapshot()["first_failure"].(map[string]any)["reason"])
+}
+
+func TestJourneyStopCapturesSourceBeforeClientClosesAtDone(t *testing.T) {
+	wire := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"public-call\"}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+	for _, truncated := range []bool{false, true} {
+		reader := io.Reader(bytes.NewReader(wire))
+		if truncated {
+			reader = io.MultiReader(reader, brokenJourneyReader{})
+		}
+		capture, err := preloadJourneyResponse(io.NopCloser(reader))
+		if truncated {
+			require.Error(t, err)
+			require.False(t, capture.eof)
+			continue
+		}
+		require.NoError(t, err)
+		// A client can close without asking for another transport EOF read.
+		output := make([]byte, len(wire))
+		n, err := capture.Read(output)
+		require.NoError(t, err)
+		require.Equal(t, len(wire), n)
+		require.NoError(t, capture.Close())
+		require.True(t, capture.eof)
+		require.Equal(t, wire, capture.data)
+		calls, err := journeyResponseCalls(capture.data, true)
+		require.NoError(t, err)
+		require.Equal(t, []string{callHash("public-call")}, calls)
+	}
+}
+
+func TestJourneyStopPreloadDoesNotAcceptLimitOrCancelledSourceEOF(t *testing.T) {
+	tooLarge, err := preloadJourneyResponse(io.NopCloser(bytes.NewReader(make([]byte, (4<<20)+1))))
+	require.Error(t, err)
+	require.True(t, tooLarge.oversized)
+	require.False(t, tooLarge.eof)
+	require.Nil(t, tooLarge.data)
+	pipe, writer := io.Pipe()
+	go func() { _, _ = writer.Write([]byte("data: [DONE]\n\n")); _ = writer.CloseWithError(context.Canceled) }()
+	capture, err := preloadJourneyResponse(pipe)
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, capture.eof)
+}
+
+type brokenJourneyReader struct{}
+
+func (brokenJourneyReader) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("synthetic uncertain source close")
 }

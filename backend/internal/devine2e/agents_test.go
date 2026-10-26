@@ -124,7 +124,14 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 				}
 			}
 			p.mu.Unlock()
-			if p.runBudget != nil || p.fence != nil {
+			if p.fence != nil {
+				var err error
+				record.response, err = preloadJourneyResponse(response.Body)
+				if err != nil {
+					return err
+				}
+				response.Body = record.response
+			} else if p.runBudget != nil {
 				record.response = &journeyResponseBody{ReadCloser: response.Body}
 				response.Body = record.response
 			}

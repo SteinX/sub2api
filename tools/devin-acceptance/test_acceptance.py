@@ -26,7 +26,7 @@ def evidence(live=False):
                     'final_text_bytes': 35, 'final_text_sha256': DIGEST, 'project_nonce_sha256': DIGEST,
                     'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0, 'plugin_runtime_started': True}
         case = {'id': ident, 'model_kind': kind, 'status': 'passed', 'artifact_sha256': DIGEST,
-                'batch_guard':{'installed':True,'stopped':False,'phase_active':False,'public_inflight':False,'pending_tools':0,'first_failure':None},
+                'batch_guard':{'installed':True,'response_observation':'original_stream_with_source_proof' if live else 'bounded_response_buffer','buffered_transport':not live,'stopped':False,'phase_active':False,'public_inflight':False,'pending_tools':0,'first_failure':None},
                 'source_before_task_sha256': '1' * 64, 'source_after_task_sha256': '2' * 64,
                 'source_changed_by_task': True, 'project_nonce_sha256': DIGEST,
                 'protected_project_sha256': {name: DIGEST for name in ['requirements.json','test_project.py','run_tests.py']},
@@ -102,6 +102,11 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_buffered_guard_does_not_certify_unmodified_live_transport(self):
+        report,_=evidence(live=True);case=report['cases'][0]
+        case['batch_guard'].update(buffered_transport=True,response_observation='bounded_response_buffer')
+        self.assertIn(case['id']+':unbuffered_transport_not_verified',gate.validate(report,'user_e2e',COMMIT,TREE))
+
     def test_missing_stopped_or_unsettled_batch_guard_cannot_certify_a_case(self):
         for change in [None,{'stopped':True},{'pending_tools':1},{'public_inflight':True},{'phase_active':True},{'first_failure':{'reason':'tool_error'}}]:
             report,_=evidence();case=report['cases'][0]

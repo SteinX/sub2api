@@ -268,6 +268,15 @@ func journeyResponseCalls(data []byte, stream bool) ([]string, error) {
 }
 
 func (f *journeyFence) finishResponse(record *agentRequest) {
+	protocolComplete := record.response != nil && validJourneyCompletion(record.response.data, record.Stream)
+	sourceEOF := record.response != nil && record.response.eof
+	bytesRead := 0
+	if record.response != nil {
+		bytesRead = len(record.response.data)
+	}
+	f.mu.Lock()
+	f.journal = append(f.journal, map[string]any{"action": "response_end", "at_ns": time.Now().UnixNano(), "http_status": record.Status, "stream": record.Stream, "source_eof": sourceEOF, "protocol_complete": protocolComplete, "captured_bytes": bytesRead})
+	f.mu.Unlock()
 	calls, err := journeyResponseCalls(nil, false)
 	if record.response != nil && record.response.eof && record.Status < 400 {
 		calls, err = journeyResponseCalls(record.response.data, record.Stream)
@@ -494,7 +503,7 @@ func (f *journeyFence) snapshot() map[string]any {
 			first[key] = value
 		}
 	}
-	return map[string]any{"installed": true, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
+	return map[string]any{"installed": true, "response_observation": "bounded_response_buffer", "buffered_transport": true, "unverified_transport": []string{"unbuffered stream timing", "early downstream cancellation"}, "response_buffer_max_bytes": 4 << 20, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
 		"pending_tools": len(f.pending), "owned_backend_death_verified": f.backendDead, "journal": append([]map[string]any(nil), f.journal...),
 		"guarantee": "no public admission after gate closure; owned backend death stops local background sends; already remote inflight remains unknown"}
 }
