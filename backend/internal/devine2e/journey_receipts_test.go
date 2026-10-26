@@ -74,6 +74,7 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 				report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, records, false)
 			}
 			report["batch_guard"] = fence.snapshot()
+			report["fixture_batch_billing"] = snapshotMockBilling(t, app, fixture, keyID)
 			writeAgentArtifact(t, "journey-test-receipt-"+scenario+".json", report)
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)

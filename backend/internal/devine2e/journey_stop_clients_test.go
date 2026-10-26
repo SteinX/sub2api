@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nativeFixture, key, password string) {
+func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nativeFixture, key, password string, keyID int64) {
 	t.Helper()
 	for _, client := range []string{"opencode", "omo", "omp"} {
 		t.Run("first_tool_error_"+client, func(t *testing.T) {
@@ -56,6 +56,7 @@ func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nat
 			report := map[string]any{}
 			parseErr := json.Unmarshal(output, &report)
 			report["batch_guard"] = fence.snapshot()
+			report["fixture_batch_billing"] = snapshotMockBilling(t, app, fixture, keyID)
 			forwarded, _ := admission.snapshot()
 			fixture.mu.Lock()
 			nativeCalls := len(fixture.chats) - before
