@@ -120,6 +120,8 @@ def validate(report, mode, commit, tree, state=None):
                 errors.append(ident + ':fusion_roles_unverified')
         for phase in ['task', 'resume']:
             result = case.get(phase) or {}
+            if client=='omo' and result.get('plugin_runtime_started') is not True:
+                errors.append(ident+':'+phase+'_omo_plugin_not_observed')
             if (result.get('exit_code') != 0 or result.get('normal_stop') is not True or result.get('event_error') is not False
                     or result.get('timed_out') is not False or result.get('final_text_matches') is not True
                     or result.get('parse_errors') != 0 or result.get('session_changed') is not False

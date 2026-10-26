@@ -52,7 +52,7 @@ class Rpc:
 
     def consume(self):
         size = 0
-        for raw in self.proc.stdout:
+        for raw in iter(lambda: self.proc.stdout.readline(4 * 1024 * 1024 + 1), b''):
             size += len(raw)
             if len(raw) > 4 * 1024 * 1024 or size > 32 * 1024 * 1024:
                 self.failed = True

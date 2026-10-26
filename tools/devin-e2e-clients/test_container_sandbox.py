@@ -5,6 +5,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -21,9 +22,34 @@ class SandboxRegistryTests(unittest.TestCase):
             with patch.object(sandbox,'docker') as docker:
                 self.assertFalse(sandbox.cleanup_registry(path)); docker.assert_not_called()
 
+    def test_output_limit_is_shared_across_stdout_and_stderr(self):
+        script="import os,time;os.write(1,b'a'*2048);os.write(2,b'b'*2048);time.sleep(30)"
+        proc=subprocess.Popen([sys.executable,'-c',script],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+        with self.assertRaisesRegex(ValueError,'project_output_limit_exceeded'):
+            sandbox.collect_output(proc,['synthetic-output'],output_limit=3072,timeout=3)
+        self.assertIsNotNone(proc.poll())
+
+    def test_output_capture_handles_input_and_reports_real_exit(self):
+        script="import sys;sys.stdout.buffer.write(sys.stdin.buffer.read());sys.stderr.write('stderr');sys.exit(7)"
+        proc=subprocess.Popen([sys.executable,'-c',script],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+        result=sandbox.collect_output(proc,['synthetic-input'],input_data=b'bounded-input',timeout=3)
+        self.assertEqual((7,b'bounded-input',b'stderr'),(result.returncode,result.stdout,result.stderr))
+
 
 @unittest.skipUnless(os.environ.get('DEVIN_SANDBOX_INTEGRATION')=='true','explicit local Docker boundary suite')
 class RootlessSandboxIntegrationTests(unittest.TestCase):
+    def test_model_written_oracle_output_limit_cleans_container_and_disables_docker_log(self):
+        with tempfile.TemporaryDirectory() as private,tempfile.TemporaryDirectory() as project:
+            directory=Path(project);(directory/'workspace').mkdir(); registry=Path(private)/'containers'
+            (directory/'workspace/price_math.py').write_text("import os,time\nwhile True: os.write(2,b'x'*65536)\n")
+            with patch.dict(os.environ,{'DEVIN_JOURNEY_CONTAINER_REGISTRY':str(registry)}):
+                proc=sandbox.popen(['python3','-c','import price_math'],directory,journey.project_environment(directory),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                config=json.loads(sandbox.docker(['inspect',proc.cid]).stdout)[0]
+                self.assertEqual('none',config['HostConfig']['LogConfig']['Type'])
+                with self.assertRaisesRegex(ValueError,'project_output_limit_exceeded'):
+                    sandbox.collect_output(proc,['model-written-oracle'],output_limit=4096,timeout=5)
+                self.assertTrue(sandbox.cleanup_registry(registry))
+                self.assertEqual(b'',sandbox.docker(['ps','-aq','--filter','label='+sandbox.LABEL+'='+proc.scope]).stdout.strip())
     def test_project_cannot_read_parent_private_file_or_native_environment(self):
         if os.geteuid()==0: self.skipTest('rootless boundary is exercised by an ordinary task user')
         with tempfile.TemporaryDirectory() as parent,tempfile.TemporaryDirectory() as project:

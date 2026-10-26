@@ -18,7 +18,7 @@ make test-devin-user-journeys-mock
 make test-devin-acceptance
 ```
 
-需要 Linux x64、Node 24、Python 3、Go、Docker Compose、pnpm 9 和已安装的 Chromium/Chrome。Playwright 只驱动已有浏览器；可显式设置 `CHROMIUM_EXECUTABLE_PATH`，不下载或放宽浏览器安全设置。工作区及配置均为临时目录。root 运行时项目代码、客户端和浏览器使用低权限用户；普通用户的 OMO 测试拒绝可写个人 HOME（一次性 GitHub runner 除外）。保留环境代理、CA 和网络限制。
+需要 Linux x64、Node 24、Python 3、Go、Docker Compose、pnpm 9 和已安装的 Chromium/Chrome。Playwright 只驱动已有浏览器；可显式设置 `CHROMIUM_EXECUTABLE_PATH`，不下载或放宽浏览器安全设置。工作区及配置均为临时目录。root 运行时项目代码、客户端和浏览器使用低权限用户；普通用户使用下述受限容器，个人 HOME 不挂载且不可写。保留环境代理、CA 和网络限制。
 
 浏览器加载正常 Vite 构建的完整应用，提交真实登录表单，经正常路由进入 Key 列表并选择 Key，再由生产 `UseKeyModal` 调用公共模型目录 API。没有组件挂载 harness、fetch mock、注入 Pinia 或注入登录态。它选择模型、环境变量 Key、项目工作区、精确测试命令和 OMP 模式，然后点击真实复制按钮，核对剪贴板与页面内容相同。运行器只落盘这些文件；不会修补配置。模型上游为脚本化决策，工具由真实客户端执行。
 
@@ -79,11 +79,13 @@ python3 tools/devin-acceptance/acceptance.py tag-note --mode user_e2e \
 
 UID 0 的既有路径通过把浏览器、CLI、工程代码降为 UID 65534 来隔离原生凭据和账本。普通云端用户不能仅取消这项检查：相同 UID 的未隔离进程可读取项目外文件和父进程环境。当前云环境的 user namespace 因 `uid_map` 只读不可用，Landlock 也未提供；没有修改系统设置或请求提权。
 
-非 root 路径使用环境已有的本地 Docker 权限运行受限客户端子容器。Daemon 没有改配置，也不声称它是 rootless Docker daemon。容器使用调用者 UID、`cap-drop=ALL`、`no-new-privileges`、只读根、独立 PID namespace 和 `network=none`，限制内存、CPU、PID 和输出。只挂载当前合成工程及客户端状态目录为可写；锁定客户端、系统库、公开 CA 和 Chromium 配置只读。个人 HOME、Docker socket、原生 PAT、数据库／Redis 密码、批准文件、账本和私有 registry 不挂载或传给模型。
+非 root 路径使用环境已有的本地 Docker 权限运行受限客户端子容器。Daemon 没有改配置，也不声称它是 rootless Docker daemon。容器使用调用者 UID、`cap-drop=ALL`、`no-new-privileges`、只读根、独立 PID namespace 和 `network=none`，限制内存、CPU、PID 和输出。工程 oracle 的 stdout/stderr 在宿主共享 2 MiB 上限，容器原始日志禁用；超限终止并验证 CID 清理。只挂载当前合成工程及客户端状态目录为可写；锁定客户端、系统库、公开 CA 和 Chromium 配置只读。个人 HOME、Docker socket、原生 PAT、数据库／Redis 密码、批准文件、账本和私有 registry 不挂载或传给模型。
 
 浏览器在独立容器内用 stdin 收到临时 UI 登录信息，其 profile 留在容器临时存储，退出时删除。CLI 不获得 UI 密码或浏览器认证状态；工程测试和 oracle 也在隔离容器运行。容器没有普通网络出口，只经唯一 Unix socket 连接可信父进程的固定产品 UI relay；容器内仍使用产品复制出来的原始 localhost 配置，不手写或修补它。原生服务继续由宿主后端通过原代理／CA 及 HTTPS 单域限制访问。
 
 准备过程为 `python3 tools/devin-e2e-clients/container_sandbox.py prepare`。它使用固定公开镜像 digest，验证实际命名空间、私有文件／父进程不可见、HOME 不可写和 capabilities 边界。真实入口在接触原生凭据前要求这项探测通过；只准备沙箱不授权认证或生成。镜像缺失、Docker 不可用或探测失败时停止，不回退到同 UID 裸进程。需要 Linux x64、同文件系统的本地 Docker daemon 和已有 Node/Chromium。
+
+公开客户端依赖通过 `npm ci --ignore-scripts --omit=optional` 预先安装，临时 OpenCode 目录复用锁定的只读包缓存，不改写产品复制的配置，也不允许模型进程联网下载。OMO 还必须观察本次进程的插件启动记录；仅安装包、配置含插件名或宿主完成任务不能算插件通过。
 
 容器先 `create`，持久登记完整 CID 和随机 scope、检查限制后才 `start`。进程退出／超时的清理核对容器真实状态，父进程异常时仍按未挂载的私有 registry 清理，仅操作匹配 scope 的对象。后台工具不能靠 Docker 客户端退出逃逸。宿主读写项目采用有界、不跟随链接的目录句柄；尤其压力文件创建也不能通过模型留下的 symlink 越出工程。
 
@@ -117,7 +119,7 @@ UID 0 的既有路径通过把浏览器、CLI、工程代码降为 UID 65534 来
 
 明确取得批准后，维护者记录批准文件：`schema_version:1`、`approved:true`、唯一 `approval_id`、`mode`、24 小时内的 `expires_at`、规范化计划 `plan_sha256`，以及 `native_auth`、`temporary_credential_storage`、`local_preview_accounts` scopes；`live` 另需 `model_generation`。这是维护者可审计的操作联锁，不是授权签名。每个批准 ID 固定使用 `.cache/devin-approved-runs/<ID>.json`，独占创建，不能更换产物目录重置。新 ID 需要新的批准，不能用于重试不明请求。
 
-批准后才可安全注入原生凭据引用，设置 `DEVIN_JOURNEY_PLAN_FILE`、`DEVIN_JOURNEY_APPROVAL_FILE` 和 `DEVIN_E2E_ARTIFACTS`（新的私有目录）；有批准快照时再设置 `DEVIN_JOURNEY_GROUP_PRICING_FILE`。真实值不放到命令行或配置文件。root 启动器保护原生凭据和账本，浏览器、CLI、工程执行降为低权限用户，保留平台代理和 CA。`--validate-only` 不会启动服务或生成验收证据。
+批准后才可安全注入原生凭据引用，设置 `DEVIN_JOURNEY_PLAN_FILE`、`DEVIN_JOURNEY_APPROVAL_FILE` 和 `DEVIN_E2E_ARTIFACTS`（新的私有目录）；有批准快照时再设置 `DEVIN_JOURNEY_GROUP_PRICING_FILE`。真实值不放到命令行或配置文件。启动器保护原生凭据和账本；root 路径降为低权限用户，普通用户路径使用受限容器，保留平台代理和 CA。`--validate-only` 不会启动服务或生成验收证据。
 
 所有用例共用同一持久账本，以及一个临时公共 Key 的真实本地配额预留。HTTP/SSE 错误、缺正常终态、发送不明、客户端失败、用量读取失败或预算耗尽均停止，不自动重试；SDK 后续请求也无法越过已停止账本。主摘要和短摘要意图排队，但合计计数，实际转发并发仍为一。退出清理客户端、后端及临时 SQL/Redis；结构化记录仅留私有目录。本地用量不是供应商扣费硬上限。
 

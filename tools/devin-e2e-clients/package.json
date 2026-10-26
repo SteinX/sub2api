@@ -4,14 +4,15 @@
   "version": "0.0.0",
   "description": "Pinned Linux x64 clients; version selection reuses PR #17 f2de531383945df2fb0b456ab9c417ee013bdebb",
   "dependencies": {
-    "opencode-ai": "1.19.4",
-    "opencode-linux-x64": "1.19.4",
-    "oh-my-opencode": "5.1.44",
-    "oh-my-opencode-linux-x64": "5.1.44",
     "@oh-my-pi/pi-coding-agent": "18.12.6",
     "@oh-my-pi/pi-natives-linux-x64": "18.12.6",
-    "bun": "1.4.4",
+    "@opencode-ai/plugin": "1.19.4",
     "@oven/bun-linux-x64": "1.4.4",
+    "bun": "1.4.4",
+    "oh-my-opencode": "5.1.44",
+    "oh-my-opencode-linux-x64": "5.1.44",
+    "opencode-ai": "1.19.4",
+    "opencode-linux-x64": "1.19.4",
     "playwright-core": "1.64.1"
   }
 }

@@ -113,8 +113,12 @@ def project_environment(directory):
 def run_project_python(directory, arguments, input_data=None):
     if os.geteuid()!=0:
         return container_sandbox.run(['python3',*arguments],directory,project_environment(directory),input_data=input_data,timeout=15)
-    return subprocess.run(['python3', *arguments], cwd=directory / 'workspace', env=project_environment(directory),
-                          input=input_data, capture_output=True, timeout=15, **isolation())
+    command=['python3',*arguments]
+    proc=start_child(command,directory,project_environment(directory),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    try:
+        return container_sandbox.collect_output(proc,command,input_data=input_data,timeout=15)
+    finally:
+        ACTIVE.discard(proc)
 
 
 def start_child(command,directory,env,*,gateway=None,client=None,**kwargs):
@@ -212,8 +216,17 @@ def prepare(directory):
     (workspace / "test_project.py").write_text(TEST_SOURCE)
     (workspace / "run_tests.py").write_text(TEST_RUNNER)
     expected = {"nonce": data["nonce"], "totals": [a - b for a, b in data["rows"]]}
-    for name in ("config/opencode", "data", "cache", "state", "claude", "omp-agent", "omp-root"):
+    for name in ("config/opencode", "data", "cache/client-tmp", "state", "claude", "omp-agent", "omp-root"):
         (directory / name).mkdir(parents=True, exist_ok=True)
+    # Install dependencies before credential use via npm ci. Mirror its genuine
+    # locked metadata into disposable client directories; Npm.install can then
+    # verify them without reaching a registry from the networkless client.
+    for name in ['package.json','package-lock.json']:
+        (directory/'config/opencode'/name).write_bytes((ROOT/name).read_bytes())
+    (directory/'config/opencode/node_modules').symlink_to(ROOT/'node_modules',target_is_directory=True)
+    plugin_cache=directory/'cache/opencode/packages'/('oh-my-opencode@'+PINS['oh-my-opencode'])
+    plugin_cache.mkdir(parents=True)
+    (plugin_cache/'node_modules').symlink_to(ROOT/'node_modules',target_is_directory=True)
     if os.geteuid() == 0:
         for base, dirs, files in os.walk(directory):
             if Path(base) == directory:
@@ -272,6 +285,12 @@ def invoke(args, directory, resume=False):
         env.pop(name, None)
     env["SUB2API_API_KEY"] = os.environ["DEVIN_JOURNEY_GATEWAY_KEY"]
     env["BUN_INSTALL_CACHE_DIR"] = str(directory / "cache/bun")
+    env['TMPDIR']=str(directory/'cache/client-tmp')
+    def plugin_startups():
+        try: data=project_bytes(directory,'cache/client-tmp/oh-my-opencode.log')
+        except FileNotFoundError: return 0
+        return data.count(b'[oh-my-openagent] ENTRY - plugin loading')
+    plugin_before=plugin_startups() if args.client=='omo' else None
     kwargs = isolation(args.client)
     client_started_ns = time.time_ns()
     nonce = json.loads(project_bytes(directory / 'workspace', 'requirements.json'))['nonce']
@@ -287,7 +306,7 @@ def invoke(args, directory, resume=False):
 
     def consume():
         nonlocal size, final_text
-        for raw in proc.stdout:
+        for raw in iter(lambda: proc.stdout.readline(4 * 1024 * 1024 + 1), b''):
             size += len(raw)
             if size > 16 * 1024 * 1024 or len(raw) > 4 * 1024 * 1024:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -365,8 +384,11 @@ def invoke(args, directory, resume=False):
         proc.stdout.close()
         ACTIVE.discard(proc)
     result["exit_code"] = proc.returncode
+    if args.client=='omo':
+        result['plugin_runtime_started']=plugin_startups()>plugin_before
+        result['plugin_runtime_witness']='fresh oh-my-openagent server plugin startup log'
     result["final_text_matches"] = final_text.strip() == ("PROJECT_REVIEWED" if resume else "PROJECT_COMPLETE")
-    result["passed"] = proc.returncode == 0 and result["normal_stop"] and result["final_text_matches"] and not result["event_error"] and not result["timed_out"] and result["parse_errors"] == 0 and not result["session_changed"]
+    result["passed"] = proc.returncode == 0 and result["normal_stop"] and result["final_text_matches"] and not result["event_error"] and not result["timed_out"] and result["parse_errors"] == 0 and not result["session_changed"] and (args.client!='omo' or result['plugin_runtime_started'])
     return result
 
 

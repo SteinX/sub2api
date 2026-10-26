@@ -21,7 +21,7 @@ def evidence(live=False):
         terminal = {'exit_code': 0, 'normal_stop': True, 'final_text_matches': True, 'event_error': False,
                     'timed_out': False, 'parse_errors': 0, 'session_changed': False, 'session_seen': True,
                     'client_session_sha256': DIGEST, 'tools': {'read': 4, 'write': 1, 'bash': 1},
-                    'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0}
+                    'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0, 'plugin_runtime_started': True}
         case = {'id': ident, 'model_kind': kind, 'status': 'passed', 'artifact_sha256': DIGEST,
                 'tier': 'user_e2e' if live else 'client_mock', 'eligible_for_real_e2e': live,
                 'public_model_uid': 'fusion-test' if kind == 'fusion' else 'physical-lead',
@@ -57,6 +57,13 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_installed_omo_package_does_not_prove_plugin_runtime_started(self):
+        for phase in ['task','resume']:
+            report,_=evidence()
+            case=next(c for c in report['cases'] if c['id']=='omo/direct/project')
+            case[phase].pop('plugin_runtime_started')
+            self.assertIn('omo/direct/project:'+phase+'_omo_plugin_not_observed',gate.validate(report,'client_mock',COMMIT,TREE))
+
     def test_direct_case_needs_no_invented_sidekick(self):
         report, state = evidence(True)
         self.assertEqual([], gate.validate(report, 'user_e2e', COMMIT, TREE, state))

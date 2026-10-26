@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import selectors
 import signal
 import socket
 import socketserver
@@ -163,6 +164,10 @@ def runtime_mounts():
     if Path('/etc/fonts').is_dir(): roots.append(('/etc/fonts','/etc/fonts'))
     for path in ['/etc/chromium','/etc/chromium.d']:
         if Path(path).is_dir(): roots.append((path,path))
+    # GitHub's installed Chrome uses a /usr/bin symlink into this public
+    # distribution. Mount that directory, never the surrounding /opt tree.
+    if Path('/opt/google/chrome').is_dir():
+        roots.append(('/opt/google/chrome','/opt/google/chrome'))
     import shutil
     node=Path(shutil.which('node')).resolve()
     if str(node).startswith('/opt/'):
@@ -234,7 +239,7 @@ def popen(command,directory,env,*,gateway=None,on_start=None,**kwargs):
         home=env.get('HOME','/home/agent')
         if home in {'/','/tmp','/usr'} or not home.startswith('/'):
             raise ValueError('unsupported_sandbox_home')
-        args=['create','--interactive','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--network=none',
+        args=['create','--interactive','--log-driver=none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--network=none',
               '--user',str(os.geteuid())+':'+str(os.getegid()),'--pids-limit=256','--memory=2g','--cpus=2',
               '--label',LABEL+'='+scope,'--workdir',str(directory/'workspace'),
               '--tmpfs','/tmp:rw,nosuid,nodev,mode=1777','--tmpfs','/data:ro,nosuid,nodev,mode=555',
@@ -261,7 +266,7 @@ def popen(command,directory,env,*,gateway=None,on_start=None,**kwargs):
         inspect=docker(['inspect',cid])
         if inspect.returncode: raise ValueError('sandbox_container_inspection_failed')
         config=json.loads(inspect.stdout)[0]; host=config['HostConfig']
-        if host['Privileged'] or not host['ReadonlyRootfs'] or host['NetworkMode']!='none' or host.get('PidMode') not in {'','private'} or config['Config']['User']!=str(os.geteuid())+':'+str(os.getegid()) or host.get('CapAdd') or 'ALL' not in host['CapDrop'] or 'no-new-privileges' not in host['SecurityOpt']:
+        if host['Privileged'] or not host['ReadonlyRootfs'] or host['NetworkMode']!='none' or host.get('PidMode') not in {'','private'} or config['Config']['User']!=str(os.geteuid())+':'+str(os.getegid()) or host.get('CapAdd') or 'ALL' not in host['CapDrop'] or 'no-new-privileges' not in host['SecurityOpt'] or host['LogConfig']['Type']!='none':
             raise ValueError('sandbox_container_configuration_mismatch')
         # Complete CID is persisted and inspected before this command can start.
         proc=subprocess.Popen(['docker','--host=unix:///var/run/docker.sock','start','--attach','--interactive',cid],
@@ -276,17 +281,70 @@ def popen(command,directory,env,*,gateway=None,on_start=None,**kwargs):
         raise
 
 
-def run(command,directory,env,*,input_data=None,timeout=15,on_start=None):
-    proc=popen(command,directory,env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,on_start=on_start)
+def collect_output(proc,command,*,input_data=None,timeout=15,output_limit=2*1024*1024):
+    """Bound combined child output in the host, including model-written code.
+
+    Container resource limits do not constrain Python's capture buffers. Drain
+    both pipes without line buffering and stop before retaining excess bytes.
+    """
+    deadline=time.monotonic()+timeout
+    buffers={proc.stdout:bytearray(),proc.stderr:bytearray()}
+    pending=memoryview(input_data or b'')
+    total=0
     try:
-        stdout,stderr=proc.communicate(input_data,timeout=timeout)
-        return subprocess.CompletedProcess(command,proc.returncode,stdout,stderr)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid,signal.SIGTERM)
-        try: proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid,signal.SIGKILL); proc.wait(timeout=5)
+        with selectors.DefaultSelector() as ready:
+            for stream in buffers:
+                os.set_blocking(stream.fileno(),False)
+                ready.register(stream,selectors.EVENT_READ)
+            if pending:
+                os.set_blocking(proc.stdin.fileno(),False)
+                ready.register(proc.stdin,selectors.EVENT_WRITE)
+            else:
+                proc.stdin.close()
+            while ready.get_map():
+                remaining=deadline-time.monotonic()
+                if remaining<=0: raise subprocess.TimeoutExpired(command,timeout)
+                for key,_ in ready.select(remaining):
+                    stream=key.fileobj
+                    if stream is proc.stdin:
+                        try: pending=pending[os.write(stream.fileno(),pending[:65536]):]
+                        except BrokenPipeError: pending=pending[len(pending):]
+                        if not pending:
+                            ready.unregister(stream); stream.close()
+                        continue
+                    chunk=os.read(stream.fileno(),min(65536,output_limit-total+1))
+                    if not chunk:
+                        ready.unregister(stream)
+                        continue
+                    total+=len(chunk)
+                    if total>output_limit:
+                        raise ValueError('project_output_limit_exceeded')
+                    buffers[stream].extend(chunk)
+        proc.wait(timeout=max(.01,deadline-time.monotonic()))
+        return subprocess.CompletedProcess(command,proc.returncode,bytes(buffers[proc.stdout]),bytes(buffers[proc.stderr]))
+    except BaseException:
+        # Removing the CID terminates all descendants even when the attached
+        # Docker client has already exited. Never infer cleanup from its PID.
+        # First release the attach pipes: a flooding child can otherwise block
+        # the daemon's log copier while rm is trying to detach that same client.
+        for stream in [proc.stdin,proc.stdout,proc.stderr]:
+            stream.close()
+        if proc.poll() is None:
+            try: os.killpg(proc.pid,signal.SIGKILL)
+            except ProcessLookupError: pass
+        if isinstance(proc,ContainerProcess):
+            proc.process.wait(timeout=5)
+            proc.cleanup()
+        proc.wait(timeout=5)
         raise
+    finally:
+        for stream in [proc.stdin,proc.stdout,proc.stderr]:
+            stream.close()
+
+
+def run(command,directory,env,*,input_data=None,timeout=15,on_start=None,output_limit=2*1024*1024):
+    proc=popen(command,directory,env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,on_start=on_start)
+    return collect_output(proc,command,input_data=input_data,timeout=timeout,output_limit=output_limit)
 
 
 if __name__=='__main__':
