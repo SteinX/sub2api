@@ -267,3 +267,18 @@ func TestJourneyStopDistinctCaseMayReusePublicToolIDButNotOldAck(t *testing.T) {
 	old.Status = "completed"
 	require.False(t, f.control(old), "old observer cannot acknowledge a new case")
 }
+
+func TestJourneyStopExpiredDeadlineAndSnapshotDoNotShareMutableState(t *testing.T) {
+	f := newJourneyFence(nil, nil)
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.stopOwned = func() bool { close(entered); <-release; return true }
+	f.installDeadline(time.Now().Add(-time.Second))
+	<-entered
+	frozen := f.snapshot()["first_failure"].(map[string]any)
+	close(release)
+	<-f.stopDone
+	_, changed := frozen["stop_actions_finished_at_ns"]
+	require.False(t, changed, "a snapshot handed to JSON encoding must not share the stop goroutine's mutable map")
+	require.Equal(t, true, f.snapshot()["owned_backend_death_verified"])
+	require.Equal(t, "deadline", f.snapshot()["first_failure"].(map[string]any)["reason"])
+}

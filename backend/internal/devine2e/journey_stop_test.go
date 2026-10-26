@@ -72,10 +72,18 @@ func newJourneyFence(app *application, budget journeyBudget) *journeyFence {
 		if err != nil || json.Unmarshal(data, &state) != nil || state.Deadline <= 0 {
 			f.stop("deadline", time.Now().UnixNano())
 		} else {
-			f.deadline = time.AfterFunc(time.Until(time.Unix(0, int64(state.Deadline*1e9))), func() { f.stop("deadline", time.Now().UnixNano()) })
+			f.installDeadline(time.Unix(0, int64(state.Deadline*1e9)))
 		}
 	}
 	return f
+}
+
+func (f *journeyFence) installDeadline(deadline time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// An already expired timer may run immediately. Publish it under the same
+	// mutex used by stop so the callback cannot race this assignment.
+	f.deadline = time.AfterFunc(time.Until(deadline), func() { f.stop("deadline", time.Now().UnixNano()) })
 }
 
 func (f *journeyFence) notify() { close(f.changed); f.changed = make(chan struct{}) }
@@ -479,7 +487,14 @@ func (f *journeyFence) nextObserver() (int, bool) {
 func (f *journeyFence) snapshot() map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return map[string]any{"installed": true, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": f.first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
+	var first map[string]any
+	if f.first != nil {
+		first = map[string]any{}
+		for key, value := range f.first {
+			first[key] = value
+		}
+	}
+	return map[string]any{"installed": true, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
 		"pending_tools": len(f.pending), "owned_backend_death_verified": f.backendDead, "journal": append([]map[string]any(nil), f.journal...),
 		"guarantee": "no public admission after gate closure; owned backend death stops local background sends; already remote inflight remains unknown"}
 }
