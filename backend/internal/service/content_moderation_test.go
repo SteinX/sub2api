@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1616,9 +1618,18 @@ func newContentModerationFlaggedLog(userID int64) *ContentModerationLog {
 }
 
 func TestContentModerationCheck_PreBlockFlaggedWritesRedisHashCache(t *testing.T) {
-	requestCount := 0
+	var requestCount atomic.Int64
+	fixtureKey := "sk-test-" + rand.Text()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
+		if r.Header.Get("Authorization") != "Bearer "+fixtureKey {
+			http.NotFound(w, r)
+			return
+		}
+		requestCount.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/moderations" {
+			http.NotFound(w, r)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(moderationAPIResponse{
 			Results: []moderationAPIResult{{
 				CategoryScores: map[string]float64{"sexual": 0.9},
@@ -1632,7 +1643,7 @@ func TestContentModerationCheck_PreBlockFlaggedWritesRedisHashCache(t *testing.T
 	cfg.Mode = ContentModerationModePreBlock
 	cfg.PreHashCheckEnabled = true
 	cfg.BaseURL = server.URL
-	cfg.APIKeys = []string{"sk-test"}
+	cfg.APIKeys = []string{fixtureKey}
 	cfg.BlockStatus = http.StatusConflict
 	cfg.BlockMessage = "命中风险输入"
 	rawCfg, err := json.Marshal(cfg)
@@ -1662,9 +1673,15 @@ func TestContentModerationCheck_PreBlockFlaggedWritesRedisHashCache(t *testing.T
 	require.NoError(t, err)
 	require.True(t, decision.Blocked)
 	require.Equal(t, ContentModerationActionBlock, decision.Action)
-	require.Equal(t, 1, requestCount)
+	require.Equal(t, int64(1), requestCount.Load())
 	recorded := requireRecordedHashCount(t, hashCache, 1)
 	requireContentModerationLogCount(t, repo, 1)
+	// An unrelated request must not become part of this service's API-call
+	// count, including traffic from another in-process HTTP fixture.
+	foreign, err := http.Post(server.URL+"/v1/moderations", "application/json", strings.NewReader(`{}`))
+	require.NoError(t, err)
+	_ = foreign.Body.Close()
+	require.Equal(t, http.StatusNotFound, foreign.StatusCode)
 
 	decision, err = svc.Check(context.Background(), ContentModerationCheckInput{
 		Protocol: ContentModerationProtocolOpenAIChat,
@@ -1674,7 +1691,7 @@ func TestContentModerationCheck_PreBlockFlaggedWritesRedisHashCache(t *testing.T
 	require.True(t, decision.Blocked)
 	require.Equal(t, ContentModerationActionHashBlock, decision.Action)
 	require.Equal(t, recorded[0], decision.InputHash)
-	require.Equal(t, 1, requestCount)
+	require.Equal(t, int64(1), requestCount.Load())
 	logs := requireContentModerationLogCount(t, repo, 2)
 	require.Equal(t, ContentModerationActionBlock, logs[0].Action)
 	require.Equal(t, ContentModerationActionHashBlock, logs[1].Action)
