@@ -474,15 +474,16 @@ def main():
     source_before_resume = source_after_task
     resumed = invoke(args, directory, True) if task_passed else None
     same_session = resumed is not None and first["client_session_sha256"] is not None and first["client_session_sha256"] == resumed["client_session_sha256"]
+    resume_nonce_valid = resumed is not None and resumed['project_nonce_sha256'] == project_nonce_hash
     extended = {}
-    if (os.environ.get('DEVIN_JOURNEY_CAPABILITIES') in {'true', 'independent'} and same_session and resumed['passed']
+    if (os.environ.get('DEVIN_JOURNEY_CAPABILITIES') in {'true', 'independent'} and same_session and resume_nonce_valid and resumed['passed']
             and args.client == 'omp' and args.profile == 'compatibility' and not args.model.startswith('fusion-')):
         import capabilities
         extended = capabilities.run(args, directory, first['client_session_sha256'], expected['nonce'], sys.modules[__name__])
     final = final_project_snapshot(workspace, expected, protected, source_before_resume)
     if resumed is None:
         final['artifact_verified_after_resume'] = final['source_unchanged_after_resume'] = None
-    passed = task_passed and resumed is not None and resumed["passed"] and resumed['project_nonce_sha256'] == project_nonce_hash and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
+    passed = task_passed and resumed is not None and resumed["passed"] and resume_nonce_valid and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
     report = {"tier": tier, "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
               "execution_isolation": "separate_uid" if os.geteuid()==0 else "networkless_container_fixed_unix_relay",
               "isolation":isolated,

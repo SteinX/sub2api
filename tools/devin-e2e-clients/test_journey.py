@@ -3,15 +3,53 @@ import io
 import os
 from pathlib import Path
 import tempfile
+import sys
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import journey
 
 
 class JourneyProofTests(unittest.TestCase):
+    def test_wrong_resume_nonce_cannot_start_optional_capability_requests(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); workspace = root / 'workspace'; workspace.mkdir()
+            (workspace / 'price_math.py').write_text('initial broken source')
+            expected = {'nonce': 'synthetic', 'totals': [3]}
+            first = {'passed': True, 'tools': {'read': 4}, 'source_mutation_tools': {'edit': 1},
+                     'client_tests_succeeded': True, 'client_session_sha256': 'a' * 64,
+                     'project_nonce_sha256': journey.digest(b'synthetic'), 'exit_code': 0,
+                     'timed_out': False, 'incomplete_tool_calls': 0}
+            resumed = {'passed': True, 'tools': {'read': 1}, 'client_session_sha256': 'a' * 64,
+                       'project_nonce_sha256': journey.digest(b'wrong-project')}
+            def invoke(*args):
+                (workspace / 'price_math.py').write_text('repaired source')
+                (workspace / 'out').mkdir(exist_ok=True)
+                (workspace / 'out/report.json').write_text(json.dumps(expected))
+                return resumed if len(args) > 2 and args[2] is True else first
+            class UI:
+                returncode = 0
+                def communicate(self, *args, **kwargs):
+                    return b'{"passed":true}', b''
+            capability_run = Mock(return_value={})
+            stream = io.StringIO()
+            with patch.multiple(journey, identity=Mock(return_value={}), isolation=Mock(return_value={}),
+                                isolation_evidence=Mock(return_value={}), prepare=Mock(return_value=(workspace, expected, {})),
+                                project_environment=Mock(return_value={}), start_child=Mock(return_value=UI()),
+                                invoke=Mock(side_effect=invoke), run_project_python=Mock(return_value=SimpleNamespace(returncode=0))), \
+                 patch.dict(sys.modules, {'capabilities': SimpleNamespace(run=capability_run)}), \
+                 patch.object(sys, 'argv', ['journey.py', '--directory', str(root), '--client', 'omp', '--model', 'synthetic', '--ui-url', 'http://127.0.0.1', '--profile', 'compatibility']), \
+                 patch.object(sys, 'stdout', stream), \
+                 patch.dict(os.environ, {'DEVIN_JOURNEY_GATEWAY_KEY': 'synthetic', 'DEVIN_JOURNEY_UI_PASSWORD': 'synthetic', 'DEVIN_JOURNEY_CAPABILITIES': 'true'}):
+                code = journey.main()
+            self.assertEqual(1, code)
+            report = json.loads(stream.getvalue())
+            self.assertTrue(all(report['task_checks'].values()))
+            self.assertTrue(report['same_client_session'])
+            capability_run.assert_not_called()
+
     def test_zero_exit_cannot_hide_truncated_reader_after_an_earlier_normal_terminal(self):
         events = [{'type': 'step_start', 'sessionID': 'synthetic-session'},
                   {'type': 'text', 'part': {'id': 'part-1', 'text': 'Verified the project.'}},
