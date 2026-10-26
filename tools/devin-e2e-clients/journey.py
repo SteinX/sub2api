@@ -49,6 +49,10 @@ def kill_child(proc):
 
 
 def terminate_children(number, _frame):
+    try:
+        batch_control.current().stop('supervisor_failure')
+    except (ValueError,OSError):
+        pass  # The parent also stops on control EOF; never retry this send.
     for proc in list(ACTIVE):
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGTERM)

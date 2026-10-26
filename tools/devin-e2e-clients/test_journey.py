@@ -162,7 +162,7 @@ class ProtectedSnapshotTests(unittest.TestCase):
                 events=[{'type':'step_start','sessionID':'original'},{**terminal,'sessionID':'changed'}]
                 proc=Mock();proc.stdout=io.BytesIO(b''.join(json.dumps(event).encode()+b'\n' for event in events));proc.returncode=0
                 control=batch_control.Control()
-                with patch.object(journey,'start_child',return_value=proc),patch.object(journey,'kill_child'),patch.object(journey,'project_environment',return_value={}), \
+                with patch.object(journey,'start_child',return_value=proc),patch.object(journey,'kill_child'),patch.object(journey,'project_environment',return_value={}),patch.object(journey,'isolation',return_value={}), \
                      patch.object(journey.batch_control,'current',return_value=control),patch.object(control,'send',return_value=True) as send, \
                      patch.dict(os.environ,{'DEVIN_JOURNEY_GATEWAY_KEY':'synthetic'}):
                     result=journey.invoke(SimpleNamespace(client='opencode',model='synthetic',ui_url='http://127.0.0.1'),root)

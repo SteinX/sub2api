@@ -238,3 +238,32 @@ func TestJourneyStopOldToolAckCannotConfirmNewResponse(t *testing.T) {
 	f.finishResponse(response("old"))
 	require.Equal(t, true, f.snapshot()["stopped"], "provider UID reuse is ambiguous and must not consume an old ACK")
 }
+
+func TestJourneyStopDistinctCaseMayReusePublicToolIDButNotOldAck(t *testing.T) {
+	f := newJourneyFence(nil, nil)
+	for index := 1; index <= 2; index++ {
+		epoch, ok := f.nextObserver()
+		require.True(t, ok)
+		event := func(kind string) journeyControlEvent { e := controlEvent(kind); e.epoch = epoch; return e }
+		require.True(t, f.control(event("begin")))
+		_, cancel, err := f.acquire(context.Background())
+		require.NoError(t, err)
+		defer cancel()
+		f.finishResponse(&agentRequest{Status: 200, response: &journeyResponseBody{eof: true, data: []byte(`{"choices":[{"message":{"tool_calls":[{"id":"per-case-public-id"}]},"finish_reason":"tool_calls"}]}`)}})
+		tool := event("tool")
+		tool.Call = callHash("per-case-public-id")
+		tool.Status = "completed"
+		require.True(t, f.control(tool))
+		_, cancel2, err := f.acquire(context.Background())
+		require.NoError(t, err)
+		defer cancel2()
+		f.finishResponse(&agentRequest{Status: 200, response: &journeyResponseBody{eof: true, data: []byte(`{"choices":[{"finish_reason":"stop"}]}`)}})
+		require.True(t, f.control(event("end")))
+		require.True(t, f.control(event("finish")))
+	}
+	old := controlEvent("tool")
+	old.epoch = 1
+	old.Call = callHash("per-case-public-id")
+	old.Status = "completed"
+	require.False(t, f.control(old), "old observer cannot acknowledge a new case")
+}

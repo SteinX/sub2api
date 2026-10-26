@@ -26,26 +26,27 @@ import (
 // This test-runner fence is shared by every public admission in a batch. It
 // does not purport to recall a request already sent to a remote provider.
 type journeyFence struct {
-	mu           sync.Mutex
-	changed      chan struct{}
-	stopped      bool
-	active       bool
-	phase        bool
-	terminal     bool
-	pending      map[string]bool
-	acks         map[string]bool
-	seenCalls    map[string]bool
-	acknowledged map[string]bool
-	cancel       context.CancelFunc
-	stopOwned    func() bool
-	budget       journeyBudget
-	first        map[string]any
-	journal      []map[string]any
-	forwarded    int
-	denied       int
-	backendDead  bool
-	deadline     *time.Timer
-	stopDone     chan struct{}
+	mu            sync.Mutex
+	changed       chan struct{}
+	stopped       bool
+	active        bool
+	phase         bool
+	terminal      bool
+	pending       map[string]bool
+	acks          map[string]bool
+	seenCalls     map[string]bool
+	acknowledged  map[string]bool
+	observerEpoch int
+	cancel        context.CancelFunc
+	stopOwned     func() bool
+	budget        journeyBudget
+	first         map[string]any
+	journal       []map[string]any
+	forwarded     int
+	denied        int
+	backendDead   bool
+	deadline      *time.Timer
+	stopDone      chan struct{}
 }
 
 func newJourneyFence(app *application, budget journeyBudget) *journeyFence {
@@ -313,6 +314,7 @@ type journeyControlEvent struct {
 	Call     string `json:"call_sha256,omitempty"`
 	Status   string `json:"status,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	epoch    int
 }
 
 func (f *journeyFence) control(e journeyControlEvent) bool {
@@ -343,7 +345,7 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 		}
 	}
 	f.mu.Lock()
-	valid := !f.stopped
+	valid := !f.stopped && e.epoch == f.observerEpoch
 	if valid {
 		switch e.Kind {
 		case "begin":
@@ -397,6 +399,10 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 // path nor a mount containing it. One trusted observer owns a batch case.
 func (f *journeyFence) bind(t *testing.T, cmd *exec.Cmd) func() {
 	t.Helper()
+	epoch, valid := f.nextObserver()
+	if !valid {
+		f.stop("protocol_error", time.Now().UnixNano())
+	}
 	dir, err := os.MkdirTemp("", "devin-observer-")
 	require.NoError(t, err)
 	path := filepath.Join(dir, "control.sock")
@@ -432,6 +438,7 @@ func (f *journeyFence) bind(t *testing.T, cmd *exec.Cmd) func() {
 				f.stop("parse_error", time.Now().UnixNano())
 				return
 			}
+			event.epoch = epoch
 			ok := f.control(event)
 			_, err = fmt.Fprintf(conn, "{\"accepted\":%t}\n", ok)
 			if err != nil {
@@ -454,6 +461,21 @@ func (f *journeyFence) bind(t *testing.T, cmd *exec.Cmd) func() {
 	}
 }
 
+func (f *journeyFence) nextObserver() (int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	valid := !f.stopped && !f.phase && !f.active && len(f.pending) == 0
+	if valid {
+		f.observerEpoch++
+		f.seenCalls = map[string]bool{}
+		f.acknowledged = map[string]bool{}
+		f.acks = map[string]bool{}
+	} else if !f.stopped {
+		f.phase = false
+	}
+	return f.observerEpoch, valid
+}
+
 func (f *journeyFence) snapshot() map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -466,6 +488,9 @@ func runGuardedJourney(t *testing.T, cmd *exec.Cmd, app *application, admission 
 	t.Helper()
 	admission.fence = fence
 	release := fence.bind(t, cmd)
+	if cancel := cmd.Cancel; cancel != nil {
+		cmd.Cancel = func() error { fence.stop("deadline", time.Now().UnixNano()); return cancel() }
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		fence.stop("client_exit", time.Now().UnixNano())
