@@ -93,7 +93,9 @@ async function main() {
     Object.assign(diagnostics, await page.evaluate(modelControlSnapshot, input.model))
     await page.getByTestId('devin-client-model').selectOption(input.model)
     if (input.catalog_recovery_probe) {
-      catalogRecovery.models_after_retry = diagnostics.model_count
+      // The page is ready; the independent async response observer may still
+      // be reading the same body. Count what the user can actually select.
+      catalogRecovery.models_after_retry = diagnostics.available_option_count
       catalogRecovery.blocked_fixture_model_visible = await page.locator('#devin-client-model option[value="e2e-opaque-cheap"]').count() !== 0
       if (catalogRecovery.blocked_fixture_model_visible) throw new Error('Unverified fixture model reached the picker')
     }
