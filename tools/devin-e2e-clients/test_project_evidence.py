@@ -64,6 +64,20 @@ class ProjectToolEvidenceTests(unittest.TestCase):
         self.assertEqual(0, report['tools']['custom_tool'])
         self.assertTrue(self.tracker.failed)
 
+    def test_command_categories_retain_no_raw_command_or_path(self):
+        for index, (command, category) in enumerate([
+            ('pwd', 'pwd'), ('ls /private/synthetic-secret', 'ls'),
+            ('python3 ./run_tests.py', 'test_path_alias'),
+            ('rm /private/synthetic-secret', 'other_literal'),
+        ]):
+            self.tracker.observe(event('bash', 'error', call_id=f'category-{index}', inputs={'command': command}))
+            call = self.tracker.report()['tool_calls'][-1]
+            self.assertEqual(category, call['command_category'])
+            self.assertFalse(call['test_command'])
+        encoded = json.dumps(self.tracker.report())
+        for raw in ['synthetic-secret', '/private/', 'python3 ./run_tests.py', 'category-0']:
+            self.assertNotIn(raw, encoded)
+
     def test_changed_or_missing_tool_identity_is_rejected(self):
         self.tracker.observe(event('edit', 'running'))
         for value in [event('write'), event('edit', call_id=None), event('edit', status='unknown')]:

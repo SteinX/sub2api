@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import re
 import time
-from project_tests import command_class, digest
+from project_tests import command_category, command_class, digest
 
 FILE_MUTATORS = frozenset({'write', 'edit', 'apply_patch'})
 TOOL_NAME = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
@@ -64,6 +64,7 @@ class ToolEvidence:
                     raise ValueError('tool_command_changed')
                 record['command_sha256'] = fingerprint
                 record['command_class'] = command_class(inputs['command'], self.test_command)
+                record['command_category'] = command_category(inputs['command'], self.test_command, self.workspace)
                 record['test_command'] = record['command_class'] == 'configured_project_tests'
         record['status'] = status
         if status == 'error':

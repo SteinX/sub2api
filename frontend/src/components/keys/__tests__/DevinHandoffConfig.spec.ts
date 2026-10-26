@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import UseKeyModal from '../UseKeyModal.vue'
-import { normalizeDevinTestCommand } from '@/utils/devinClientConfig'
+import { devinOpenCodeConfig, normalizeDevinTestCommand } from '@/utils/devinClientConfig'
 
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 vi.mock('@/composables/useClipboard', () => ({ useClipboard: () => ({ copyToClipboard: vi.fn().mockResolvedValue(true) }) }))
@@ -32,6 +32,11 @@ describe('Devin user configuration handoff', () => {
     const config = JSON.parse(text)
     expect(config.default_agent).toBe('devin-project')
     expect(config.permission.bash).toEqual({ '*': 'deny', 'python3 -m unittest -v': 'allow' })
+    expect(config.permission).toEqual({
+      '*': 'deny', read: 'allow', edit: 'allow', glob: 'allow', grep: 'allow',
+      bash: { '*': 'deny', 'python3 -m unittest -v': 'allow' },
+      external_directory: { '/tmp/owned-project/*': 'allow' }
+    })
     expect(config.permission.external_directory).toEqual({ '/tmp/owned-project/*': 'allow' })
     expect(config.agent['devin-project'].tools).toBeUndefined()
     expect(config.agent['devin-project'].permission).toEqual(config.permission)
@@ -39,6 +44,27 @@ describe('Devin user configuration handoff', () => {
     expect(config.provider.devin.options.apiKey).toBe('{env:SUB2API_API_KEY}')
     expect(text).not.toContain('synthetic-key-must-not-enter-files')
     wrapper.unmount()
+  })
+
+  it('serializes project values as JSON data in the restricted agent prompt', () => {
+    const workspace = '/tmp/project "quoted" `data` \u2028end'
+    const command = 'python3 C:\\work\\run_tests.py'
+    const config = devinOpenCodeConfig('http://127.0.0.1:8000/v1', '{env:SUB2API_API_KEY}', 'granted', ['granted'], {
+      omo: false, project: true, workspace, testCommand: command
+    })
+    const prompt = config.agent!['devin-project'].prompt
+    const prefix = 'Project configuration JSON: '
+    const line = prompt.split('\n').find(value => value.startsWith(prefix))!
+    expect(JSON.parse(line.slice(prefix.length))).toEqual({ workspace, test_command: command })
+    expect(line).toContain('\\u2028')
+    expect(prompt).toContain('Read (read)')
+    expect(prompt).toContain('Glob (glob)')
+    expect(prompt).toContain('Grep (grep)')
+    expect(prompt).toContain('Edit (edit)')
+    expect(prompt).toContain('command exactly equal to test_command and workdir exactly equal to workspace')
+    expect(prompt).toContain('Do not use Bash for pwd, ls, cat')
+    expect(config.permission!.bash).toEqual({ '*': 'deny', [command]: 'allow' })
+    expect(config.agent!['devin-project']).not.toHaveProperty('tools')
   })
 
   it('keeps OMP default and compatibility profiles separate without inserting a fabricated cost card', async () => {
