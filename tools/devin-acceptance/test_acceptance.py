@@ -21,10 +21,14 @@ def evidence(live=False):
         terminal = {'exit_code': 0, 'normal_stop': True, 'final_text_matches': True, 'event_error': False,
                     'timed_out': False, 'parse_errors': 0, 'session_changed': False, 'session_seen': True,
                     'client_session_sha256': DIGEST, 'tools': {'read': 4, 'write': 1, 'bash': 1},
+                    'completion_contract': 'project_artifacts_v2', 'terminal_event_seen': True,
+                    'reader_completed': True, 'reader_error': False,
+                    'final_text_bytes': 35, 'final_text_sha256': DIGEST, 'project_nonce_sha256': DIGEST,
                     'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0, 'plugin_runtime_started': True}
         case = {'id': ident, 'model_kind': kind, 'status': 'passed', 'artifact_sha256': DIGEST,
                 'source_before_task_sha256': '1' * 64, 'source_after_task_sha256': '2' * 64,
-                'source_changed_by_task': True,
+                'source_changed_by_task': True, 'project_nonce_sha256': DIGEST,
+                'independent_project_test_executed': True,
                 'tier': 'user_e2e' if live else 'client_mock', 'eligible_for_real_e2e': live,
                 'public_model_uid': 'fusion-test' if kind == 'fusion' else 'physical-lead',
                 'physical_lead_uid': 'physical-lead', 'physical_sidekick_uid': 'physical-sidekick' if kind == 'fusion' else '',
@@ -65,6 +69,29 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_natural_language_completion_does_not_need_exact_marker(self):
+        report, _ = evidence()
+        for case in report['cases']:
+            for phase in ['task', 'resume']:
+                case[phase]['final_text_matches'] = False
+        self.assertEqual([], gate.validate(report, 'client_mock', COMMIT, TREE))
+
+    def test_unexecuted_oracle_cannot_certify_success(self):
+        report, _ = evidence()
+        case = report['cases'][0]
+        case['independent_project_test_executed'] = False
+        self.assertIn(case['id'] + ':independent_oracle_not_executed', gate.validate(report, 'client_mock', COMMIT, TREE))
+
+    def test_marker_cannot_replace_terminal_reader_or_nonce_evidence(self):
+        for field, value in [('terminal_event_seen', False), ('reader_completed', False), ('reader_error', True),
+                             ('completion_contract', 'old'), ('final_text_bytes', 0), ('final_text_sha256', ''),
+                             ('project_nonce_sha256', 'd' * 64)]:
+            report, _ = evidence()
+            report['cases'][0]['task'][field] = value
+            with self.subTest(field=field):
+                self.assertTrue(gate.validate(report, 'client_mock', COMMIT, TREE))
+
+
     def test_edit_only_mutation_is_valid_without_write(self):
         report, _ = evidence()
         case = report['cases'][0]

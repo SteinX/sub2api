@@ -218,6 +218,9 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					}
 					require.NoError(t, runErr, "real CLI project task failed; structural evidence retained")
 					require.Equal(t, "passed", report["status"])
+					for _, phase := range []string{"task", "resume"} {
+						require.Equal(t, false, report[phase].(map[string]any)["final_text_matches"], "normal project completion uses natural language, not a fixed marker")
+					}
 					if capabilitiesRequired || independentCapabilities {
 						capabilities, ok := report["capability_evidence"].(map[string]any)
 						require.True(t, ok)
