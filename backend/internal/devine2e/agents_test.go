@@ -101,17 +101,38 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 	proxy.ModifyResponse = func(response *http.Response) error {
 		record, _ := response.Request.Context().Value(agentRequestContext{}).(*agentRequest)
 		if record != nil {
+			var source *journeyResponseBody
+			var sourceErr error
+			if p.fence != nil {
+				// Read the original body, including errors, outside the record
+				// mutex. Never mistake an earlier truncated replay for source EOF.
+				source, sourceErr = preloadJourneyResponse(response.Body)
+			}
 			p.mu.Lock()
 			record.Status = response.StatusCode
 			record.Session = response.Header.Get(fusion.HeaderSession)
+			if source != nil {
+				record.response = source
+				response.Body = source
+			}
+			if sourceErr != nil {
+				p.mu.Unlock()
+				return sourceErr
+			}
 			if response.StatusCode >= 400 {
-				body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-				if err != nil {
-					p.mu.Unlock()
-					return err
+				var body []byte
+				if source != nil {
+					body = source.data
+				} else {
+					var err error
+					body, err = io.ReadAll(io.LimitReader(response.Body, 1<<20))
+					if err != nil {
+						p.mu.Unlock()
+						return err
+					}
+					_ = response.Body.Close()
+					response.Body = io.NopCloser(bytes.NewReader(body))
 				}
-				_ = response.Body.Close()
-				response.Body = io.NopCloser(bytes.NewReader(body))
 				var envelope struct {
 					Error struct {
 						Code string `json:"code"`
@@ -124,14 +145,7 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 				}
 			}
 			p.mu.Unlock()
-			if p.fence != nil {
-				var err error
-				record.response, err = preloadJourneyResponse(response.Body)
-				if err != nil {
-					return err
-				}
-				response.Body = record.response
-			} else if p.runBudget != nil {
+			if p.fence == nil && p.runBudget != nil {
 				record.response = &journeyResponseBody{ReadCloser: response.Body}
 				response.Body = record.response
 			}

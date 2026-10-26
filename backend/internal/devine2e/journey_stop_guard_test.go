@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -323,6 +324,50 @@ func TestJourneyStopPreloadDoesNotAcceptLimitOrCancelledSourceEOF(t *testing.T) 
 	capture, err := preloadJourneyResponse(pipe)
 	require.ErrorIs(t, err, context.Canceled)
 	require.False(t, capture.eof)
+}
+
+func TestJourneyStopErrorCaptureReadsOriginalBodyWithoutArtificialEOF(t *testing.T) {
+	for _, sample := range []struct {
+		size      int
+		truncated bool
+	}{{2 << 20, false}, {2 << 20, true}, {(4 << 20) + 64, false}} {
+		size := sample.size
+		wire := `{"error":{"code":"devin_fusion_synthetic","message":"` + strings.Repeat("x", size) + `"}}`
+		backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if sample.truncated {
+				w.Header().Set("Content-Length", strconv.Itoa(len(wire)+99))
+			}
+			w.WriteHeader(400)
+			_, _ = io.WriteString(w, wire)
+		}))
+		t.Cleanup(backend.Close)
+		f := newJourneyFence(nil, nil)
+		require.True(t, f.control(controlEvent("begin")))
+		p := newJourneyAdmission(t, &application{base: backend.URL}, fixtureModel, 3)
+		p.fence = f
+		response, err := http.Post(p.server.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"`+fixtureModel+`"}`))
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		require.Eventually(t, func() bool { return f.snapshot()["stopped"] == true }, time.Second, time.Millisecond)
+		_, records := p.snapshot()
+		require.Len(t, records, 1)
+		require.NotNil(t, records[0].response)
+		if sample.truncated {
+			require.False(t, records[0].response.eof)
+			require.False(t, records[0].response.oversized)
+			require.Equal(t, wire, string(records[0].response.data))
+		} else if size < 4<<20 {
+			require.True(t, records[0].response.eof)
+			require.Equal(t, wire, string(records[0].response.data))
+			require.Equal(t, "devin_fusion_synthetic", records[0].ErrorCode)
+		} else {
+			require.True(t, records[0].response.oversized)
+			require.False(t, records[0].response.eof)
+			require.Nil(t, records[0].response.data)
+		}
+		backend.Close()
+	}
 }
 
 type brokenJourneyReader struct{}
