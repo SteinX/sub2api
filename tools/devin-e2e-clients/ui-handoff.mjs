@@ -70,6 +70,11 @@ async function main() {
       if (await button.getAttribute('data-key-name') === input.key_name) { selectedButton = button; break }
     }
     if (!selectedButton || !journey.selected_key_matches || journey.login_http_status !== 200 || journey.key_list_http_status !== 200) throw new Error('Authenticated product key selection failed')
+    // Observe the transient state before the action that starts the fetch. A
+    // late point-in-time isVisible() can miss loading and skip the only retry.
+    const loadingObserved = input.catalog_recovery_probe
+      ? page.getByTestId('devin-models-loading').waitFor({ state: 'visible', timeout: 10000 }).then(() => true, () => false)
+      : null
     await selectedButton.click()
     stage = 'product-key-modal'
     await page.getByTestId('use-key-modal').waitFor()
@@ -79,16 +84,16 @@ async function main() {
     if (input.catalog_recovery_probe) {
       catalogRecovery.observer_delay_ms = input.catalog_observer_delay_ms ?? 0
       if (catalogRecovery.observer_delay_ms) await new Promise(resolve => setTimeout(resolve, catalogRecovery.observer_delay_ms))
-      catalogRecovery.loading_visible = await page.getByTestId('devin-models-loading').isVisible()
-      if (catalogRecovery.loading_visible) {
-        stage = 'catalog-timeout'
-        await page.getByTestId('devin-models-error').waitFor()
-        catalogRecovery.timeout_visible = await page.getByTestId('devin-models-error').getAttribute('data-timeout') === 'true'
-        catalogRecovery.no_configuration_on_error = await page.getByTestId('client-config-file').count() === 0
-        if (!catalogRecovery.timeout_visible || !catalogRecovery.no_configuration_on_error || !await page.getByTestId('devin-models-refresh').isEnabled()) throw new Error('Invalid catalog failure state')
-        await page.getByTestId('devin-models-refresh').click()
-        catalogRecovery.manual_refresh = true
-      }
+      stage = 'catalog-loading'
+      catalogRecovery.loading_visible = await loadingObserved
+      if (!catalogRecovery.loading_visible) throw new Error('Catalog loading was not observed')
+      stage = 'catalog-timeout'
+      await page.getByTestId('devin-models-error').waitFor({ timeout: 25000 })
+      catalogRecovery.timeout_visible = await page.getByTestId('devin-models-error').getAttribute('data-timeout') === 'true'
+      catalogRecovery.no_configuration_on_error = await page.getByTestId('client-config-file').count() === 0
+      if (!catalogRecovery.timeout_visible || !catalogRecovery.no_configuration_on_error || !await page.getByTestId('devin-models-refresh').isEnabled()) throw new Error('Invalid catalog failure state')
+      await page.getByTestId('devin-models-refresh').click()
+      catalogRecovery.manual_refresh = true
     }
     stage = 'model-target-option'
     await page.waitForFunction(model => [...document.querySelectorAll('#devin-client-model option')].some(option => option.value === model), input.model)
