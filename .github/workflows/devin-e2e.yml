@@ -175,6 +175,9 @@ jobs:
         env:
           DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-user-journeys
           DEVIN_JOURNEY_CAPABILITIES: 'true'
+          # Negative cases hard-stop and restart their own isolated preview.
+          # This mock-only suite bound does not change an approved live plan.
+          DEVIN_E2E_TIMEOUT_SECONDS: '1100'
         run: make test-devin-user-journeys-mock
       - name: Validate source-bound mock evidence (never release-eligible)
         env:
