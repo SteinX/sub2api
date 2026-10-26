@@ -28,6 +28,7 @@ def evidence(live=False):
         case = {'id': ident, 'model_kind': kind, 'status': 'passed', 'artifact_sha256': DIGEST,
                 'source_before_task_sha256': '1' * 64, 'source_after_task_sha256': '2' * 64,
                 'source_changed_by_task': True, 'project_nonce_sha256': DIGEST,
+                'protected_project_sha256': {name: DIGEST for name in ['requirements.json','test_project.py','run_tests.py']},
                 'independent_project_test_executed': True,
                 'tier': 'user_e2e' if live else 'client_mock', 'eligible_for_real_e2e': live,
                 'public_model_uid': 'fusion-test' if kind == 'fusion' else 'physical-lead',
@@ -50,6 +51,20 @@ def evidence(live=False):
             result['tool_states'] = {name: {'completed': count} for name, count in result['tools'].items() if count}
             result['tool_events'] = copy.deepcopy(result['tool_states'])
             result['incomplete_tool_calls'] = 0
+            result['tool_calls'] = [{'name': name, 'call_sha256': hashlib.sha256((phase + name + str(index)).encode()).hexdigest(),
+                                     'status': 'completed', 'states': ['completed'],
+                                     **({'command_class': 'configured_project_tests', 'command_sha256': DIGEST} if name == 'bash' else {})}
+                                    for name, count in result['tools'].items() for index in range(count)]
+            bash = next(call for call in result['tool_calls'] if call['name'] == 'bash')
+            receipt = {'call_sha256': bash['call_sha256'], 'command_class': 'configured_project_tests', 'command_sha256': DIGEST,
+                       'state': 'completed', 'completion_sequence': 1, 'execution_verified': True, 'receipt_status': 'verified',
+                       'passed': True, 'exit_code': 0, 'exit_source': 'client_metadata', 'receipt_sha256': DIGEST, 'run_sha256': DIGEST,
+                       'project_nonce_sha256': DIGEST, 'source_before_sha256': '2' * 64, 'source_after_sha256': '2' * 64,
+                       'protected_sha256': dict(case['protected_project_sha256']), 'tests_run': 1, 'failures': 0, 'errors': 0,
+                       'skipped': 0, 'expected_failures': 0, 'unexpected_successes': 0, 'started_ns': 2, 'finished_ns': 3}
+            result.update(client_started_ns=1, client_finished_ns=4)
+            result['test_execution'] = {'schema': 'devin_project_test_v1', 'passed': True, 'conflicting_evidence': False,
+                                        'source_after_task_sha256': '2' * 64, 'calls': [receipt], 'selected_call_sha256': bash['call_sha256']}
             result['source_mutation_tools'] = {'write': 1} if phase == 'task' else {}
         for key in ['initial_project_test_failed', 'protected_project_files_intact', 'artifact_verified_before_oracle',
                     'artifact_verified_after_resume', 'source_unchanged_after_resume', 'independent_project_test_passed', 'same_client_session']:
@@ -69,6 +84,25 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_aggregate_or_text_success_cannot_replace_per_call_test_receipt(self):
+        for field, value in [('test_execution', None), ('tool_calls', []), ('tool_calls', None)]:
+            report, _ = evidence()
+            report['cases'][0]['task'][field] = value
+            with self.subTest(field=field, value=value):
+                if field == 'test_execution':
+                    report['cases'][0]['task'].pop(field)
+                self.assertIn(report['cases'][0]['id'] + ':client_test_receipt_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
+
+    def test_wrong_stale_unproven_or_empty_test_receipts_are_rejected(self):
+        for field, value in [('tests_run', 0), ('exit_code', False), ('state', 'error'), ('execution_verified', False),
+                             ('project_nonce_sha256', '0' * 64), ('source_after_sha256', '0' * 64),
+                             ('protected_sha256', {}), ('started_ns', 0), ('finished_ns', 5), ('receipt_sha256', '')]:
+            report, _ = evidence()
+            case = report['cases'][0]
+            case['task']['test_execution']['calls'][0][field] = value
+            with self.subTest(field=field):
+                self.assertIn(case['id'] + ':client_test_receipt_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
+
     def test_natural_language_completion_does_not_need_exact_marker(self):
         report, _ = evidence()
         for case in report['cases']:
@@ -102,6 +136,7 @@ class AcceptanceTests(unittest.TestCase):
             task[field].pop('write')
             task[field]['edit'] = {'completed': 1}
         task['source_mutation_tools'] = {'edit': 1}
+        next(call for call in task['tool_calls'] if call['name'] == 'write')['name'] = 'edit'
         self.assertEqual([], gate.validate(report, 'client_mock', COMMIT, TREE))
 
     def test_completed_write_cannot_replace_independent_source_change(self):

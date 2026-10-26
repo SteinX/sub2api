@@ -22,26 +22,26 @@ export function devinOpenCodeConfig(baseURL: string, apiKey: string, model: stri
   if (scoped && (!options.workspace || normalizeDevinWorkspacePath(options.workspace) !== options.workspace)) throw new Error('Select a workspace')
   if (options.project && (!options.testCommand || normalizeDevinTestCommand(options.testCommand) !== options.testCommand)) throw new Error('Select an exact test command')
   const agent = options.project ? 'devin-project' : 'devin-check'
-  const allowed = options.project ? ['read', 'write', 'edit', 'bash', 'glob', 'grep'] : ['read']
+  const permission = {
+    '*': 'deny', read: 'allow',
+    ...(options.project ? { edit: 'allow', glob: 'allow', grep: 'allow', bash: { '*': 'deny', [options.testCommand!]: 'allow' } } : {}),
+    external_directory: { [`${options.workspace}/*`]: 'allow' }
+  }
   return {
     $schema: 'https://opencode.ai/config.json', model: ref, small_model: ref,
     ...(options.omo ? { plugin: ['oh-my-opencode@5.1.44'] } : {}),
     ...(scoped ? {
       default_agent: agent,
-      permission: {
-        '*': 'deny', read: 'allow',
-        ...(options.project ? { edit: 'allow', glob: 'allow', grep: 'allow', bash: { '*': 'deny', [options.testCommand!]: 'allow' } } : {}),
-        external_directory: { [`${options.workspace}/*`]: 'allow' }
-      },
+      permission,
       agent: { [agent]: {
         mode: 'primary', model: ref,
         prompt: options.project
           ? 'Complete the requested project task within the selected workspace. Run only the configured test command. Do not spawn client-side workers. Gateway-internal Fusion Lead/Sidekick delegation remains allowed.'
           : 'Read probe.txt when asked. Use only read; do not spawn client-side workers or modify files. Gateway-internal Fusion Lead/Sidekick delegation remains allowed.',
-        tools: Object.fromEntries(
-          ['read', 'write', 'bash', 'edit', 'task', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'question']
-            .map(name => [name, allowed.includes(name)])
-        )
+        // Pinned OpenCode translates legacy tools.bash=true into an agent-wide
+        // allow, overriding the command rules. Keep one explicit permission
+        // policy at both scopes instead; edit also governs write/apply_patch.
+        permission
       } }
     } : {}),
     provider: { devin: {

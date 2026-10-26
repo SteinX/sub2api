@@ -23,6 +23,7 @@ import process_cleanup
 import container_sandbox
 from project_evidence import ToolEvidence
 from project_completion import CompletionEvidence
+from project_tests import TestReceipts, TEST_RUNNER
 
 TEST_COMMAND = "python3 run_tests.py"
 ACTIVE = set()
@@ -70,18 +71,7 @@ class ProjectTest(unittest.TestCase):
         data = json.loads(Path("requirements.json").read_text())
         self.assertEqual(report()["totals"], [subtotal - discount for subtotal, discount in data["rows"]])
 '''
-TEST_RUNNER = '''import json
-from pathlib import Path
-import sys
-import unittest
 
-result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("."))
-exit_code = 0 if result.wasSuccessful() else 1
-Path("out").mkdir(exist_ok=True)
-data = json.loads(Path("requirements.json").read_text())
-Path("out/test-execution.json").write_text(json.dumps({"nonce": data["nonce"], "exit_code": exit_code}))
-sys.exit(exit_code)
-'''
 
 
 def isolation(client=None):
@@ -158,17 +148,6 @@ def project_bytes(workspace, relative):
         os.close(directory)
 
 
-def omp_test_result(event, command, workspace, nonce, client_started_ns):
-    details = event.get('result', {}).get('details', {})
-    if command != TEST_COMMAND or event.get('isError') is not False or details.get('timedOut') or details.get('async') or details.get('exitCode', 0) != 0:
-        return False
-    try:
-        proof = json.loads(project_bytes(workspace, 'out/test-execution.json'))
-        timestamp = (workspace / 'out/test-execution.json').stat().st_mtime_ns
-    except (OSError, ValueError):
-        return False
-    output = json.dumps(event.get('result', {}))
-    return proof == {'nonce': nonce, 'exit_code': 0} and timestamp >= client_started_ns and 'Ran 1 test' in output and 'OK' in output
 
 
 def final_project_snapshot(workspace, expected, protected, source_hash):
@@ -242,7 +221,8 @@ def prepare(directory):
         raise ValueError("project bug was not reproduced before the client task")
     # Remove intentionally incorrect outputs so a no-op client cannot pass.
     (workspace / "out/report.json").unlink(missing_ok=True)
-    (workspace / "out/test-execution.json").unlink(missing_ok=True)
+    for receipt in (workspace / 'out/test-receipts').glob('*.json'):
+        receipt.unlink()
     protected = {name: digest(project_bytes(workspace, name)) for name in ("requirements.json", "test_project.py", "run_tests.py")}
     return workspace, expected, protected
 
@@ -305,6 +285,8 @@ def invoke(args, directory, resume=False):
     result.update(reader_completed=False, reader_error=False, project_nonce_sha256=digest(nonce.encode()))
     size = 0
     tool_evidence = ToolEvidence(directory / 'workspace', TEST_COMMAND)
+    protected = {name: digest(project_bytes(directory / 'workspace', name)) for name in ('requirements.json', 'test_project.py', 'run_tests.py')}
+    tests = TestReceipts(lambda name: project_bytes(directory / 'workspace', name), nonce, protected, client_started_ns)
     completion = CompletionEvidence()
 
     def consume_lines():
@@ -327,6 +309,7 @@ def invoke(args, directory, resume=False):
             kind = event.get("type")
             try:
                 tool = tool_evidence.observe(event)
+                tests.observe(tool, event)
                 completion.observe(event)
             except ValueError:
                 result['parse_errors'] += 1
@@ -343,26 +326,8 @@ def invoke(args, directory, resume=False):
                 part = event.get("part", {}); state = part.get("state", {})
                 if state.get("status") == "error":
                     result["event_error"] = True
-                if tool and tool['status'] == 'completed':
-                    if tool['name'] == "bash":
-                        text = json.dumps(state.get("output", ""))
-                        result["bash_exit_code"] = state.get("metadata", {}).get("exit")
-                        result["test_command_verified"] = tool['test_command']
-                        result["client_tests_succeeded"] |= result["bash_exit_code"] == 0 and result["test_command_verified"] and "Ran 1 test" in text and "OK" in text
-            if kind == "tool_execution_end":
-                if event.get("isError"):
-                    result["event_error"] = True
-                elif tool and tool['status'] == 'completed':
-                    if tool['name'] == "bash":
-                        text = json.dumps(event.get("result", {}))
-                        result["test_command_verified"] = tool['test_command']
-                        # OMP documents exitCode only for nonzero exits. Require
-                        # the protected project runner's explicit, fresh exit
-                        # receipt as well as the corresponding actual tool ID.
-                        success = omp_test_result(event, TEST_COMMAND if tool['test_command'] else None, directory / 'workspace', nonce, client_started_ns)
-                        result['bash_exit_code'] = 0 if success else None
-                        result['bash_exit_source'] = 'protected project test runner receipt' if success else 'unverified'
-                        result['client_tests_succeeded'] |= success
+            if kind == "tool_execution_end" and event.get("isError"):
+                result["event_error"] = True
         return True  # Only iterator EOF certifies complete event consumption.
 
     def consume():
@@ -386,7 +351,9 @@ def invoke(args, directory, resume=False):
         proc.stdout.close()
         ACTIVE.discard(proc)
     result["exit_code"] = proc.returncode
+    result.update(client_started_ns=client_started_ns, client_finished_ns=time.time_ns())
     result.update(tool_evidence.report())
+    result.update(tests.report())
     result.update(completion.report('PROJECT_REVIEWED' if resume else 'PROJECT_COMPLETE'))
     result['event_error'] |= tool_evidence.failed or completion.failed
     if args.client=='omo':
@@ -492,6 +459,7 @@ def main():
               'task_checks': task_checks, 'source_before_task_sha256': source_before_task,
               'source_after_task_sha256': source_after_task, 'source_changed_by_task': task_checks['source_changed'],
               'project_nonce_sha256': project_nonce_hash,
+              'protected_project_sha256': protected,
               "initial_project_test_failed": True, "artifact_verified_before_oracle": valid, **final,
               "independent_project_test_executed": after is not None,
               "independent_project_test_passed": after.returncode == 0 if after is not None else None,

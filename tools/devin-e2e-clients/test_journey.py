@@ -64,6 +64,8 @@ class JourneyProofTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); (root / 'workspace').mkdir()
             (root / 'workspace/requirements.json').write_text(json.dumps({'nonce': 'synthetic'}))
+            (root / 'workspace/test_project.py').write_text('protected test')
+            (root / 'workspace/run_tests.py').write_text('protected runner')
             args = SimpleNamespace(client='opencode', model='synthetic', ui_url='http://127.0.0.1')
             with patch.object(journey, 'isolation', return_value={}), patch.object(journey, 'project_environment', return_value={}), \
                  patch.object(journey, 'start_child', return_value=Child()), patch.object(journey.os, 'killpg'), \
@@ -102,24 +104,6 @@ class JourneyProofTests(unittest.TestCase):
         with patch.object(journey.os, 'geteuid', return_value=1000), patch.object(journey.container_sandbox,'require_available',side_effect=ValueError('isolation_unavailable')), patch.dict(os.environ, {'GITHUB_ACTIONS': 'true'}):
             with self.assertRaises(ValueError):
                 journey.isolation('omo')
-
-    def test_omp_test_evidence_requires_matching_command_call_and_explicit_success_receipt(self):
-        with tempfile.TemporaryDirectory() as temp:
-            workspace = Path(temp); (workspace / 'out').mkdir()
-            started = time.time_ns() - 1000000000
-            event = {'isError': False, 'result': {'details': {}, 'content': [{'text': 'Ran 1 test\n\nOK'}]}}
-            receipt = workspace / 'out/test-execution.json'
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', started))
-            receipt.write_text(json.dumps({'nonce': 'nonce', 'exit_code': 0}))
-            self.assertTrue(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', started))
-            self.assertFalse(journey.omp_test_result(event, 'echo fake-success', workspace, 'nonce', started))
-            self.assertFalse(journey.omp_test_result(event, None, workspace, 'nonce', started))
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'different', started))
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', time.time_ns() + 1000000000))
-            event['result']['details']['exitCode'] = 1
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', started))
-            event['result']['details'] = {'timedOut': True}
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', started))
 
     def test_final_artifact_and_protected_files_are_rechecked_after_resume(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -6,6 +6,7 @@ replacement for repository permissions. It never invokes clients or providers.
 """
 import argparse
 import base64
+from collections import Counter
 import json
 from pathlib import Path
 import re
@@ -28,7 +29,8 @@ PRODUCT_UI_SCOPE = 'full product application: login, key list, selection and con
 TOOL_NAME = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
 FILE_MUTATORS = {'write', 'edit', 'apply_patch'}
 SECRET_KEYS = {'api_key', 'apikey', 'authorization', 'access_token', 'refresh_token', 'pat', 'cookie', 'raw_log', 'prompt', 'content',
-               'account_id', 'group_id', 'channel_id', 'user_id', 'session_id', 'email', 'stdout', 'stderr', 'request_body', 'response_body'}
+               'account_id', 'group_id', 'channel_id', 'user_id', 'session_id', 'email', 'stdout', 'stderr', 'request_body', 'response_body',
+               'command', 'raw_command', 'tool_input', 'tool_output', 'brief'}
 
 
 def read_report(path):
@@ -62,8 +64,59 @@ def valid_tool_evidence(result):
                 return False
     if set(states) != set(events) or set(states) != {name for name, count in tools.items() if count}:
         return False
-    return all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
-               and events[name].get('completed', 0) >= tools[name] for name, counts in states.items())
+    calls = result.get('tool_calls')
+    if (not isinstance(calls, list) or any(not isinstance(call, dict) or not HEX64.fullmatch(str(call.get('call_sha256', ''))) for call in calls)
+            or len({call['call_sha256'] for call in calls}) != len(calls)):
+        return False
+    completed = Counter()
+    for call in calls:
+        if (not HEX64.fullmatch(str(call.get('call_sha256', ''))) or call.get('name') not in tools
+                or call.get('status') != 'completed' or not isinstance(call.get('states'), list) or not call['states']
+                or call['states'][-1] != 'completed' or any(status not in {'pending', 'running', 'completed'} for status in call['states'])):
+            return False
+        completed[call['name']] += 1
+    return (all(completed[name] == count for name, count in tools.items())
+            and all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
+                    and events[name].get('completed', 0) >= tools[name] for name, counts in states.items()))
+
+
+def valid_client_test_receipt(case):
+    task = case.get('task', {})
+    if not valid_tool_evidence(task):
+        return False
+    execution = task.get('test_execution', {})
+    calls = execution.get('calls')
+    if (execution.get('schema') != 'devin_project_test_v1' or execution.get('passed') is not True
+            or execution.get('conflicting_evidence') is not False or not isinstance(calls, list) or not calls
+            or any(not isinstance(call, dict) or not HEX64.fullmatch(str(call.get('call_sha256', ''))) for call in calls)
+            or execution.get('source_after_task_sha256') != case.get('source_after_task_sha256')):
+        return False
+    actual = {call['call_sha256']: call for call in task.get('tool_calls', []) if call.get('name') == 'bash'}
+    if len(calls) != len(actual) or len({call.get('call_sha256') for call in calls}) != len(calls):
+        return False
+    for call in calls:
+        tool = actual.get(call.get('call_sha256'), {})
+        if (call.get('state') != tool.get('status') or call.get('command_class') != tool.get('command_class')
+                or call.get('command_sha256') != tool.get('command_sha256') or not HEX64.fullmatch(str(call.get('command_sha256', '')))
+                or type(call.get('completion_sequence')) is not int or call['completion_sequence'] <= 0):
+            return False
+    candidates = [call for call in calls if call.get('command_class') == 'configured_project_tests']
+    selected = max(candidates, key=lambda call: call['completion_sequence'], default={})
+    protected = case.get('protected_project_sha256', {})
+    if (execution.get('selected_call_sha256') != selected.get('call_sha256') or selected.get('execution_verified') is not True
+            or selected.get('receipt_status') != 'verified' or selected.get('passed') is not True or type(selected.get('exit_code')) is not int or selected['exit_code'] != 0
+            or selected.get('state') != 'completed' or selected.get('exit_source') not in {'client_metadata', 'omp_success_and_runner_receipt'}
+            or not all(HEX64.fullmatch(str(selected.get(key, ''))) for key in ['receipt_sha256', 'run_sha256'])
+            or selected.get('project_nonce_sha256') != case.get('project_nonce_sha256')
+            or selected.get('source_before_sha256') != case.get('source_after_task_sha256')
+            or selected.get('source_after_sha256') != case.get('source_after_task_sha256')
+            or not isinstance(protected, dict) or set(protected) != {'requirements.json', 'test_project.py', 'run_tests.py'}
+            or any(not HEX64.fullmatch(str(value)) for value in protected.values()) or selected.get('protected_sha256') != protected
+            or type(selected.get('tests_run')) is not int or selected['tests_run'] <= 0
+            or any(type(selected.get(key)) is not int or selected[key] != 0 for key in ['failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'])):
+        return False
+    stamps = [task.get('client_started_ns'), selected.get('started_ns'), selected.get('finished_ns'), task.get('client_finished_ns')]
+    return all(type(value) is int and value > 0 for value in stamps) and stamps == sorted(stamps)
 
 
 def validate(report, mode, commit, tree, state=None):
@@ -177,6 +230,8 @@ def validate(report, mode, commit, tree, state=None):
                 or case.get('task', {}).get('client_tests_succeeded') is not True or case.get('task', {}).get('test_command_verified') is not True
                 or case.get('task', {}).get('bash_exit_code') != 0 or case.get('resume', {}).get('tools', {}).get('read', 0) < 1):
             errors.append(ident + ':actual_client_tools_missing')
+        if not valid_client_test_receipt(case):
+            errors.append(ident + ':client_test_receipt_unverified')
         if case.get('capabilities_required') is True:
             extended = case.get('capability_evidence', {})
             if extended.get('status') != 'passed' or any(extended.get(name) != 'passed' for name in ['context_pressure', 'compact', 'fork', 'idle_process_recovery']):
