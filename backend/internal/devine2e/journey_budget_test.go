@@ -174,10 +174,17 @@ func (b *authorizedJourneyBudget) healthy() bool {
 
 type journeyResponseBody struct {
 	io.ReadCloser
-	data      []byte
-	eof       bool
-	oversized bool
-	preloaded bool
+	data        []byte
+	eof         bool
+	oversized   bool
+	preloaded   bool
+	mu          sync.Mutex
+	guard       *journeyFence
+	stream      bool
+	sourceError bool
+	closeOnce   sync.Once
+	closeErr    error
+	drainTimer  *time.Timer
 }
 
 // A normal SDK may close its downstream stream immediately after [DONE]. The
@@ -203,6 +210,7 @@ func (b *journeyResponseBody) Read(p []byte) (int, error) {
 		return b.ReadCloser.Read(p)
 	}
 	n, err := b.ReadCloser.Read(p)
+	b.mu.Lock()
 	if len(b.data)+n <= 4<<20 {
 		b.data = append(b.data, p[:n]...)
 	} else {
@@ -212,7 +220,67 @@ func (b *journeyResponseBody) Read(p []byte) (int, error) {
 	if err == io.EOF && !b.oversized {
 		b.eof = true
 	}
+	if err != nil && err != io.EOF {
+		b.sourceError = true
+	}
+	oversized := b.oversized
+	if (b.eof || b.sourceError || oversized) && b.drainTimer != nil {
+		b.drainTimer.Stop()
+	}
+	b.mu.Unlock()
+	if oversized && b.guard != nil {
+		return 0, errors.New("guarded response exceeds capture bound")
+	}
 	return n, err
+}
+
+func (b *journeyResponseBody) completedProtocol() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.sourceError && !b.oversized && validJourneyCompletion(b.data, b.stream)
+}
+
+// This bounds draining the SAME source after an SDK closes at [DONE]. It never
+// opens another connection, advances admission, or manufactures source EOF.
+func (b *journeyResponseBody) boundDrain() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.eof && b.drainTimer == nil {
+		b.drainTimer = time.AfterFunc(3*time.Second, func() { b.guard.stop("transport_uncertain", time.Now().UnixNano()); _ = b.ReadCloser.Close() })
+	}
+}
+
+func (b *journeyResponseBody) downstreamClosed() {
+	if !b.completedProtocol() {
+		b.guard.stop("transport_uncertain", time.Now().UnixNano())
+		return
+	}
+	b.boundDrain()
+}
+
+func (b *journeyResponseBody) Close() error {
+	if b.guard == nil {
+		return b.ReadCloser.Close()
+	}
+	b.closeOnce.Do(func() {
+		if b.completedProtocol() {
+			b.boundDrain()
+			// ReverseProxy may stop reading after a downstream write error.
+			// Finish observing the original body, independently of that copy.
+			_, _ = io.Copy(io.Discard, b)
+		}
+		b.mu.Lock()
+		valid := b.eof && !b.sourceError && !b.oversized && validJourneyCompletion(b.data, b.stream)
+		if b.drainTimer != nil {
+			b.drainTimer.Stop()
+		}
+		b.mu.Unlock()
+		if !valid {
+			b.guard.stop("transport_uncertain", time.Now().UnixNano())
+		}
+		b.closeErr = b.ReadCloser.Close()
+	})
+	return b.closeErr
 }
 
 // An HTTP 200 or a client process exit is insufficient: require a normal

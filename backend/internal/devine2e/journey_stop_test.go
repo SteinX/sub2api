@@ -141,6 +141,10 @@ func (f *journeyFence) stop(reason string, observed int64) {
 func (f *journeyFence) acquire(ctx context.Context) (context.Context, context.CancelFunc, error) {
 	for {
 		f.mu.Lock()
+		if ctx.Err() != nil {
+			f.mu.Unlock()
+			return nil, nil, ctx.Err()
+		}
 		if f.stopped {
 			f.denied++
 			f.mu.Unlock()
@@ -149,7 +153,14 @@ func (f *journeyFence) acquire(ctx context.Context) (context.Context, context.Ca
 		if f.phase && !f.active && len(f.pending) == 0 {
 			f.active = true
 			f.terminal = false
-			child, cancel := context.WithCancel(ctx)
+			// A normal SDK may close downstream at [DONE]. Keep ownership of
+			// this source until actual EOF, bounded by the same deadline/fence.
+			base := context.WithoutCancel(ctx)
+			child, cancel := context.WithCancel(base)
+			if deadline, ok := ctx.Deadline(); ok {
+				cancel()
+				child, cancel = context.WithDeadline(base, deadline)
+			}
 			f.cancel = cancel
 			f.mu.Unlock()
 			return child, cancel, nil
@@ -503,7 +514,7 @@ func (f *journeyFence) snapshot() map[string]any {
 			first[key] = value
 		}
 	}
-	return map[string]any{"installed": true, "response_observation": "bounded_response_buffer", "buffered_transport": true, "unverified_transport": []string{"unbuffered stream timing", "early downstream cancellation"}, "response_buffer_max_bytes": 4 << 20, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
+	return map[string]any{"installed": true, "response_observation": "original_stream_with_source_proof", "buffered_transport": false, "unverified_transport": []string{"live stream timing", "live early downstream cancellation"}, "response_buffer_max_bytes": 4 << 20, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
 		"pending_tools": len(f.pending), "owned_backend_death_verified": f.backendDead, "journal": append([]map[string]any(nil), f.journal...),
 		"guarantee": "no public admission after gate closure; owned backend death stops local background sends; already remote inflight remains unknown"}
 }
