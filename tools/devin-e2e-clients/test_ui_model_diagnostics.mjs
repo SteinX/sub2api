@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createModelDiagnostics, modelControlSnapshot } from './ui-model-diagnostics.mjs'
+import { createModelDiagnostics, createCatalogProgress, modelControlSnapshot } from './ui-model-diagnostics.mjs'
 
 const origin = 'http://127.0.0.1:9001'
 function request(path, method = 'GET') { return { url: () => new URL(path, origin).href, method: () => method } }
@@ -8,6 +8,30 @@ function response(path, payload, status = 200) {
   return { request: () => request(path), status: () => status, json: async () => payload }
 }
 const manifest = '/v1/models?client_version=0.158.0'
+
+test('a canceled response reader never supplies a transport-finished event', async () => {
+  const observer = createModelDiagnostics(origin, 'swe-2-high'), events = []
+  const progress = createCatalogProgress(observer, (...event) => events.push(event))
+  const req = request(manifest)
+  const res = { request: () => req, status: () => 200, json: async () => { throw new Error('synthetic cancellation') } }
+  progress.request(req); progress.responseHeaders(res)
+  await observer.response(res)
+  progress.requestFailed(req)
+  assert.equal(observer.diagnostics.model_response_shape, 'invalid_json')
+  assert.deepEqual(events.map(event => event[0]), ['request', 'headers', 'request-failed'])
+})
+
+test('only the network finished event records a completed catalog body', async () => {
+  const observer = createModelDiagnostics(origin, 'swe-2-high'), events = []
+  const progress = createCatalogProgress(observer, (...event) => events.push(event))
+  const req = request(manifest)
+  const res = { request: () => req, status: () => 200, json: async () => ({ models: [{ slug: 'swe-2-high' }] }) }
+  progress.request(req); progress.responseHeaders(res)
+  await observer.response(res)
+  assert.equal(events.some(event => event[0] === 'body-finished'), false)
+  progress.requestFinished(req)
+  assert.deepEqual(events.at(-1), ['body-finished', 1, 200])
+})
 
 test('dashboard statistics cannot stand in for the public manifest', async () => {
   const observer = createModelDiagnostics(origin, 'swe-2-high')

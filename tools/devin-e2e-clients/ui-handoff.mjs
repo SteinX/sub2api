@@ -5,7 +5,7 @@ import { writeFile, mkdir, access } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { createModelDiagnostics, modelControlSnapshot } from './ui-model-diagnostics.mjs'
+import { createModelDiagnostics, createCatalogProgress, modelControlSnapshot } from './ui-model-diagnostics.mjs'
 
 let stage = 'input'
 let failureStage = null
@@ -43,20 +43,10 @@ async function main() {
     const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] })
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort())
     page = await context.newPage()
-    const catalogOrdinals = new WeakMap()
-    page.on('request', request => {
-      const before = diagnostics.catalog_requests
-      observer.request(request)
-      if (diagnostics.catalog_requests !== before) {
-        catalogOrdinals.set(request, diagnostics.catalog_requests)
-        setStage(stage, 'request', diagnostics.catalog_requests)
-      }
-    })
-    page.on('requestfailed', request => {
-      observer.requestFailed(request)
-      const ordinal = catalogOrdinals.get(request)
-      if (ordinal) setStage(stage, 'request-failed', ordinal)
-    })
+    const progress = createCatalogProgress(observer, (event, ordinal, status) => setStage(stage, event, ordinal, status))
+    page.on('request', progress.request)
+    page.on('requestfailed', progress.requestFailed)
+    page.on('requestfinished', progress.requestFinished)
     page.on('response', async response => {
       const route = new URL(response.url()).pathname
       if (route === '/api/v1/auth/login') journey.login_http_status = response.status()
@@ -69,10 +59,8 @@ async function main() {
           journey.selected_key_matches = Boolean(selected?.key && createHash('sha256').update(selected.key).digest('hex') === input.expected_key_sha256)
         } catch { /* never log key responses */ }
       }
-      const ordinal = catalogOrdinals.get(response.request())
-      if (ordinal) setStage(stage, 'headers', ordinal, response.status())
+      progress.responseHeaders(response)
       await observer.response(response)
-      if (ordinal) setStage(stage, 'body-finished', ordinal, response.status())
     })
     page.on('pageerror', () => { diagnostics.page_errors++ })
     setStage('navigate')
