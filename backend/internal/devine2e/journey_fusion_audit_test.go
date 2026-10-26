@@ -95,17 +95,27 @@ func collectFusionAudit(ctx context.Context, records []agentRequest, readers fus
 				valid = false
 			}
 			attemptsSeen[attempt.ID] = true
+			var settledCost any
+			if attempt.Settled {
+				settledCost = auditAmount(attempt.CostUSD)
+			}
 			entry := map[string]any{"attempt_sha256": fusion.Digest(attempt.ID), "role": role, "turn": attempt.Turn,
 				"model_uid": auditModel(attempt.Model), "billing_model_uid": auditModel(attempt.BillingModel),
 				"purpose": auditPurpose(attempt.Purpose), "status": auditAttemptState(attempt.Status), "settled": attempt.Settled, "applied": attempt.Applied,
-				"failure_present": attempt.Failure != "" || attempt.Error != nil, "cost_usd": auditAmount(attempt.CostUSD),
-				"usage_available": false, "usage_rows": nil, "actual_cost_usd": nil, "total_cost_usd": nil, "usage_matches": false,
+				"failure_present": attempt.Failure != "" || attempt.Error != nil, "cost_usd": settledCost,
+				"usage_available": false, "usage_query_available": false, "usage_rows": nil, "actual_cost_usd": nil, "total_cost_usd": nil, "usage_matches": false,
 				"input_tokens": nil, "output_tokens": nil, "cache_creation_tokens": nil, "cache_read_tokens": nil}
 			usage, usageErr := readers.Usage(ctx, attempt)
 			if usageErr == nil {
 				matches := usage.Rows == 1 && usage.NegativeRows == 0 && usage.ModelRows == 1 && finiteNonnegative(usage.ActualUSD) && finiteNonnegative(usage.TotalUSD) && math.Abs(usage.ChargedUSD-attempt.CostUSD) <= 1e-9
-				entry["usage_available"], entry["usage_rows"], entry["actual_cost_usd"], entry["total_cost_usd"], entry["usage_matches"] = true, usage.Rows, auditAmount(usage.ActualUSD), auditAmount(usage.TotalUSD), matches
-				entry["input_tokens"], entry["output_tokens"], entry["cache_creation_tokens"], entry["cache_read_tokens"] = usage.InputTokens, usage.OutputTokens, usage.CacheWriteTokens, usage.CacheReadTokens
+				entry["usage_query_available"], entry["usage_rows"] = true, usage.Rows
+				if usage.Rows > 0 {
+					entry["usage_available"], entry["usage_rows"], entry["actual_cost_usd"], entry["total_cost_usd"], entry["usage_matches"] = true, usage.Rows, auditAmount(usage.ActualUSD), auditAmount(usage.TotalUSD), matches
+					entry["input_tokens"], entry["output_tokens"], entry["cache_creation_tokens"], entry["cache_read_tokens"] = usage.InputTokens, usage.OutputTokens, usage.CacheWriteTokens, usage.CacheReadTokens
+				} else {
+					entry["error_code"] = "usage_missing"
+				}
+
 				valid = valid && matches
 			} else {
 				entry["error_code"] = "usage_unavailable"

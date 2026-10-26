@@ -261,7 +261,7 @@ def command(client, model, resume):
     return cmd + [prompt]
 
 
-def invoke(args, directory, resume=False):
+def invoke(args, directory, resume=False, protected=None):
     env = project_environment(directory)
     for name in SENSITIVE_ENV | {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"}:
         env.pop(name, None)
@@ -276,6 +276,8 @@ def invoke(args, directory, resume=False):
     kwargs = isolation(args.client)
     client_started_ns = time.time_ns()
     nonce = json.loads(project_bytes(directory / 'workspace', 'requirements.json'))['nonce']
+    protected = dict(protected) if protected is not None else {name: digest(project_bytes(directory / 'workspace', name)) for name in ('requirements.json', 'test_project.py', 'run_tests.py')}
+    tests = TestReceipts(lambda name: project_bytes(directory / 'workspace', name), nonce, protected, client_started_ns)
     proc = start_child(command(args.client,args.model,resume),directory,env,gateway=args.ui_url,client=args.client,
                        stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     result = {"exit_code": None, "timed_out": False, "event_error": False, "final_text_matches": False,
@@ -285,8 +287,6 @@ def invoke(args, directory, resume=False):
     result.update(reader_completed=False, reader_error=False, project_nonce_sha256=digest(nonce.encode()))
     size = 0
     tool_evidence = ToolEvidence(directory / 'workspace', TEST_COMMAND)
-    protected = {name: digest(project_bytes(directory / 'workspace', name)) for name in ('requirements.json', 'test_project.py', 'run_tests.py')}
-    tests = TestReceipts(lambda name: project_bytes(directory / 'workspace', name), nonce, protected, client_started_ns)
     completion = CompletionEvidence()
 
     def consume_lines():
@@ -419,7 +419,7 @@ def main():
                           'client':args.client, 'profile':args.profile, 'tier':tier, 'eligible_for_real_e2e':False,'isolation':isolated}))
         return 0
     source_before_task = digest(project_bytes(workspace, 'price_math.py'))
-    first = invoke(args, directory)
+    first = invoke(args, directory, protected=protected)
     # Snapshot before executing any oracle: a correct output alone cannot prove
     # the client repaired the source, nor can a later helper supply the change.
     source_after_task = digest(project_bytes(workspace, 'price_math.py'))
@@ -439,7 +439,7 @@ def main():
                    'client_tests': first['client_tests_succeeded'], 'oracle': after.returncode == 0 if after is not None else None}
     task_passed = all(task_checks.values())
     source_before_resume = source_after_task
-    resumed = invoke(args, directory, True) if task_passed else None
+    resumed = invoke(args, directory, True, protected=protected) if task_passed else None
     same_session = resumed is not None and first["client_session_sha256"] is not None and first["client_session_sha256"] == resumed["client_session_sha256"]
     resume_nonce_valid = resumed is not None and resumed['project_nonce_sha256'] == project_nonce_hash
     extended = {}

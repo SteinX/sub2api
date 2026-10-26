@@ -92,7 +92,8 @@ def terminal_details(event):
     # Pinned OMP omits exitCode on successful synchronous commands. This alone
     # proves no exit value; the matching runner receipt must supply it as well.
     source = 'client_metadata' if type(code) is int else 'omp_success_and_runner_receipt'
-    blocked = bool(details.get('timedOut') or details.get('async') or (code is None and event.get('isError') is not False))
+    blocked = bool(details.get('timedOut') or details.get('async') or ('exitCode' in details and type(code) is not int)
+                   or (code is None and event.get('isError') is not False))
     return code if type(code) is int else None, source, blocked
 
 
@@ -139,8 +140,15 @@ class TestReceipts:
         if len(lines) != 1:
             record['receipt_status'] = 'missing' if not lines else 'ambiguous'
             return
+        record['receipt_output_bytes'] = len(lines[0].encode())
+        record['receipt_output_sha256'] = digest(lines[0].encode())
+        record['receipt_output_closed_object'] = lines[0].rstrip().endswith('}')
         try:
             proof = json.loads(lines[0])
+        except ValueError:
+            record['receipt_status'] = 'output_invalid_json'
+            return
+        try:
             status = self.validate(proof, code, blocked)
             record['receipt_status'] = status
             if status != 'verified':
@@ -161,8 +169,12 @@ class TestReceipts:
                 source_after_sha256=proof['source_after_sha256'], started_ns=proof['started_ns'], finished_ns=proof['finished_ns'],
                 tests_run=proof['tests_run'], failures=proof['failures'], errors=proof['errors'], skipped=proof['skipped'],
                 expected_failures=proof['expected_failures'], unexpected_successes=proof['unexpected_successes'])
-        except (OSError, ValueError, KeyError, TypeError):
-            record['receipt_status'] = 'unavailable_or_invalid'
+        except OSError:
+            record['receipt_status'] = 'file_unavailable'
+        except ValueError:
+            record['receipt_status'] = 'file_invalid_json'
+        except (KeyError, TypeError):
+            record['receipt_status'] = 'invalid_value'
 
     def validate(self, proof, code, blocked):
         fields = {'schema', 'run_id', 'started_ns', 'finished_ns', 'project_nonce_sha256', 'protected_sha256',

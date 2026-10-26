@@ -34,7 +34,7 @@ func fusionAuditFixture() fusion.Session {
 }
 
 func TestFusionAuditSnapshot(t *testing.T) {
-	for _, scenario := range []string{"complete", "failed_http", "no_report", "wrong_call", "only_tool", "old_turn", "maintenance", "unsettled", "failure_applied", "bad_boundaries", "duplicate_usage", "missing_usage", "unknown_usage", "unknown_session", "nan_cost", "cleared_response"} {
+	for _, scenario := range []string{"complete", "failed_http", "no_report", "wrong_call", "only_tool", "old_turn", "maintenance", "unsettled", "failure_applied", "bad_boundaries", "duplicate_usage", "missing_usage", "unknown_usage", "unknown_session", "nan_cost", "cleared_response", "pending"} {
 		t.Run(scenario, func(t *testing.T) {
 			session := fusionAuditFixture()
 			switch scenario {
@@ -50,6 +50,11 @@ func TestFusionAuditSnapshot(t *testing.T) {
 				session.Attempts[2].Turn = 0
 			case "maintenance":
 				session.Attempts[2].Purpose = fusion.Compaction
+			case "pending":
+				session.Attempts[1].Status = "unknown"
+				session.Attempts[1].Settled = false
+				session.Attempts[1].Applied = false
+				session.Attempts[1].CostUSD = 0
 			case "unsettled":
 				session.Attempts[2].Settled = false
 			case "failure_applied":
@@ -74,6 +79,9 @@ func TestFusionAuditSnapshot(t *testing.T) {
 				},
 				Usage: func(ctx context.Context, attempt fusion.Attempt) (fusionAuditUsage, error) {
 					lookups++
+					if scenario == "pending" && attempt.Status == "unknown" {
+						return fusionAuditUsage{}, nil
+					}
 					if scenario == "unknown_usage" {
 						return fusionAuditUsage{}, errors.New("do not serialize this SQL error")
 					}
@@ -102,6 +110,23 @@ func TestFusionAuditSnapshot(t *testing.T) {
 			}
 			sessions := audit["sessions"].([]map[string]any)
 			require.Len(t, sessions, 1)
+			if scenario == "missing_usage" || scenario == "pending" {
+				entries := sessions[0]["attempts"].([]map[string]any)
+				index := 0
+				if scenario == "pending" {
+					index = 1
+				}
+				require.Equal(t, 0, entries[index]["usage_rows"])
+				require.Equal(t, false, entries[index]["usage_available"])
+				require.Equal(t, true, entries[index]["usage_query_available"])
+				for _, field := range []string{"actual_cost_usd", "total_cost_usd", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"} {
+					require.Nil(t, entries[index][field], field)
+				}
+				if scenario == "pending" {
+					require.Nil(t, entries[index]["cost_usd"], "unsettled cost is unknown, not free")
+				}
+			}
+
 			if scenario == "unknown_usage" {
 				attempts := sessions[0]["attempts"].([]map[string]any)
 				require.Nil(t, attempts[0]["usage_rows"])
