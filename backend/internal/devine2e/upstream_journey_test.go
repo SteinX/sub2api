@@ -25,6 +25,18 @@ type projectJourney struct {
 	maxContextBytes int
 }
 
+func (j *projectJourney) boundedLongScenario(workspace, scenario string) func() {
+	j.mu.Lock()
+	oldWorkspace, oldMutation, oldScenario, oldMax := j.workspace, j.mutationTool, j.testScenario, j.maxContextBytes
+	j.workspace, j.mutationTool, j.testScenario, j.maxContextBytes = workspace, "edit", "bounded_long_"+scenario, 0
+	j.mu.Unlock()
+	return func() {
+		j.mu.Lock()
+		j.workspace, j.mutationTool, j.testScenario, j.maxContextBytes = oldWorkspace, oldMutation, oldScenario, oldMax
+		j.mu.Unlock()
+	}
+}
+
 const fixedProjectSource = `import json
 from pathlib import Path
 

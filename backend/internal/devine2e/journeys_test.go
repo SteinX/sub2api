@@ -96,6 +96,9 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	extra["devin_fusion_profiles"] = []fusion.Profile{profile}
 	api(t, app, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra})
 	if os.Getenv("DEVIN_JOURNEY_LONG_ONLY") == "true" {
+		// Reproduce the preceding failure-scenario state from the full suite.
+		// The long fixture must isolate it rather than inherit a max-token stop.
+		verifyProjectMutationNegatives(t, app, fixture, key, userPassword, keyID)
 		verifyBoundedLongJourney(t, app, fixture, userPassword, profile.PublicModel, keyID)
 		return
 	}

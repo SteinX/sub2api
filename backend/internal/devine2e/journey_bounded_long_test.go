@@ -110,14 +110,9 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 			nativeStart := len(fixture.chats)
 			fixture.mu.Unlock()
 			directory := t.TempDir()
-			fixture.journey.mu.Lock()
-			fixture.journey.workspace = filepath.Join(directory, "workspace")
-			fixture.journey.testScenario = "bounded_long_" + scenario
-			fixture.journey.mu.Unlock()
+			restoreScenario := fixture.journey.boundedLongScenario(filepath.Join(directory, "workspace"), scenario)
 			t.Cleanup(func() {
-				fixture.journey.mu.Lock()
-				fixture.journey.testScenario = ""
-				fixture.journey.mu.Unlock()
+				restoreScenario()
 				app.stop(t)
 				app.start(t)
 			})
@@ -146,6 +141,13 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 				report = map[string]any{}
 			}
 			_, records := admission.snapshot()
+			errors := map[string]int{}
+			for _, record := range records {
+				if record.ErrorCode != "" {
+					errors[record.ErrorCode]++
+				}
+			}
+			report["public_error_codes"] = errors
 			report["batch_guard"] = fence.snapshot()
 			report["public_context_witness"] = longPublicContext(directory, records, report)
 			report["client_process_cleanup_verified"] = cleanupErr == nil
