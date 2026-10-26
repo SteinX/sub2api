@@ -22,7 +22,7 @@ from run import ROOT, PINS, SENSITIVE_ENV, child_environment, write_json
 import process_cleanup
 import container_sandbox
 import batch_control
-from ui_evidence import parse_ui_output
+from ui_evidence import parse_ui_output, communicate_ui
 from project_evidence import ToolEvidence
 from project_completion import CompletionEvidence
 from project_tests import TestReceipts, TEST_RUNNER
@@ -456,7 +456,7 @@ def main():
     ui=start_child(['node',str(ROOT/'ui-handoff.mjs')],directory,project_environment(directory),gateway=args.ui_url,client=args.client,
                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     try:
-        stdout, _ = ui.communicate(json.dumps(ui_input).encode(), timeout=60)
+        stdout, _ = communicate_ui(ui,json.dumps(ui_input).encode(),upstream=args.upstream,catalog_recovery=args.catalog_recovery_probe)
     except subprocess.TimeoutExpired as error:
         try: terminal,progress=parse_ui_output(error.output or b'',partial=True)
         except ValueError: terminal=progress=None

@@ -1,5 +1,7 @@
 """Bounded, structural UI progress survives an outer process timeout."""
 import json
+import subprocess
+import time
 
 STAGES=frozenset({'browser-launch','navigate','product-login','product-key-list','product-key-modal','model-select-control',
                  'catalog-loading','catalog-timeout','catalog-refresh','model-target-option','client-tab','environment-key',
@@ -35,3 +37,31 @@ def parse_ui_output(raw,partial=False):
     if terminal is None and not partial:raise ValueError('ui_terminal_missing')
     if progress is not None:progress={**progress,'observations':observations[-128:],'observations_truncated':len(observations)>128}
     return terminal,progress
+
+
+def communicate_ui(process,input_data,*,upstream,catalog_recovery):
+    """One process, no resend: bound mock cold start independently of UI work.
+
+    The recovery probe deliberately consumes 16s after the modal opens. CI
+    evidence showed 39.6s of browser setup consuming its prior entire 60s cap.
+    Real/ordinary paths keep 60s. The mock probe allows startup<=45s, UI<=60s,
+    absolute process<=85s, and remains inside the existing Go 90s case bound.
+    """
+    if upstream!='synthetic' or not catalog_recovery:
+        return process.communicate(input_data,timeout=60)
+    started=time.monotonic()
+    try:
+        return process.communicate(input_data,timeout=45)
+    except subprocess.TimeoutExpired as error:
+        try: _,progress=parse_ui_output(error.output or b'',partial=True)
+        except ValueError: raise error from None
+        observations=(progress or {}).get('observations',[])
+        ready=next((frame['elapsed_ms']/1000 for frame in observations if frame['stage']=='navigate'),None)
+        elapsed=time.monotonic()-started
+        if ready is None or ready>45 or ready>elapsed or (progress or {}).get('observations_truncated'):
+            raise
+        remaining=min(85-elapsed,60-(elapsed-ready))
+        if remaining<=0:raise
+        # Continue reading the same process; never resend stdin, restart the
+        # browser, click refresh again, authenticate or issue a model request.
+        return process.communicate(timeout=remaining)
