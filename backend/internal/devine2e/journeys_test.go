@@ -95,6 +95,10 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	require.NoError(t, json.Unmarshal([]byte(current.Get("extra").Raw), &extra))
 	extra["devin_fusion_profiles"] = []fusion.Profile{profile}
 	api(t, app, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra})
+	verifyProjectTestReceipts(t, app, fixture, key, userPassword)
+	if os.Getenv("DEVIN_JOURNEY_EVIDENCE_ONLY") == "true" {
+		return // Only this explicitly synthetic runner has a focused evidence mode.
+	}
 	verifyProjectMutationNegatives(t, app, fixture, key, userPassword)
 	reports := []map[string]any{}
 	billing := map[string]any{"verified": false, "tier": "synthetic billing; not a provider invoice"}
