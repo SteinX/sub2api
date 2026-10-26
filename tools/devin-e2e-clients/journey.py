@@ -22,6 +22,7 @@ from run import ROOT, PINS, SENSITIVE_ENV, child_environment, write_json
 import process_cleanup
 import container_sandbox
 import batch_control
+from ui_evidence import parse_ui_output
 from project_evidence import ToolEvidence
 from project_completion import CompletionEvidence
 from project_tests import TestReceipts, TEST_RUNNER
@@ -456,17 +457,21 @@ def main():
                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     try:
         stdout, _ = ui.communicate(json.dumps(ui_input).encode(), timeout=60)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
+        try: terminal,progress=parse_ui_output(error.output or b'',partial=True)
+        except ValueError: terminal=progress=None
         os.killpg(ui.pid, signal.SIGTERM)
         try:
             ui.wait(timeout=3)
         except subprocess.TimeoutExpired:
             os.killpg(ui.pid, signal.SIGKILL)
             ui.wait(timeout=3)
-        raise
+        print(json.dumps({'status':'failed','stage':'product-ui-process-timeout','ui':terminal,'ui_progress':progress,'tier':tier}))
+        return 1
     finally:
         ACTIVE.discard(ui)
-    handoff = json.loads(stdout)
+    handoff,ui_progress = parse_ui_output(stdout)
+    handoff['process_progress']=ui_progress
     if ui.returncode == 0 and handoff.get('blocked') is True:
         print(json.dumps({'status': 'unsupported_by_product', 'handoff': handoff, 'client_identity': client_identity,
                           'client': args.client, 'profile': args.profile, 'tier': tier, 'eligible_for_real_e2e': False,'isolation':isolated}))
