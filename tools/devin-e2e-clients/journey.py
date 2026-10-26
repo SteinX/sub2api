@@ -402,9 +402,12 @@ def main():
     parser.add_argument('--stage', choices=('task', 'handoff'), default='task')
     parser.add_argument('--upstream', choices=('synthetic', 'real'), default='synthetic')
     parser.add_argument('--catalog-recovery-probe', action='store_true')
+    parser.add_argument('--catalog-observer-delay-ms', type=int, default=0)
     args = parser.parse_args()
     if args.catalog_recovery_probe and args.upstream != 'synthetic':
         parser.error('catalog recovery probe requires synthetic upstream')
+    if args.catalog_observer_delay_ms and (not args.catalog_recovery_probe or not 0 <= args.catalog_observer_delay_ms <= 17000):
+        parser.error('observer delay requires a bounded synthetic catalog probe')
     tier = 'client_mock' if args.upstream == 'synthetic' else 'product_live_partial'
     client_identity = identity(args.client)
     isolation(args.client)  # reject writable personal OMO state before setup
@@ -414,6 +417,7 @@ def main():
     ui_input = {"directory": str(directory), "workspace": str(workspace), "client": args.client, "model": args.model, "ui_url": args.ui_url, "profile": args.profile, "test_command": TEST_COMMAND}
     if args.catalog_recovery_probe:
         ui_input['catalog_recovery_probe'] = True
+        ui_input['catalog_observer_delay_ms'] = args.catalog_observer_delay_ms
     ui_input.update(email='user@devin-e2e.invalid', password=os.environ['DEVIN_JOURNEY_UI_PASSWORD'], key_name='e2e-key',
                     expected_key_sha256=digest(os.environ['DEVIN_JOURNEY_GATEWAY_KEY'].encode()))
     kwargs = isolation(args.client)

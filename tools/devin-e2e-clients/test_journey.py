@@ -1,8 +1,11 @@
 import json
+import io
+from contextlib import redirect_stderr
 import os
 from pathlib import Path
 import tempfile
 import time
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +13,17 @@ import journey
 
 
 class JourneyProofTests(unittest.TestCase):
+    def test_catalog_observer_delay_cannot_expand_real_or_unbounded_execution(self):
+        for flags in [['--catalog-recovery-probe', '--upstream', 'real', '--catalog-observer-delay-ms', '16000'],
+                      ['--catalog-observer-delay-ms', '16000'],
+                      ['--catalog-recovery-probe', '--catalog-observer-delay-ms', '18000'],
+                      ['--catalog-recovery-probe', '--catalog-observer-delay-ms', '-1']]:
+            argv = ['journey.py', '--directory', '/tmp/synthetic', '--client', 'opencode', '--model', 'synthetic',
+                    '--ui-url', 'http://127.0.0.1:1234', '--profile', 'project', *flags]
+            with self.subTest(flags=flags), patch.object(sys, 'argv', argv), patch.object(journey, 'identity') as identity, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit): journey.main()
+                identity.assert_not_called()
+
     def test_pressure_setup_cannot_follow_workspace_or_context_links(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); directory=root/'project'; directory.mkdir(); outside=root/'outside'; outside.mkdir()
