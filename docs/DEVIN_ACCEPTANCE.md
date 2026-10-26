@@ -77,7 +77,7 @@ python3 tools/devin-acceptance/acceptance.py tag-note --mode user_e2e \
 
 ## 非 root 客户端隔离
 
-UID 0 的既有路径通过把浏览器、CLI、工程代码降为 UID 65534 来隔离原生凭据和账本。普通云端用户不能仅取消这项检查：相同 UID 的未隔离进程可读取项目外文件和父进程环境。当前云环境的 user namespace 因 `uid_map` 只读不可用，Landlock 也未提供；没有修改系统设置或请求提权。
+UID 0 的既有路径通过把浏览器、CLI、工程代码降为 UID 65534 来隔离原生凭据和账本。普通用户不能仅取消这项检查：相同 UID 的未隔离进程可读取项目外文件和父进程环境。user namespace 或 Landlock 不可用时，不修改系统设置或请求提权来绕过限制。
 
 非 root 路径使用环境已有的本地 Docker 权限运行受限客户端子容器。Daemon 没有改配置，也不声称它是 rootless Docker daemon。容器使用调用者 UID、`cap-drop=ALL`、`no-new-privileges`、只读根、独立 PID namespace 和 `network=none`，限制内存、CPU、PID 和输出。工程 oracle 的 stdout/stderr 在宿主共享 2 MiB 上限，容器原始日志禁用；超限终止并验证 CID 清理。只挂载当前合成工程及客户端状态目录为可写；锁定客户端、系统库、公开 CA 和 Chromium 配置只读。个人 HOME、Docker socket、原生 PAT、数据库／Redis 密码、批准文件、账本和私有 registry 不挂载或传给模型。
 

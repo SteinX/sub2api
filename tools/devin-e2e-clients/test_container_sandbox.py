@@ -9,13 +9,24 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import container_sandbox as sandbox
 import journey
 
 
 class SandboxRegistryTests(unittest.TestCase):
+    def test_zero_docker_client_exit_cannot_certify_unknown_child_outcome(self):
+        for state,inspect_code in [({'Status':'running','Running':True,'ExitCode':0},0),
+                                   ({'Status':'created','Running':False,'ExitCode':0},0),
+                                   ({'Status':'exited','Running':False,'ExitCode':'0'},0),({},1)]:
+            with self.subTest(state=state,inspect_code=inspect_code):
+                client=Mock(returncode=0);client.wait.return_value=0
+                proc=sandbox.ContainerProcess(client,'synthetic-cid','synthetic-scope','private-registry',Mock(),None)
+                result=subprocess.CompletedProcess([],inspect_code,json.dumps(state).encode(),b'')
+                with patch.object(sandbox,'docker',return_value=result),patch.object(sandbox,'cleanup_registry',return_value=True):
+                    self.assertNotEqual(0,proc.wait())
+
     def test_invalid_registry_never_operates_on_docker(self):
         with tempfile.TemporaryDirectory() as temporary:
             path=Path(temporary)/'registry'; path.write_text('{"scope":"not-an-id"}\n'); path.chmod(0o600)

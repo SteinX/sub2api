@@ -197,10 +197,13 @@ class ContainerProcess:
         if self.cleaned:
             return
         try:
+            # An attach client's zero exit is not a child outcome. Created,
+            # still-running or unreadable containers must remain failures.
+            self.exitcode=125
             result=docker(['inspect','--format','{{json .State}}',self.cid])
             if result.returncode==0:
                 state=json.loads(result.stdout)
-                if not state.get('Running'):
+                if state.get('Status')=='exited' and state.get('Running') is False and type(state.get('ExitCode')) is int:
                     self.exitcode=state['ExitCode']
             if not cleanup_registry(self.registry,self.scope):
                 raise ValueError('sandbox_container_cleanup_unverified')
