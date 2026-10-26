@@ -26,7 +26,7 @@ sha = lambda data: hashlib.sha256(data).hexdigest()
 protected = {name: sha(Path(name).read_bytes()) for name in ("requirements.json", "test_project.py", "run_tests.py")}
 source_before = sha(Path("price_math.py").read_bytes())
 nonce = json.loads(Path("requirements.json").read_text())["nonce"]
-result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("."))
+result = unittest.TextTestRunner(stream=sys.stdout, verbosity=2).run(unittest.defaultTestLoader.discover("."))
 passed = result.wasSuccessful() and result.testsRun > 0 and not result.skipped and not result.expectedFailures
 exit_code = 0 if passed else 1
 proof = {"schema": "devin_project_test_v1", "run_id": uuid.uuid4().hex,
