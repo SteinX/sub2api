@@ -2,7 +2,7 @@
 export function createModelDiagnostics(origin, selectedModel) {
   const diagnostics = {
     model_http_statuses: [], model_count: 0, selected_model_available: false,
-    catalog_requests: 0, catalog_request_failures: 0, cross_origin_catalog_requests: 0,
+    catalog_requests: 0, catalog_request_failures: 0, catalog_request_aborts: 0, cross_origin_catalog_requests: 0,
     model_response_shape: 'not_received', models_field_kind: 'not_received', data_field_kind: 'not_received', page_errors: 0,
     modal_present: false, modal_visible: false, devin_platform: false,
     select_present: false, select_disabled: null, option_count: 0, target_option_present: false,
@@ -22,7 +22,9 @@ export function createModelDiagnostics(origin, selectedModel) {
       if (url.origin !== origin) diagnostics.cross_origin_catalog_requests++
     },
     requestFailed(request) {
-      if (catalogRequest(request)) diagnostics.catalog_request_failures++
+      if (!catalogRequest(request)) return
+      diagnostics.catalog_request_failures++
+      if (request.failure?.()?.errorText === 'net::ERR_ABORTED') diagnostics.catalog_request_aborts++
     },
     async response(response) {
       const url = catalogRequest(response.request())

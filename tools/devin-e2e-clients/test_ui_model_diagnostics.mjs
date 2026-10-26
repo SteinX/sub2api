@@ -64,6 +64,15 @@ test('ordinary model lists and inference responses are excluded', async () => {
   assert.equal(observer.diagnostics.model_response_shape, 'invalid_json')
 })
 
+test('browser aborts are distinguished without retaining arbitrary error messages', () => {
+  const observer = createModelDiagnostics(origin, 'swe-2-high')
+  observer.requestFailed({ ...request(manifest), failure: () => ({ errorText: 'net::ERR_ABORTED' }) })
+  observer.requestFailed({ ...request(manifest), failure: () => ({ errorText: 'synthetic-private-error' }) })
+  assert.equal(observer.diagnostics.catalog_request_failures, 2)
+  assert.equal(observer.diagnostics.catalog_request_aborts, 1)
+  assert.doesNotMatch(JSON.stringify(observer.diagnostics), /synthetic-private-error/)
+})
+
 test('DOM evidence distinguishes missing modal, wrong platform and missing target option', () => {
   try {
     globalThis.document = { querySelector: () => null }
