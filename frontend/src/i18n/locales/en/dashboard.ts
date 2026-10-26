@@ -165,6 +165,8 @@ export default {
         import: 'Import selected model to CC Switch',
         instructionsTitle: 'Connect to Devin',
         refreshModels: 'Refresh available models',
+        modelsLoading: 'Loading available models…',
+        modelsTimeout: 'The model list took too long to load. Select Refresh to try again.',
         noModels: 'No models are available to this key. Check its group and account grants, then refresh.',
         workspace: 'Project workspace (absolute path)',
         workspacePlaceholder: 'For example /Users/me/project or C:/work/project',

@@ -33,6 +33,7 @@ func TestDevinClientUserJourneysMock(t *testing.T) {
 	f := newNativeFixture(t)
 	f.agentMode.Store(true)
 	f.journey = &projectJourney{}
+	f.largeCatalog.Store(true)
 	runDevinCloudGatewaySuite(t, "mock", f, "journeys")
 }
 

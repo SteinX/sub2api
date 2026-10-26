@@ -45,6 +45,7 @@ type nativeFixture struct {
 	probePath           string              // guarded by mu
 	longWorkflow        *longNativeWorkflow // configured before serving inference
 	journey             *projectJourney     // configured before serving inference
+	largeCatalog        atomic.Bool         // synthetic discovery stress, set before the suite starts
 }
 
 func newNativeFixture(t *testing.T) *nativeFixture {
@@ -120,6 +121,14 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.agentMode.Load() {
 			models = append(models, &pb.ClientModelConfig{ModelUid: fixtureSidekick, CreditMultiplier: 2, MaxTokens: 200000,
 				ModelInfo: &pb.ModelInfo{MaxOutputTokens: 32000, ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}}})
+		}
+		if f.largeCatalog.Load() {
+			description := strings.Repeat("Synthetic discovery metadata. ", 24)
+			for len(models) < 239 {
+				uid := "synthetic-catalog-" + strconv.Itoa(len(models))
+				models = append(models, &pb.ClientModelConfig{ModelUid: uid, Label: uid, Description: &description, MaxTokens: 200000,
+					ModelInfo: &pb.ModelInfo{ModelUid: uid, MaxOutputTokens: 32000, ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}}})
+			}
 		}
 		writeProto(&pb.GetCliModelConfigsResponse{ClientModelConfigs: models})
 	case devin.UserJWTPath:

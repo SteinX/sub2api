@@ -52,6 +52,16 @@ func TestDevinDiscoveryDecodesOneCatalogPerAccount(t *testing.T) {
 	require.Len(t, models, 239)
 	require.EqualValues(t, 1, encoded.calls.Load(), "bulk discovery must not decode the complete persisted catalog for each candidate UID")
 	require.Same(t, encoded, account.Extra[devinCatalogExtraKey], "request preparation must not mutate the repository's shared account")
+	// A subsequent request must see a changed grant, rather than reuse a
+	// process-wide decoded catalog or the independent model-list TTL.
+	var snapshot map[string]any
+	require.NoError(t, json.Unmarshal(raw, &snapshot))
+	snapshot["models"].([]any)[0].(map[string]any)["disabled"] = true
+	encoded.data, err = json.Marshal(snapshot)
+	require.NoError(t, err)
+	require.Len(t, svc.GetAvailableModels(context.Background(), &group, PlatformDevin), 238)
+	require.EqualValues(t, 2, encoded.calls.Load())
+	require.Same(t, encoded, account.Extra[devinCatalogExtraKey])
 }
 
 func BenchmarkDevinDiscoverySerializedCatalog(b *testing.B) {
