@@ -72,7 +72,7 @@ func verifyJourneyCatalogRecovery(t *testing.T, app *application, fixture *nativ
 	var report map[string]any
 	parseErr := json.Unmarshal(output, &report)
 	defer func() {
-		writeAgentArtifact(t, "catalog-recovery-ui.json", map[string]any{"ui": report, "catalog_requests": catalogs.Load(), "canceled_first_request": canceled.Load(), "cleanup_verified": cleanupErr == nil, "synthetic_upstream": true})
+		writeAgentArtifact(t, "journey-catalog-recovery-ui.json", map[string]any{"ui": report, "catalog_requests": catalogs.Load(), "canceled_first_request": canceled.Load(), "cleanup_verified": cleanupErr == nil, "synthetic_upstream": true})
 	}()
 	require.NoError(t, parseErr)
 	require.NoError(t, cleanupErr)
