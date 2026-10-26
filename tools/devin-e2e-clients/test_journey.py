@@ -1,15 +1,42 @@
 import json
+import io
 import os
 from pathlib import Path
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import journey
 
 
 class JourneyProofTests(unittest.TestCase):
+    def test_zero_exit_cannot_hide_truncated_reader_after_an_earlier_normal_terminal(self):
+        events = [{'type': 'step_start', 'sessionID': 'synthetic-session'},
+                  {'type': 'text', 'part': {'id': 'part-1', 'text': 'Verified the project.'}},
+                  {'type': 'step_finish', 'part': {'reason': 'stop'}}]
+        wire = b''.join(json.dumps(event).encode() + b'\n' for event in events) + b'x' * (4 * 1024 * 1024 + 1)
+        class Child:
+            pid = 1073741823
+            returncode = 0
+            stdout = io.BytesIO(wire)
+            def wait(self, timeout=None):
+                return 0
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); (root / 'workspace').mkdir()
+            (root / 'workspace/requirements.json').write_text(json.dumps({'nonce': 'synthetic'}))
+            args = SimpleNamespace(client='opencode', model='synthetic', ui_url='http://127.0.0.1')
+            with patch.object(journey, 'isolation', return_value={}), patch.object(journey, 'project_environment', return_value={}), \
+                 patch.object(journey, 'start_child', return_value=Child()), patch.object(journey.os, 'killpg'), \
+                 patch.dict(os.environ, {'DEVIN_JOURNEY_GATEWAY_KEY': 'synthetic'}):
+                result = journey.invoke(args, root)
+            self.assertEqual(0, result['exit_code'])
+            self.assertTrue(result['normal_stop'])
+            self.assertTrue(result['reader_error'])
+            self.assertFalse(result['reader_completed'])
+            self.assertFalse(result['passed'])
+
     def test_pressure_setup_cannot_follow_workspace_or_context_links(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary); directory=root/'project'; directory.mkdir(); outside=root/'outside'; outside.mkdir()

@@ -312,8 +312,9 @@ def invoke(args, directory, resume=False):
         for raw in iter(lambda: proc.stdout.readline(4 * 1024 * 1024 + 1), b''):
             size += len(raw)
             if size > 16 * 1024 * 1024 or len(raw) > 4 * 1024 * 1024:
+                result['reader_error'] = True
                 os.killpg(proc.pid, signal.SIGKILL)
-                return
+                return False
             try:
                 event = json.loads(raw)
             except (ValueError, UnicodeDecodeError):
@@ -362,14 +363,13 @@ def invoke(args, directory, resume=False):
                         result['bash_exit_code'] = 0 if success else None
                         result['bash_exit_source'] = 'protected project test runner receipt' if success else 'unverified'
                         result['client_tests_succeeded'] |= success
+        return True  # Only iterator EOF certifies complete event consumption.
 
     def consume():
         try:
-            consume_lines()
+            result['reader_completed'] = consume_lines()
         except (OSError, ValueError, TypeError, AttributeError):
             result['reader_error'] = True
-        finally:
-            result['reader_completed'] = True
 
     thread = threading.Thread(target=consume, daemon=True)
     thread.start()
@@ -419,6 +419,7 @@ def main():
     isolated=isolation_evidence()
     directory = Path(args.directory).resolve()
     workspace, expected, protected = prepare(directory)
+    project_nonce_hash = digest(expected['nonce'].encode())
     ui_input = {"directory": str(directory), "workspace": str(workspace), "client": args.client, "model": args.model, "ui_url": args.ui_url, "profile": args.profile, "test_command": TEST_COMMAND}
     if args.catalog_recovery_probe:
         ui_input['catalog_recovery_probe'] = True
@@ -464,6 +465,7 @@ def main():
     after = run_project_python(directory, ['-c', "import json,sys; from price_math import discounted; assert all(discounted(a,b)==a-b for a,b in json.load(sys.stdin))"],
                                json.dumps(oracle_samples).encode()) if intact and first['exit_code'] is not None and not first['timed_out'] and first['incomplete_tool_calls'] == 0 else None
     task_checks = {'terminal': first['passed'], 'artifact': valid, 'protected_files': intact,
+                   'project_nonce': first['project_nonce_sha256'] == project_nonce_hash,
                    'reads': first['tools']['read'] >= 3,
                    'source_mutation_tool': sum(first['source_mutation_tools'].values()) >= 1,
                    'source_changed': source_before_task != source_after_task,
@@ -480,7 +482,7 @@ def main():
     final = final_project_snapshot(workspace, expected, protected, source_before_resume)
     if resumed is None:
         final['artifact_verified_after_resume'] = final['source_unchanged_after_resume'] = None
-    passed = task_passed and resumed is not None and resumed["passed"] and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
+    passed = task_passed and resumed is not None and resumed["passed"] and resumed['project_nonce_sha256'] == project_nonce_hash and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
     report = {"tier": tier, "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
               "execution_isolation": "separate_uid" if os.geteuid()==0 else "networkless_container_fixed_unix_relay",
               "isolation":isolated,
@@ -488,7 +490,7 @@ def main():
               "client": args.client, "profile": args.profile, "handoff": handoff, "task": first, "resume": resumed,
               'task_checks': task_checks, 'source_before_task_sha256': source_before_task,
               'source_after_task_sha256': source_after_task, 'source_changed_by_task': task_checks['source_changed'],
-              'project_nonce_sha256': digest(expected['nonce'].encode()),
+              'project_nonce_sha256': project_nonce_hash,
               "initial_project_test_failed": True, "artifact_verified_before_oracle": valid, **final,
               "independent_project_test_executed": after is not None,
               "independent_project_test_passed": after.returncode == 0 if after is not None else None,
