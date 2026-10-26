@@ -56,7 +56,7 @@ func verifyJourneyCatalogRecovery(t *testing.T, app *application, fixture *nativ
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", "opencode", "--model", fixtureModel, "--ui-url", ui.URL, "--profile", "project", "--stage", "handoff", "--upstream", "synthetic", "--catalog-recovery-probe")
+	command := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", "opencode", "--model", fixtureModel, "--ui-url", ui.URL, "--profile", "project", "--stage", "handoff", "--upstream", "synthetic", "--catalog-recovery-probe", "--catalog-observer-delay-ms", "16000")
 	gracefulJourneyCommand(command)
 	processRegistry, containerRegistry := journeyRegistryEnvironment(t, app)
 	for _, variable := range os.Environ() {
@@ -82,6 +82,7 @@ func verifyJourneyCatalogRecovery(t *testing.T, app *application, fixture *nativ
 	require.True(t, ok)
 	recovery, ok := handoff["catalog_recovery"].(map[string]any)
 	require.True(t, ok)
+	require.Equal(t, float64(16000), recovery["observer_delay_ms"], "exercise the observer after the product's 15-second timeout")
 	require.Equal(t, float64(238), recovery["models_after_retry"], "the 239 raw entries include one deliberately unverified harness, which must stay hidden")
 	require.Equal(t, false, recovery["blocked_fixture_model_visible"])
 	require.EqualValues(t, 2, catalogs.Load(), "one stalled request and one user-initiated retry; no automatic retry")
