@@ -20,6 +20,7 @@ import time
 
 from run import ROOT, PINS, SENSITIVE_ENV, child_environment, write_json
 import process_cleanup
+import container_sandbox
 
 TEST_COMMAND = "python3 run_tests.py"
 ACTIVE = set()
@@ -84,23 +85,44 @@ sys.exit(exit_code)
 def isolation(client=None):
     if os.geteuid() == 0:
         return {"user": 65534, "group": 65534, "extra_groups": []}
-    if client == "omo" and os.access(Path.home(), os.W_OK) and os.environ.get("GITHUB_ACTIONS") != "true":
-        raise ValueError("OMO requires a disposable CI user or a read-only personal directory")
+    container_sandbox.require_available()
     return {}
+
+
+def isolation_evidence():
+    if os.geteuid()==0:
+        return {'mode':'separate_uid','parent_uid':0,'child_uid':65534}
+    return container_sandbox.evidence()
 
 
 def project_environment(directory):
     env = child_environment(directory)
     for name in {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "DEVIN_E2E_GATEWAY_KEY", "DEVIN_JOURNEY_GATEWAY_KEY", "DEVIN_JOURNEY_UI_PASSWORD"}:
         env.pop(name, None)
-    for name in ['DEVIN_JOURNEY_APPROVAL_FILE', 'DEVIN_JOURNEY_PLAN_FILE', 'DEVIN_JOURNEY_RUN_LEDGER','DEVIN_JOURNEY_PROCESS_REGISTRY']:
+    for name in ['DEVIN_JOURNEY_APPROVAL_FILE', 'DEVIN_JOURNEY_PLAN_FILE', 'DEVIN_JOURNEY_RUN_LEDGER','DEVIN_JOURNEY_PROCESS_REGISTRY','DEVIN_JOURNEY_CONTAINER_REGISTRY']:
         env.pop(name, None)
-    return env
+    allowed={'PATH','HOME','USER','LOGNAME','SHELL','LANG','LANGUAGE','TERM','TZ','TMPDIR','TMP','TEMP','PWD',
+             'XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_STATE_HOME','CLAUDE_CONFIG_DIR','PI_CODING_AGENT_DIR','PI_CONFIG_DIR',
+             'OPENCODE_DISABLE_AUTOUPDATE','npm_config_cache','BUN_INSTALL_CACHE_DIR','CHROMIUM_EXECUTABLE_PATH',
+             'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy',
+             'SSL_CERT_FILE','SSL_CERT_DIR','NODE_EXTRA_CA_CERTS','REQUESTS_CA_BUNDLE','PIP_CERT','CURL_CA_BUNDLE','GIT_SSL_CAINFO',
+             'LD_PRELOAD','LD_LIBRARY_PATH','NODE_OPTIONS'}
+    return {key:value for key,value in env.items() if key in allowed or key.startswith(('CODEX_PROXY','LC_'))}
 
 
 def run_project_python(directory, arguments, input_data=None):
+    if os.geteuid()!=0:
+        return container_sandbox.run(['python3',*arguments],directory,project_environment(directory),input_data=input_data,timeout=15)
     return subprocess.run(['python3', *arguments], cwd=directory / 'workspace', env=project_environment(directory),
                           input=input_data, capture_output=True, timeout=15, **isolation())
+
+
+def start_child(command,directory,env,*,gateway=None,client=None,**kwargs):
+    if os.geteuid()!=0:
+        return container_sandbox.popen(command,directory,env,gateway=gateway,on_start=track,**kwargs)
+    proc=subprocess.Popen(command,cwd=directory/'workspace',env=env,start_new_session=True,**isolation(client),**kwargs)
+    track(proc)
+    return proc
 
 
 def project_bytes(workspace, relative):
@@ -159,6 +181,26 @@ def final_project_snapshot(workspace, expected, protected, source_hash):
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def prepare_pressure(directory,nonce):
+    workspace=os.open(directory/'workspace',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        os.mkdir('context',0o755,dir_fd=workspace)
+        context=os.open('context',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=workspace)
+        try:
+            for index in range(16):
+                noise=os.urandom(4096).hex()
+                data=('CONTEXT_NONCE='+nonce+'\n'+'\n'.join(noise[i:i+64] for i in range(0,len(noise),64))+'\n').encode()
+                fd=os.open(f'part-{index:02d}.txt',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_NONBLOCK,0o600,dir_fd=context)
+                with os.fdopen(fd,'wb') as target:
+                    target.write(data)
+                    if os.geteuid()==0: os.fchown(target.fileno(),65534,65534)
+            if os.geteuid()==0: os.fchown(context,65534,65534)
+        finally:
+            os.close(context)
+    finally:
+        os.close(workspace)
 
 
 def prepare(directory):
@@ -233,9 +275,8 @@ def invoke(args, directory, resume=False):
     kwargs = isolation(args.client)
     client_started_ns = time.time_ns()
     nonce = json.loads(project_bytes(directory / 'workspace', 'requirements.json'))['nonce']
-    proc = subprocess.Popen(command(args.client, args.model, resume), cwd=directory / "workspace", env=env,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, **kwargs)
-    track(proc)
+    proc = start_child(command(args.client,args.model,resume),directory,env,gateway=args.ui_url,client=args.client,
+                       stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     result = {"exit_code": None, "timed_out": False, "event_error": False, "final_text_matches": False,
               "normal_stop": False, "tools": {"read": 0, "write": 0, "bash": 0}, "client_tests_succeeded": False,
               "frames": 0, "parse_errors": 0, "session_seen": False, "client_session_sha256": None, "session_changed": False,
@@ -342,14 +383,15 @@ def main():
     tier = 'client_mock' if args.upstream == 'synthetic' else 'product_live_partial'
     client_identity = identity(args.client)
     isolation(args.client)  # reject writable personal OMO state before setup
+    isolated=isolation_evidence()
     directory = Path(args.directory).resolve()
     workspace, expected, protected = prepare(directory)
     ui_input = {"directory": str(directory), "workspace": str(workspace), "client": args.client, "model": args.model, "ui_url": args.ui_url, "profile": args.profile, "test_command": TEST_COMMAND}
     ui_input.update(email='user@devin-e2e.invalid', password=os.environ['DEVIN_JOURNEY_UI_PASSWORD'], key_name='e2e-key',
                     expected_key_sha256=digest(os.environ['DEVIN_JOURNEY_GATEWAY_KEY'].encode()))
     kwargs = isolation(args.client)
-    ui = subprocess.Popen(["node", str(ROOT / "ui-handoff.mjs")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=project_environment(directory), start_new_session=True, **kwargs)
-    track(ui)
+    ui=start_child(['node',str(ROOT/'ui-handoff.mjs')],directory,project_environment(directory),gateway=args.ui_url,client=args.client,
+                   stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     try:
         stdout, _ = ui.communicate(json.dumps(ui_input).encode(), timeout=60)
     except subprocess.TimeoutExpired:
@@ -365,13 +407,13 @@ def main():
     handoff = json.loads(stdout)
     if ui.returncode == 0 and handoff.get('blocked') is True:
         print(json.dumps({'status': 'unsupported_by_product', 'handoff': handoff, 'client_identity': client_identity,
-                          'client': args.client, 'profile': args.profile, 'tier': tier, 'eligible_for_real_e2e': False}))
+                          'client': args.client, 'profile': args.profile, 'tier': tier, 'eligible_for_real_e2e': False,'isolation':isolated}))
         return 0
     if ui.returncode or not handoff.get("passed"):
         print(json.dumps({"status": "failed", "stage": "product-ui-handoff", "ui": handoff, "tier": tier})); return 1
     if args.stage == 'handoff':
         print(json.dumps({'status':'handoff_only', 'handoff':handoff, 'client_identity':client_identity,
-                          'client':args.client, 'profile':args.profile, 'tier':tier, 'eligible_for_real_e2e':False}))
+                          'client':args.client, 'profile':args.profile, 'tier':tier, 'eligible_for_real_e2e':False,'isolation':isolated}))
         return 0
     first = invoke(args, directory)
     artifact = workspace / "out/report.json"
@@ -394,6 +436,8 @@ def main():
     final = final_project_snapshot(workspace, expected, protected, source_before_resume)
     passed = task_passed and resumed is not None and resumed["passed"] and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
     report = {"tier": tier, "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
+              "execution_isolation": "separate_uid" if os.geteuid()==0 else "networkless_container_fixed_unix_relay",
+              "isolation":isolated,
               "client_identity": client_identity,
               "client": args.client, "profile": args.profile, "handoff": handoff, "task": first, "resume": resumed,
               "initial_project_test_failed": True, "artifact_verified_before_oracle": valid, **final,

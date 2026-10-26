@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STATE_ROOT = ROOT / '.cache/devin-approved-runs'
 sys.path.insert(0,str(ROOT/'tools/devin-e2e-clients'))
 import process_cleanup
+import container_sandbox
 
 
 def checked(args):
@@ -43,7 +44,8 @@ def stop_process(process):
 
 def run(args, plan):
     if os.geteuid() != 0:
-        raise Denied('real_project_requires_unprivileged_child_isolation')
+        try: container_sandbox.require_available()
+        except (ValueError,OSError,subprocess.SubprocessError): raise Denied('rootless_container_isolation_unavailable') from None
     if not args.ledger or not args.artifacts:
         raise Denied('private_run_ledger_and_artifacts_required')
     artifacts = Path(args.artifacts).resolve()
@@ -56,11 +58,14 @@ def run(args, plan):
     artifacts.chmod(0o700)
     registry=artifacts/'private-processes.jsonl'
     with os.fdopen(os.open(registry,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600),'w'): pass
+    container_registry=artifacts/'private-containers.jsonl'
+    with container_sandbox.private_registry(container_registry): pass
     env = dict(os.environ)
     env.update(DEVIN_JOURNEY_REAL='true', DEVIN_JOURNEY_PLAN_FILE=str(Path(args.plan).resolve()),
                DEVIN_JOURNEY_APPROVAL_FILE=str(Path(args.approval).resolve()), DEVIN_JOURNEY_RUN_LEDGER=str(Path(args.ledger).resolve()),
                DEVIN_JOURNEY_RUN_MODE=args.mode, DEVIN_JOURNEY_UI_DIST=str(artifacts/'product-ui'), DEVIN_E2E_ARTIFACTS=str(artifacts),
                DEVIN_JOURNEY_PROCESS_REGISTRY=str(registry),
+               DEVIN_JOURNEY_CONTAINER_REGISTRY=str(container_registry),
                DEVIN_E2E_RUN='^TestDevinClientUserJourneysAuthorized$', DEVIN_E2E_MODEL=plan['models']['direct'],
                DEVIN_E2E_MAX_OUTPUT_TOKENS=str(plan['limits']['output_tokens']), DEVIN_E2E_ALLOW_PAID='true' if args.mode == 'live' else 'false',
                DEVIN_JOURNEY_CAPABILITIES=plan.get('omp_capabilities', 'false'))
@@ -98,7 +103,7 @@ def run(args, plan):
         if process is not None:
             stop_process(process)
         try:
-            clean=process_cleanup.cleanup(registry)
+            clean=process_cleanup.cleanup(registry,str(container_registry))
             ledger_action(args.ledger, 'close')
             if not clean: raise Denied('client_process_cleanup_unverified')
         finally:

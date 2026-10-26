@@ -133,6 +133,8 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 					defer cancel()
 					cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", client, "--model", model, "--ui-url", ui.URL, "--profile", configProfile)
+					gracefulJourneyCommand(cmd)
+					processRegistry, containerRegistry := journeyRegistryEnvironment(t, app)
 					for _, env := range os.Environ() {
 						name, _, _ := strings.Cut(env, "=")
 						if !strings.Contains(" DEVIN_E2E_PAT DEVIN_E2E_CREDENTIAL DEVIN_PAT DEVIN_API_KEY SUB2API_API_KEY SUB2API_USER_TOKEN ", " "+name+" ") {
@@ -141,7 +143,9 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					}
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_GATEWAY_KEY="+key)
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_UI_PASSWORD="+userPassword)
+					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_PROCESS_REGISTRY="+processRegistry, "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
 					output, runErr := cmd.Output()
+					cleanupErr := cleanupJourneyProcessesAt(processRegistry, containerRegistry)
 					var report map[string]any
 					require.NoError(t, json.Unmarshal(output, &report), "journey runner must return sanitized structural evidence")
 					forwarded, requests := admission.snapshot()
@@ -188,6 +192,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 						report["expectation"] = "product refuses known incompatible configuration; task not run"
 					}
 					reports = append(reports, report)
+					require.NoError(t, cleanupErr, "mock client cleanup not verified")
 					writeAgentArtifact(t, "journey-"+strings.ReplaceAll(id, "/", "-")+".json", report)
 					t.Logf("journey=%s status=%v forwarded=%d errors=%v", id, report["status"], forwarded, errors)
 					if client == "omp" && kind == "fusion" && configProfile == "default" && report["status"] == "unsupported_by_product" {

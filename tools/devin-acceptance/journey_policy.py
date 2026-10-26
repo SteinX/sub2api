@@ -113,6 +113,12 @@ def validate(plan, approval, mode, source, environment, now=None):
             raise Denied('group_price_snapshot_unavailable_or_changed') from None
     elif pricing_file:
         raise Denied('unapproved_group_price_snapshot')
+    facts=plan.get('user_price_facts',[])
+    if facts:
+        from price_facts import user_confirmed_swe2_rule
+        rule,provenance=user_confirmed_swe2_rule('swe-2-high',models.values())
+        if facts!=[provenance] or not pricing_file or rule not in json.loads(Path(pricing_file).read_bytes()):
+            raise Denied('user_price_fact_requires_exact_approved_zero_rule')
     credential = environment.get('DEVIN_E2E_PAT') or environment.get('DEVIN_E2E_CREDENTIAL')
     if not credential or '\n' in credential or '\r' in credential:
         raise Denied('native_runtime_credential_reference_missing')

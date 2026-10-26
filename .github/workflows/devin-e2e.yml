@@ -160,6 +160,12 @@ jobs:
           npm ci --prefix tools/devin-e2e-clients --ignore-scripts --omit=optional --no-audit --no-fund
           pnpm --dir frontend install --frozen-lockfile
       - name: Validate acceptance negative cases and runner boundaries
+        # Docker is already required for the isolated PostgreSQL/Redis fixture.
+        # This adds no privileged mode, host networking or daemon permission.
+        run: python3 tools/devin-e2e-clients/container_sandbox.py prepare
+      - name: Validate admission, filesystem and cleanup boundaries
+        env:
+          DEVIN_SANDBOX_INTEGRATION: 'true'
         run: |
           make test-devin-acceptance
           python3 -m unittest discover -s tools/devin-e2e-clients -p 'test_*.py'

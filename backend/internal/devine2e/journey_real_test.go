@@ -255,11 +255,43 @@ func gracefulJourneyCommand(cmd *exec.Cmd) {
 }
 
 func cleanupJourneyProcesses() error {
+	return cleanupJourneyProcessesAt(os.Getenv("DEVIN_JOURNEY_PROCESS_REGISTRY"), os.Getenv("DEVIN_JOURNEY_CONTAINER_REGISTRY"))
+}
+
+func cleanupJourneyProcessesAt(processRegistry, containerRegistry string) error {
 	path, err := filepath.Abs("../../../tools/devin-e2e-clients/process_cleanup.py")
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "python3", path, os.Getenv("DEVIN_JOURNEY_PROCESS_REGISTRY")).Run()
+	cmd := exec.CommandContext(ctx, "python3", path, processRegistry)
+	cmd.Env = append(os.Environ(), "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
+	return cmd.Run()
+}
+
+func journeyRegistryEnvironment(t *testing.T, app *application) (string, string) {
+	t.Helper()
+	process, containers := os.Getenv("DEVIN_JOURNEY_PROCESS_REGISTRY"), os.Getenv("DEVIN_JOURNEY_CONTAINER_REGISTRY")
+	if process == "" {
+		process = filepath.Join(app.dir, "private-processes.jsonl")
+	}
+	if containers == "" {
+		containers = filepath.Join(app.dir, "private-containers.jsonl")
+	}
+	for _, path := range []string{process, containers} {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+		require.NoError(t, err)
+		info, err := file.Stat()
+		require.NoError(t, err)
+		require.True(t, info.Mode().IsRegular())
+		require.Zero(t, info.Mode().Perm()&0077)
+		require.NoError(t, file.Close())
+	}
+	t.Cleanup(func() {
+		if err := cleanupJourneyProcessesAt(process, containers); err != nil {
+			t.Error("child process/container cleanup not verified")
+		}
+	})
+	return process, containers
 }

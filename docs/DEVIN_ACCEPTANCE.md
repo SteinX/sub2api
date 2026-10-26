@@ -75,6 +75,24 @@ python3 tools/devin-acceptance/acceptance.py tag-note --mode user_e2e \
 
 只有真实 E2E 完成并审核的结构化报告可用于该命令。当前没有生成器会把模拟报告升级成真实报告。历史上尚无 Devin 功能的版本继续沿用旧发布流程；dry run 可显示阻碍并继续构建，但不会发布。脚本不修改安全设置、权限、secrets 或 branch protection；读取权限不足即停止相关验收。
 
+## 非 root 客户端隔离
+
+UID 0 的既有路径通过把浏览器、CLI、工程代码降为 UID 65534 来隔离原生凭据和账本。普通云端用户不能仅取消这项检查：相同 UID 的未隔离进程可读取项目外文件和父进程环境。当前云环境的 user namespace 因 `uid_map` 只读不可用，Landlock 也未提供；没有修改系统设置或请求提权。
+
+非 root 路径使用环境已有的本地 Docker 权限运行受限客户端子容器。Daemon 没有改配置，也不声称它是 rootless Docker daemon。容器使用调用者 UID、`cap-drop=ALL`、`no-new-privileges`、只读根、独立 PID namespace 和 `network=none`，限制内存、CPU、PID 和输出。只挂载当前合成工程及客户端状态目录为可写；锁定客户端、系统库、公开 CA 和 Chromium 配置只读。个人 HOME、Docker socket、原生 PAT、数据库／Redis 密码、批准文件、账本和私有 registry 不挂载或传给模型。
+
+浏览器在独立容器内用 stdin 收到临时 UI 登录信息，其 profile 留在容器临时存储，退出时删除。CLI 不获得 UI 密码或浏览器认证状态；工程测试和 oracle 也在隔离容器运行。容器没有普通网络出口，只经唯一 Unix socket 连接可信父进程的固定产品 UI relay；容器内仍使用产品复制出来的原始 localhost 配置，不手写或修补它。原生服务继续由宿主后端通过原代理／CA 及 HTTPS 单域限制访问。
+
+准备过程为 `python3 tools/devin-e2e-clients/container_sandbox.py prepare`。它使用固定公开镜像 digest，验证实际命名空间、私有文件／父进程不可见、HOME 不可写和 capabilities 边界。真实入口在接触原生凭据前要求这项探测通过；只准备沙箱不授权认证或生成。镜像缺失、Docker 不可用或探测失败时停止，不回退到同 UID 裸进程。需要 Linux x64、同文件系统的本地 Docker daemon 和已有 Node/Chromium。
+
+容器先 `create`，持久登记完整 CID 和随机 scope、检查限制后才 `start`。进程退出／超时的清理核对容器真实状态，父进程异常时仍按未挂载的私有 registry 清理，仅操作匹配 scope 的对象。后台工具不能靠 Docker 客户端退出逃逸。宿主读写项目采用有界、不跟随链接的目录句柄；尤其压力文件创建也不能通过模型留下的 symlink 越出工程。
+
+## 明确的用户确认零价
+
+用户于 2026-10-25 确认 SWE-2 免费；此为 `user_confirmed` 事实，不是官方价卡已核实。当前映射依据是已认证目录中明确出现 `swe-2-high`。`price_facts.py` 只为这个精确 UID 生成临时分组 token 零价规则及 provenance，不给未知 UID、相邻型号或付费 Lead 继承零价，也不修改全局／生产定价。
+
+后续计划可附 `user_price_facts`，须与明确零价快照及其 `group_pricing_sha256` 一起绑定批准；执行时仍重新验证实际授权目录。缺失价格保持 fail-closed，显式零价则应 `identified=true`、`calculable=true` 且金额为零。零价不取消请求数、时间、工具、交接、用量与预算保护；Fusion 的付费 Lead 必须继续单独计算。新的代码 SHA 和快照均需新批准，不能沿用绑定 b19b6dd 的旧预检批准。
+
 ## 可执行的真实上游入口（尚未获准运行）
 
 入口为 `bash deploy/devin-user-journeys.sh plan|live`。`authorized_journey.py` 先验证批准、计划哈希、干净的最终 SHA/tree、精确目标域名、模型和预算，再构建产品、启动 Docker 或接触原生服务。`plan` 也会传输原生凭据并在临时数据库保存派生凭据，因此同样需要单独批准；它仅做授权、目录、实际价格检查及产品页面配置交付，账本禁止任何生成。当前两种模式均未运行。边界回归要求缺少批准、凭据或精确域名时没有启动子进程。

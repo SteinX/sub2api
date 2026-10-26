@@ -45,6 +45,46 @@ func TestDevinFusionIdentifiedClaude55FallbackTiers(t *testing.T) {
 	}
 }
 
+func TestDevinExplicitFreeSidekickIsDistinctFromMissingPricing(t *testing.T) {
+	// User-confirmed SWE-2 zero prices are an explicit temporary group rule,
+	// never an official/global card or an implicit "unknown means free" policy.
+	const sidekick = "swe-2-high"
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Default.RateMultiplier = 1
+	billing := NewBillingService(cfg, nil)
+	group := &Group{ID: 1, Platform: PlatformDevin, RateMultiplier: 1}
+	bills := &fusionBillingRepo{}
+	svc := &OpenAIGatewayService{cfg: cfg, billingService: billing, resolver: NewModelPricingResolver(nil, billing), usageBillingRepo: bills}
+	key := &APIKey{ID: 2, GroupID: &group.ID, Group: group, User: &User{ID: 3, Balance: 10}}
+	missing := svc.InspectDevinContextPrice(context.Background(), key, sidekick, 32768, 1024)
+	require.False(t, missing.Identified)
+	require.False(t, missing.Calculable)
+	require.Nil(t, missing.ContextCostUpperUSD)
+	zero := 0.0
+	group.ModelPricing = []ChannelModelPricing{{Platform: PlatformDevin, Models: []string{sidekick}, BillingMode: BillingModeToken, InputPrice: &zero, OutputPrice: &zero, CacheWritePrice: &zero, CacheReadPrice: &zero}}
+	free := svc.InspectDevinContextPrice(context.Background(), key, sidekick, 32768, 1024)
+	require.True(t, free.Identified)
+	require.True(t, free.Calculable)
+	require.True(t, free.ZeroEffectiveCharge)
+	require.Equal(t, PricingSourceGroup, free.Source)
+	require.NotNil(t, free.ContextCostUpperUSD)
+	require.Zero(t, *free.ContextCostUpperUSD)
+	require.False(t, billing.HasIdentifiedTokenPricing(sidekick), "explicit group fact must not install a global fallback")
+	x := &devinFusionExecutor{service: svc, key: key}
+	lead, err := x.cost(context.Background(), "claude-opus-5-5-medium", UsageTokens{InputTokens: 1000, OutputTokens: 100}, time.Now())
+	require.NoError(t, err)
+	require.Positive(t, lead.TotalCost)
+	freeCost, err := x.cost(context.Background(), sidekick, UsageTokens{InputTokens: 1000, OutputTokens: 100}, time.Now())
+	require.NoError(t, err)
+	require.Zero(t, freeCost.TotalCost)
+	for _, uid := range []string{"swe-2-unknown", "swe-2-max", "fusion-claude-opus-5-5-medium-sidekick-swe-2-high"} {
+		require.False(t, svc.InspectDevinPricing(context.Background(), key, uid).Identified)
+	}
+	group.ModelPricing = nil
+	require.False(t, svc.InspectDevinPricing(context.Background(), key, sidekick).Identified, "removing a zero-price rule restores fail-closed missing-price semantics")
+	require.Empty(t, bills.commands, "price inspection must never reserve or charge")
+}
+
 func TestDevinContextQuoteRejectsNonMonotonicPriceIntervals(t *testing.T) {
 	const model = "e2e-tiered-price"
 	for _, mode := range []BillingMode{BillingModePerRequest, BillingModeToken} {

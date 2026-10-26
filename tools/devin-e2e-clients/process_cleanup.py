@@ -42,7 +42,7 @@ def register(proc):
         raise
 
 
-def cleanup(path):
+def cleanup_processes(path):
     try:
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
         with os.fdopen(fd,'rb') as source:
@@ -85,6 +85,15 @@ def cleanup(path):
         return verified
     except (ValueError,OSError,KeyError,TypeError):
         return False
+
+
+def cleanup(path,container_registry=None):
+    from container_sandbox import cleanup_registry
+    # Container cleanup still runs when a killed controller has left an invalid
+    # process record. Docker client exit alone is never proof of termination.
+    process_ok=cleanup_processes(path)
+    container_ok=cleanup_registry(container_registry or os.environ.get('DEVIN_JOURNEY_CONTAINER_REGISTRY'))
+    return process_ok and container_ok
 
 
 if __name__=='__main__':

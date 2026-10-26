@@ -38,16 +38,15 @@ class Rpc:
             origin = urlsplit(args.ui_url)
             env['DEVIN_JOURNEY_FETCH_ORIGIN'] = f'{origin.scheme}://{origin.netloc}'
             self.trace = directory / f'rpc-fetch-{time.time_ns()}.jsonl'
-            self.trace.touch(mode=0o600)
+            with os.fdopen(os.open(self.trace,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w'): pass
             if os.geteuid() == 0:
                 os.chown(self.trace, 65534, 65534)
             env['DEVIN_JOURNEY_FETCH_TRACE'] = str(self.trace)
             command[1:1] = ['--preload', str(helpers.ROOT / 'diagnostic-fetch.cjs')]
         command.remove('-p')
         command[command.index('--mode') + 1] = 'rpc'
-        self.proc = subprocess.Popen(command, cwd=directory / 'workspace', env=env, stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, **helpers.isolation('omp'))
-        helpers.track(self.proc)
+        self.proc=helpers.start_child(command,directory,env,gateway=args.ui_url,client='omp',stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
         self.reader = threading.Thread(target=self.consume, daemon=True)
         self.reader.start()
 
@@ -180,24 +179,12 @@ class Rpc:
 
 
 def run(args, directory, session_hash, nonce, helpers):
-    result = {'tier': 'client_mock', 'client': 'omp', 'context_pressure': 'not_run', 'compact': 'not_run',
+    result = {'tier': 'client_mock' if args.upstream=='synthetic' else 'product_live_partial', 'client': 'omp', 'context_pressure': 'not_run', 'compact': 'not_run',
               'fork': 'not_run', 'disconnect_recovery': 'not_run', 'idle_process_recovery': 'not_run', 'worker': 'not_run', 'stage': 'rpc_start', 'status': 'failed'}
     rpc = None
     fetch_observations = []
     try:
-        pressure = directory / 'workspace/context'
-        pressure.mkdir()
-        for index in range(16):
-            path = pressure / f'part-{index:02d}.txt'
-            noise = os.urandom(4096).hex()
-            # Long single lines are deliberately truncated by real read tools.
-            # Use ordinary source-like lines so the requested pressure actually
-            # reaches the model context, then verify that at the gateway too.
-            path.write_text('CONTEXT_NONCE=' + nonce + '\n' + '\n'.join(noise[i:i+64] for i in range(0, len(noise), 64)) + '\n')
-            if os.geteuid() == 0:
-                os.chown(path, 65534, 65534)
-        if os.geteuid() == 0:
-            os.chown(pressure, 65534, 65534)
+        helpers.prepare_pressure(directory,nonce)
         rpc = Rpc(args, directory, helpers)
         state = rpc.call('get_state')
         if helpers.digest(state['sessionId'].encode()) != session_hash:
@@ -227,7 +214,7 @@ def run(args, directory, session_hash, nonce, helpers):
         rpc.call('prompt', message='Exercise context pressure: use read to read every file context/part-00.txt through context/part-15.txt. Keep the shared CONTEXT_NONCE in memory. Then reply with exactly CONTEXT_READY.')
         if rpc.reads != 16 or rpc.final_text.strip() != 'CONTEXT_READY':
             raise ValueError('context_pressure_not_completed')
-        result.update(context_pressure='passed', pressure_reads=rpc.reads, pressure_bytes=sum(path.stat().st_size for path in pressure.iterdir()))
+        result.update(context_pressure='passed', pressure_reads=rpc.reads, pressure_bytes=sum(len(helpers.project_bytes(directory/'workspace',f'context/part-{index:02d}.txt')) for index in range(16)))
         if os.environ.get('DEVIN_JOURNEY_CAPABILITIES') == 'independent':
             result.update(status='partial', stage='completed_independent_probes', compact='not_run',
                           compact_scope='separate compact probe failed; not retried in this independent run')
@@ -260,7 +247,7 @@ def run(args, directory, session_hash, nonce, helpers):
             raise ValueError('compaction_not_persisted_or_lost_fact')
         result.update(compact='passed', summary_preserved_nonce=True, compaction_entry_observed=True,
                       compaction_tokens_before=compact.get('tokensBefore'), compact_mode='default compact RPC' if style == 'rpc' else 'explicit /compact soft',
-                      usage_basis='synthetic input bytes/4; not provider usage')
+                      usage_basis='synthetic input bytes/4; not provider usage' if args.upstream=='synthetic' else 'real usage must be verified in separate private execution records')
         result['stage'] = 'idle_process_recovery'
         # Kill the actual idle client after compaction, then reopen the same
         # persisted session. This does not claim an in-flight network recovery.
