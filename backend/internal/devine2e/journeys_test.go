@@ -103,7 +103,6 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	if os.Getenv("DEVIN_JOURNEY_TOOL_LIMITS_ONLY") == "true" {
 		return
 	}
-	verifyBoundedLongJourney(t, app, fixture, userPassword, profile.PublicModel, keyID)
 	verifyProjectTestReceipts(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
 	verifyProjectFirstErrorClients(t, app, fixture, key, userPassword, keyID)
 	if os.Getenv("DEVIN_JOURNEY_EVIDENCE_ONLY") == "true" {
@@ -111,7 +110,11 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	}
 	verifyProjectMutationNegatives(t, app, fixture, key, userPassword, keyID)
 	preMatrixBilling := snapshotMockBilling(t, app, fixture, keyID)
+	preMatrixBilling["scope"] = "original synthetic key before independent bounded-long keys"
 	require.Equal(t, true, preMatrixBilling["available"], "retain unresolved fixture settlement, but a missing audit query cannot pass")
+	// Freeze the original key's denominator BEFORE independent long-fixture
+	// keys run. Their exact per-key call windows/SQL are reported separately.
+	longBilling := verifyBoundedLongJourney(t, app, fixture, userPassword, profile.PublicModel, keyID)
 	// A fresh synthetic key isolates the healthy matrix from deliberately
 	// interrupted fixture writers. Only mock mode may do this; approved live
 	// batches never rotate their key or reset the durable budget.
@@ -130,7 +133,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	fixture.mu.Unlock()
 	fence := newJourneyFence(app, nil)
 	reports := []map[string]any{}
-	billing := map[string]any{"verified": false, "verification_scope": "supported-case batch on a separate synthetic key", "tier": "synthetic billing; not a provider invoice", "pre_matrix_fixture_batches": preMatrixBilling, "all_batches_fully_settled": false}
+	billing := map[string]any{"verified": false, "verification_scope": "supported-case batch on a separate synthetic key", "tier": "synthetic billing; not a provider invoice", "pre_matrix_fixture_batches": preMatrixBilling, "bounded_long_fixture_batches": longBilling, "all_batches_fully_settled": false}
 	defer func() {
 		writeAgentArtifact(t, "client-journeys.json", map[string]any{
 			"schema_version": 1, "tier": "client_mock", "real_upstream": false, "eligible_for_real_e2e": false,
@@ -307,7 +310,13 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		return err == nil && rows == nativeTotal && unique == rows && charged == rows
 	}, 15*time.Second, 200*time.Millisecond, "every supported-case native inference needs exactly one charged row on its isolated synthetic key")
 	billing["verified"], billing["native_calls"], billing["unique_charged_rows"] = true, nativeTotal, nativeTotal
-	billing["all_batches_fully_settled"] = preMatrixBilling["settlement_complete"] == true
+	positiveBilling := queryMockBilling(db, keyID, nativeTotal)
+	positiveBilling["scope"] = "supported-case synthetic key, exact native call window"
+	require.Equal(t, true, positiveBilling["settlement_complete"])
+	billing["supported_case_batch"] = positiveBilling
+	all := aggregateMockBilling(append(append([]map[string]any{preMatrixBilling}, longBilling...), positiveBilling))
+	billing["all_batches"] = all
+	billing["all_batches_fully_settled"] = all["settlement_complete"]
 }
 
 func journeyUIServer(t *testing.T, backend, endpoint string) *httptest.Server {

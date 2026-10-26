@@ -92,8 +92,9 @@ func longPublicContext(directory string, records []agentRequest, report map[stri
 	return result
 }
 
-func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFixture, password, fusionModel string, originalKeyID int64) {
+func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFixture, password, fusionModel string, originalKeyID int64) []map[string]any {
 	t.Helper()
+	batches := []map[string]any{}
 	user := login(t, app, "user@devin-e2e.invalid", password)
 	original := api(t, app, "GET", fmt.Sprintf("/keys/%d", originalKeyID), user, nil)
 	api(t, app, "PUT", fmt.Sprintf("/keys/%d", originalKeyID), user, map[string]any{"name": "saved-short-fixture-key"})
@@ -105,6 +106,9 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 		key, keyID := created.Get("key").String(), created.Get("id").Int()
 		app.redactor.addSecret(key)
 		passed := t.Run("bounded_long_"+scenario, func(t *testing.T) {
+			fixture.mu.Lock()
+			nativeStart := len(fixture.chats)
+			fixture.mu.Unlock()
 			directory := t.TempDir()
 			fixture.journey.mu.Lock()
 			fixture.journey.workspace = filepath.Join(directory, "workspace")
@@ -146,6 +150,14 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 			report["public_context_witness"] = longPublicContext(directory, records, report)
 			report["client_process_cleanup_verified"] = cleanupErr == nil
 			report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, records, false)
+			fixture.mu.Lock()
+			nativeEnd := len(fixture.chats)
+			fixture.mu.Unlock()
+			batch := queryMockBilling(agentDatabase(t, app), keyID, nativeEnd-nativeStart)
+			batch["scope"] = "independent bounded-long synthetic key, exact native call window; not a provider invoice"
+			batch["case"] = "bounded_long_" + scenario
+			batches = append(batches, batch)
+			report["fixture_batch_billing"] = batch
 			defer func() { writeAgentArtifact(t, "journey-bounded-long-"+scenario+".json", report) }()
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
@@ -183,4 +195,5 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 			t.Fatal("bounded long mock regression failed; stop for diagnosis")
 		}
 	}
+	return batches
 }
