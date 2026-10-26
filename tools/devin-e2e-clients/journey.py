@@ -21,6 +21,7 @@ import time
 from run import ROOT, PINS, SENSITIVE_ENV, child_environment, write_json
 import process_cleanup
 import container_sandbox
+from project_evidence import ToolEvidence
 
 TEST_COMMAND = "python3 run_tests.py"
 ACTIVE = set()
@@ -302,7 +303,7 @@ def invoke(args, directory, resume=False):
               "bash_exit_code": None, "test_command_verified": False}
     final_text = ""
     size = 0
-    tool_commands = {}
+    tool_evidence = ToolEvidence(directory / 'workspace', TEST_COMMAND)
 
     def consume():
         nonlocal size, final_text
@@ -318,9 +319,11 @@ def invoke(args, directory, resume=False):
                 continue
             result["frames"] += 1
             kind = event.get("type")
-            if kind == "tool_execution_start" and event.get("toolName") == "bash":
-                call_id = event.get("toolCallId")
-                tool_commands[call_id] = event.get("args", {}).get("command")
+            try:
+                tool = tool_evidence.observe(event)
+            except ValueError:
+                result['parse_errors'] += 1
+                continue
             result["session_seen"] |= bool(event.get("sessionID") or kind == "session")
             session = event.get("sessionID", event.get("sessionId", event.get("id") if kind == "session" else None))
             if isinstance(session, str):
@@ -339,28 +342,23 @@ def invoke(args, directory, resume=False):
                 part = event.get("part", {}); state = part.get("state", {})
                 if state.get("status") == "error":
                     result["event_error"] = True
-                name = part.get("tool")
-                if state.get("status") == "completed" and name in result["tools"]:
-                    result["tools"][name] += 1
-                    if name == "bash":
+                if tool and tool['status'] == 'completed':
+                    if tool['name'] == "bash":
                         text = json.dumps(state.get("output", ""))
                         result["bash_exit_code"] = state.get("metadata", {}).get("exit")
-                        result["test_command_verified"] = state.get("input", {}).get("command") == TEST_COMMAND
+                        result["test_command_verified"] = tool['test_command']
                         result["client_tests_succeeded"] |= result["bash_exit_code"] == 0 and result["test_command_verified"] and "Ran 1 test" in text and "OK" in text
             if kind == "tool_execution_end":
-                name = event.get("toolName")
                 if event.get("isError"):
                     result["event_error"] = True
-                elif name in result["tools"]:
-                    result["tools"][name] += 1
-                    if name == "bash":
+                elif tool and tool['status'] == 'completed':
+                    if tool['name'] == "bash":
                         text = json.dumps(event.get("result", {}))
-                        call_id = event.get("toolCallId")
-                        result["test_command_verified"] = tool_commands.get(call_id) == TEST_COMMAND
+                        result["test_command_verified"] = tool['test_command']
                         # OMP documents exitCode only for nonzero exits. Require
                         # the protected project runner's explicit, fresh exit
                         # receipt as well as the corresponding actual tool ID.
-                        success = omp_test_result(event, tool_commands.get(call_id), directory / 'workspace', nonce, client_started_ns)
+                        success = omp_test_result(event, TEST_COMMAND if tool['test_command'] else None, directory / 'workspace', nonce, client_started_ns)
                         result['bash_exit_code'] = 0 if success else None
                         result['bash_exit_source'] = 'protected project test runner receipt' if success else 'unverified'
                         result['client_tests_succeeded'] |= success
@@ -384,11 +382,13 @@ def invoke(args, directory, resume=False):
         proc.stdout.close()
         ACTIVE.discard(proc)
     result["exit_code"] = proc.returncode
+    result.update(tool_evidence.report())
+    result['event_error'] |= tool_evidence.failed
     if args.client=='omo':
         result['plugin_runtime_started']=plugin_startups()>plugin_before
         result['plugin_runtime_witness']='fresh oh-my-openagent server plugin startup log'
     result["final_text_matches"] = final_text.strip() == ("PROJECT_REVIEWED" if resume else "PROJECT_COMPLETE")
-    result["passed"] = proc.returncode == 0 and result["normal_stop"] and result["final_text_matches"] and not result["event_error"] and not result["timed_out"] and result["parse_errors"] == 0 and not result["session_changed"] and (args.client!='omo' or result['plugin_runtime_started'])
+    result["passed"] = proc.returncode == 0 and result["normal_stop"] and result["final_text_matches"] and not result["event_error"] and not result["timed_out"] and result["parse_errors"] == 0 and result['incomplete_tool_calls'] == 0 and not result["session_changed"] and (args.client!='omo' or result['plugin_runtime_started'])
     return result
 
 
@@ -442,7 +442,11 @@ def main():
         print(json.dumps({'status':'handoff_only', 'handoff':handoff, 'client_identity':client_identity,
                           'client':args.client, 'profile':args.profile, 'tier':tier, 'eligible_for_real_e2e':False,'isolation':isolated}))
         return 0
+    source_before_task = digest(project_bytes(workspace, 'price_math.py'))
     first = invoke(args, directory)
+    # Snapshot before executing any oracle: a correct output alone cannot prove
+    # the client repaired the source, nor can a later helper supply the change.
+    source_after_task = digest(project_bytes(workspace, 'price_math.py'))
     artifact = workspace / "out/report.json"
     valid = artifact.exists() and json.loads(project_bytes(workspace, 'out/report.json')) == expected
     intact = all(digest(project_bytes(workspace, name)) == fingerprint for name, fingerprint in protected.items())
@@ -451,8 +455,13 @@ def main():
     oracle_samples = [[100 + int.from_bytes(os.urandom(2), "big"), byte] for byte in os.urandom(16)]
     after = run_project_python(directory, ['-c', "import json,sys; from price_math import discounted; assert all(discounted(a,b)==a-b for a,b in json.load(sys.stdin))"],
                                json.dumps(oracle_samples).encode()) if first["passed"] else None
-    task_passed = first["passed"] and valid and intact and first["tools"]["read"] >= 3 and first["tools"]["write"] >= 1 and first["client_tests_succeeded"] and after is not None and after.returncode == 0
-    source_before_resume = digest(project_bytes(workspace, 'price_math.py'))
+    task_checks = {'terminal': first['passed'], 'artifact': valid, 'protected_files': intact,
+                   'reads': first['tools']['read'] >= 3,
+                   'source_mutation_tool': sum(first['source_mutation_tools'].values()) >= 1,
+                   'source_changed': source_before_task != source_after_task,
+                   'client_tests': first['client_tests_succeeded'], 'oracle': after is not None and after.returncode == 0}
+    task_passed = all(task_checks.values())
+    source_before_resume = source_after_task
     resumed = invoke(args, directory, True) if task_passed else None
     same_session = resumed is not None and first["client_session_sha256"] is not None and first["client_session_sha256"] == resumed["client_session_sha256"]
     extended = {}
@@ -461,12 +470,16 @@ def main():
         import capabilities
         extended = capabilities.run(args, directory, first['client_session_sha256'], expected['nonce'], sys.modules[__name__])
     final = final_project_snapshot(workspace, expected, protected, source_before_resume)
+    if resumed is None:
+        final['artifact_verified_after_resume'] = final['source_unchanged_after_resume'] = None
     passed = task_passed and resumed is not None and resumed["passed"] and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
     report = {"tier": tier, "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
               "execution_isolation": "separate_uid" if os.geteuid()==0 else "networkless_container_fixed_unix_relay",
               "isolation":isolated,
               "client_identity": client_identity,
               "client": args.client, "profile": args.profile, "handoff": handoff, "task": first, "resume": resumed,
+              'task_checks': task_checks, 'source_before_task_sha256': source_before_task,
+              'source_after_task_sha256': source_after_task, 'source_changed_by_task': task_checks['source_changed'],
               "initial_project_test_failed": True, "artifact_verified_before_oracle": valid, **final,
               "independent_project_test_passed": after is not None and after.returncode == 0,
               "same_client_session": same_session,
