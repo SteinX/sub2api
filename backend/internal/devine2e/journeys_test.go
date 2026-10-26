@@ -100,6 +100,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		return // Only this explicitly synthetic runner has a focused evidence mode.
 	}
 	verifyProjectMutationNegatives(t, app, fixture, key, userPassword)
+	fence := newJourneyFence(app, nil)
 	reports := []map[string]any{}
 	billing := map[string]any{"verified": false, "tier": "synthetic billing; not a provider invoice"}
 	defer func() {
@@ -159,13 +160,14 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_GATEWAY_KEY="+key)
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_UI_PASSWORD="+userPassword)
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_PROCESS_REGISTRY="+processRegistry, "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
-					output, runErr := cmd.Output()
+					output, runErr := runGuardedJourney(t, cmd, app, admission, fence)
 					cleanupErr := cleanupJourneyProcessesAt(processRegistry, containerRegistry)
 					report := map[string]any{"status": "failed", "stage": "runner_output"}
 					parseErr := json.Unmarshal(output, &report)
 					if report == nil {
 						report = map[string]any{"status": "failed", "stage": "runner_output"}
 					}
+					report["batch_guard"] = fence.snapshot()
 					forwarded, requests := admission.snapshot()
 					if kind == "fusion" && forwarded > 0 {
 						report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, requests, false)

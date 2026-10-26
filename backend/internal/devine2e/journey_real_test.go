@@ -137,6 +137,12 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 		require.Equal(t, true, entry["identified"], "physical UID %v has no identified price in this public key's group/channel; stop before inference", entry["model"])
 		require.Equal(t, true, entry["calculable"], "physical UID %v price cannot be calculated; stop before inference", entry["model"])
 	}
+	fence := newJourneyFence(app, budget)
+	defer func() {
+		if fence.deadline != nil {
+			fence.deadline.Stop()
+		}
+	}()
 	for _, client := range plan.Clients {
 		for _, kind := range []string{"direct", "fusion"} {
 			profiles := []string{"project"}
@@ -179,13 +185,14 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_GATEWAY_KEY="+key, "DEVIN_JOURNEY_UI_PASSWORD="+password)
 					var directRowsBefore int
 					require.NoError(t, budget.db.QueryRow(`SELECT count(*) FROM usage_logs WHERE api_key_id=$1 AND coalesce(nullif(upstream_model,''),model)=$2`, keyID, plan.Models.Direct).Scan(&directRowsBefore))
-					output, runErr := cmd.Output()
+					output, runErr := runGuardedJourney(t, cmd, app, admission, fence)
 					cleanupErr := cleanupJourneyProcesses()
 					report := map[string]any{"status": "failed", "stage": "runner_output"}
 					parseErr := json.Unmarshal(output, &report)
 					if report == nil {
 						report = map[string]any{"status": "failed", "stage": "runner_output"}
 					}
+					report["batch_guard"] = fence.snapshot()
 					forwarded, records := admission.snapshot()
 					report["id"], report["model_kind"], report["public_model_uid"] = id, kind, model
 					report["physical_lead_uid"], report["physical_sidekick_uid"] = plan.Models.Direct, ""

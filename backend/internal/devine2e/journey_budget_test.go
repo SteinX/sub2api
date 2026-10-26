@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,7 @@ type authorizedJourneyBudget struct {
 	keyID                     int64
 	mu                        sync.Mutex
 	failed                    bool
+	fatal                     atomic.Bool
 	app                       *application
 	key, model                string
 	direct                    bool
@@ -100,7 +102,7 @@ func (b *authorizedJourneyBudget) cost() (float64, error) {
 func (b *authorizedJourneyBudget) Admit() (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.failed {
+	if b.failed || b.fatal.Load() {
 		return 0, errors.New("run stopped")
 	}
 	cost, err := b.cost()
@@ -116,6 +118,9 @@ func (b *authorizedJourneyBudget) Admit() (int, error) {
 			return 0, err
 		}
 		arguments = append(arguments, "--estimated-cost", strconv.FormatFloat(quote, 'g', -1, 64))
+	}
+	if b.fatal.Load() {
+		return 0, errors.New("run stopped")
 	}
 	output, err := journeyPolicy("admit", arguments...)
 	var decision struct {
@@ -155,7 +160,17 @@ func (b *authorizedJourneyBudget) Complete(receipt int, outcome string) error {
 	return nil
 }
 
-func (b *authorizedJourneyBudget) healthy() bool { b.mu.Lock(); defer b.mu.Unlock(); return !b.failed }
+func (b *authorizedJourneyBudget) Stop(reason string, observed int64) error {
+	b.fatal.Store(true)
+	_, err := journeyPolicy("stop", "--reason", reason, "--observed-ns", strconv.FormatInt(observed, 10))
+	return err
+}
+
+func (b *authorizedJourneyBudget) healthy() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return !b.failed && !b.fatal.Load()
+}
 
 type journeyResponseBody struct {
 	io.ReadCloser

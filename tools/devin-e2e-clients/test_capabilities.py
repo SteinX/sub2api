@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from capabilities import Rpc
+import batch_control
 
 
 def rpc_with(events):
@@ -20,6 +21,8 @@ def rpc_with(events):
         rpc.events.put(event)
     rpc.frames = rpc.parse_errors = rpc.reads = 0
     rpc.failed = False
+    rpc.control = batch_control.Control()
+    rpc.h = SimpleNamespace(kill_child=Mock())
     rpc.error_categories = set()
     rpc.error_http_status = None
     rpc.error_vocabulary = set()

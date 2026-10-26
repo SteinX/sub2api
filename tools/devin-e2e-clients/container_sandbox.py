@@ -137,12 +137,22 @@ class FixedRelay:
         if parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or not parsed.port or parsed.username or parsed.query or parsed.fragment or parsed.path not in {'','/'}:
             raise ValueError('sandbox_requires_exact_loopback_ui')
         port=parsed.port
+        self.lock=threading.Lock()
+        self.connections=set()
+        self.closed=False
+        relay=self
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
                 try:
                     with socket.create_connection(('127.0.0.1',port),timeout=5) as remote:
                         remote.settimeout(None)
-                        copy_streams(self.request,remote)
+                        with relay.lock:
+                            if relay.closed: return
+                            relay.connections.update((self.request,remote))
+                        try: copy_streams(self.request,remote)
+                        finally:
+                            with relay.lock:
+                                relay.connections.discard(self.request);relay.connections.discard(remote)
                 except OSError:
                     return
         class Server(socketserver.ThreadingUnixStreamServer):
@@ -154,6 +164,13 @@ class FixedRelay:
         self.port=port
 
     def close(self):
+        with self.lock:
+            if self.closed: return
+            self.closed=True
+            for connection in self.connections:
+                try: connection.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+                connection.close()
         self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=2)
 
 
@@ -184,6 +201,7 @@ class ContainerProcess:
         self.process,self.cid,self.scope,self.registry=process,cid,scope,registry
         self.control,self.relay=control,relay
         self.cleaned=False
+        self.cleanup_lock=threading.RLock()
         self.exitcode=None
 
     def __getattr__(self,name):
@@ -194,6 +212,20 @@ class ContainerProcess:
         return self.exitcode if self.exitcode is not None else self.process.returncode
 
     def cleanup(self):
+        with self.cleanup_lock:
+            self._cleanup()
+
+    def kill_owned(self):
+        # Close the sandbox's fixed egress immediately, before Docker cleanup.
+        if self.relay:
+            self.relay.close()
+        try:
+            os.killpg(self.process.pid,signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        self.cleanup()
+
+    def _cleanup(self):
         if self.cleaned:
             return
         try:

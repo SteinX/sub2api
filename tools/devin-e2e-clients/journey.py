@@ -21,6 +21,7 @@ import time
 from run import ROOT, PINS, SENSITIVE_ENV, child_environment, write_json
 import process_cleanup
 import container_sandbox
+import batch_control
 from project_evidence import ToolEvidence
 from project_completion import CompletionEvidence
 from project_tests import TestReceipts, TEST_RUNNER
@@ -32,6 +33,17 @@ ACTIVE = set()
 def track(proc):
     ACTIVE.add(proc)
     process_cleanup.register(proc)
+
+
+def kill_child(proc):
+    # Killing docker's attach process does not kill its contained CLI.
+    if isinstance(proc, container_sandbox.ContainerProcess):
+        proc.kill_owned()
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def terminate_children(number, _frame):
@@ -262,6 +274,8 @@ def command(client, model, resume):
 
 
 def invoke(args, directory, resume=False, protected=None):
+    control = batch_control.current()
+    control.begin()
     env = project_environment(directory)
     for name in SENSITIVE_ENV | {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"}:
         env.pop(name, None)
@@ -289,39 +303,64 @@ def invoke(args, directory, resume=False, protected=None):
     tool_evidence = ToolEvidence(directory / 'workspace', TEST_COMMAND)
     completion = CompletionEvidence()
 
+    def fatal(reason, observed_ns=None):
+        try:
+            control.stop(reason, observed_ns)
+        finally:
+            kill_child(proc)
+
     def consume_lines():
         nonlocal size
         for raw in iter(lambda: proc.stdout.readline(4 * 1024 * 1024 + 1), b''):
             size += len(raw)
             if size > 16 * 1024 * 1024 or len(raw) > 4 * 1024 * 1024:
                 result['reader_error'] = True
-                os.killpg(proc.pid, signal.SIGKILL)
+                fatal('reader_error')
                 return False
             try:
                 event = json.loads(raw)
             except (ValueError, UnicodeDecodeError):
                 result["parse_errors"] += 1
-                continue
+                fatal('parse_error')
+                return False
             if not isinstance(event, dict):
                 result['parse_errors'] += 1
-                continue
+                fatal('parse_error')
+                return False
             result["frames"] += 1
             kind = event.get("type")
             try:
                 tool = tool_evidence.observe(event)
                 tests.observe(tool, event)
                 completion.observe(event)
+                if tool and tool['status'] == 'error':
+                    result['event_error'] = True
+                    fatal('permission_rejection' if tool['error_kind'] == 'client_permission_rejection' else 'tool_error', tool['observations'][-1]['observed_at_ns'])
+                    return False
+                # Verify a real test's exit before releasing its tool barrier.
+                reason = tests.fatal_reason(tool)
+                if reason:
+                    result['event_error'] = True
+                    fatal(reason)
+                    return False
+                control.tool(tool)
             except ValueError:
                 result['parse_errors'] += 1
-                continue
+                fatal('parse_error')
+                return False
             result["session_seen"] |= bool(event.get("sessionID") or kind == "session")
             session = event.get("sessionID", event.get("sessionId", event.get("id") if kind == "session" else None))
             if isinstance(session, str):
                 fingerprint = digest(session.encode())
                 result["session_changed"] |= result["client_session_sha256"] not in {None, fingerprint}
                 result["client_session_sha256"] = fingerprint
+                if result['session_changed']:
+                    fatal('parse_error')
+                    return False
             if kind == "error":
                 result["event_error"] = True
+                fatal('protocol_error')
+                return False
             if kind == "tool_use":
                 part = event.get("part", {}); state = part.get("state", {})
                 if state.get("status") == "error":
@@ -335,6 +374,7 @@ def invoke(args, directory, resume=False, protected=None):
             result['reader_completed'] = consume_lines()
         except (OSError, ValueError, TypeError, AttributeError):
             result['reader_error'] = True
+            fatal('reader_error')
 
     thread = threading.Thread(target=consume, daemon=True)
     thread.start()
@@ -342,7 +382,7 @@ def invoke(args, directory, resume=False, protected=None):
         proc.wait(timeout=150)
     except subprocess.TimeoutExpired:
         result["timed_out"] = True
-        os.killpg(proc.pid, signal.SIGKILL)
+        fatal('deadline')
         proc.wait(timeout=5)
     finally:
         thread.join(timeout=5)
@@ -356,6 +396,8 @@ def invoke(args, directory, resume=False, protected=None):
     result.update(tests.report())
     result.update(completion.report('PROJECT_REVIEWED' if resume else 'PROJECT_COMPLETE'))
     result['event_error'] |= tool_evidence.failed or completion.failed
+    if result['reader_error'] or not result['reader_completed'] or result['parse_errors']:
+        fatal('reader_error')
     if args.client=='omo':
         result['plugin_runtime_started']=plugin_startups()>plugin_before
         result['plugin_runtime_witness']='fresh oh-my-openagent server plugin startup log'
@@ -364,6 +406,8 @@ def invoke(args, directory, resume=False, protected=None):
                         and not result['event_error'] and not result['timed_out'] and result['parse_errors'] == 0
                         and result['incomplete_tool_calls'] == 0 and result['session_seen'] and result['client_session_sha256'] is not None
                         and not result['session_changed'] and (args.client != 'omo' or result['plugin_runtime_started']))
+    control.end(result['passed'])
+    result['batch_stop_observed'] = control.stopped
     return result
 
 
@@ -476,8 +520,14 @@ def main():
 
 
 if __name__ == "__main__":
+    code = 2
     try:
-        raise SystemExit(main())
+        code = main()
     except (ValueError, OSError, KeyError, subprocess.TimeoutExpired):
         print(json.dumps({"status": "failed", "stage": "runner-boundary", "tier": "client_mock"}))
-        raise SystemExit(2)
+    finally:
+        try:
+            batch_control.current().finish(code == 0)
+        except (ValueError, OSError):
+            code = 2
+    raise SystemExit(code)

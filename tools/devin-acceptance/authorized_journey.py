@@ -22,6 +22,27 @@ import process_cleanup
 import container_sandbox
 
 
+def settlement_scope(args):
+    """Stopping/settling an existing run cannot authorize another request.
+
+    In particular, expiry, missing native credentials or a changed checkout must
+    never prevent a fatal stop or leave an already-sent request unaccounted for.
+    """
+    plan, approval = read_json(args.plan), read_json(args.approval)
+    identity = approval.get('approval_id', '')
+    import re
+    if not re.fullmatch(r'[A-Za-z0-9_-]{8,80}', str(identity)):
+        raise Denied('stable_approval_id_required')
+    expected = (STATE_ROOT / (identity + '.json')).resolve()
+    if not args.ledger or Path(args.ledger).resolve() != expected:
+        raise Denied('approval_ledger_path_mismatch')
+    state = read_json(expected)
+    if (state.get('plan_sha256') != digest(plan) or approval.get('plan_sha256') != digest(plan)
+            or state.get('mode') != args.mode or state.get('source') != plan.get('source')):
+        raise Denied('run_ledger_scope_or_state_mismatch')
+    return state
+
+
 def checked(args):
     if not args.approval or not args.plan:
         raise Denied('explicit_approval_and_plan_required')
@@ -74,7 +95,12 @@ def run(args, plan):
     process = None
     started = time.monotonic()
     previous_handlers = {}
+    def fatal_stop(reason):
+        # Stop admission durably before grace-period cleanup can run. This path
+        # deliberately needs no fresh credentials, approval or source check.
+        ledger_action(args.ledger, 'stop', reason=reason, observed_ns=time.time_ns())
     def interrupted(number, _frame):
+        fatal_stop('supervisor_failure')
         if process is not None:
             stop_process(process)
         raise KeyboardInterrupt()
@@ -89,16 +115,22 @@ def run(args, plan):
             for command in commands:
                 remaining = int(plan['limits']['wall_seconds'] - (time.monotonic()-started))
                 if remaining < 1:
+                    fatal_stop('deadline')
                     raise Denied('approved_wall_time_exhausted')
                 env['DEVIN_E2E_TIMEOUT_SECONDS'] = str(remaining)
                 process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 try:
                     code = process.wait(timeout=remaining)
                 except subprocess.TimeoutExpired:
+                    fatal_stop('deadline')
                     stop_process(process)
                     raise Denied('approved_wall_time_exhausted') from None
                 if code:
+                    fatal_stop('supervisor_failure')
                     raise Denied('preview_or_client_acceptance_failed_see_private_evidence')
+    except BaseException:
+        fatal_stop('supervisor_failure')
+        raise
     finally:
         if process is not None:
             stop_process(process)
@@ -115,7 +147,7 @@ def run(args, plan):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['run', 'verify', 'admit', 'complete'])
+    parser.add_argument('action', choices=['run', 'verify', 'admit', 'complete', 'stop'])
     parser.add_argument('--mode', choices=['plan', 'live'], required=True)
     parser.add_argument('--plan', default=os.environ.get('DEVIN_JOURNEY_PLAN_FILE'))
     parser.add_argument('--approval', default=os.environ.get('DEVIN_JOURNEY_APPROVAL_FILE'))
@@ -126,8 +158,16 @@ def main():
     parser.add_argument('--outcome', choices=['success', 'failed', 'uncertain'])
     parser.add_argument('--cost', type=float)
     parser.add_argument('--estimated-cost', type=float)
+    parser.add_argument('--reason')
+    parser.add_argument('--observed-ns', type=int)
     args = parser.parse_args()
     try:
+        if args.action in {'stop', 'complete'}:
+            settlement_scope(args)
+            state = ledger_action(args.ledger, args.action, args.receipt, args.outcome, args.cost,
+                                  reason=args.reason, observed_ns=args.observed_ns)
+            print(json.dumps({'authorized': True, 'receipt': state['inflight'], 'requests': state['requests'], 'stopped': state['stopped']}))
+            return 0
         plan, checked_plan = checked(args)
         expected_ledger = (STATE_ROOT / (checked_plan['approval_id']+'.json')).resolve()
         if args.ledger and Path(args.ledger).resolve() != expected_ledger:

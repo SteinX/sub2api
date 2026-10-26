@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import authorized_journey as runner
@@ -14,6 +15,23 @@ from test_journey_policy import proposal
 
 
 class ApprovedRunnerBoundaryTests(unittest.TestCase):
+    def test_stop_and_existing_settlement_need_no_new_credentials_or_source_approval(self):
+        plan,approval,*_=proposal()
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            plan_path=root/'plan.json';plan_path.write_text(json.dumps(plan))
+            approval_path=root/'approval.json';approval_path.write_text(json.dumps(approval))
+            ledger=root/(approval['approval_id']+'.json')
+            runner.claim(ledger,plan,'live');runner.ledger_action(ledger,'admit')
+            base=['runner','stop','--mode','live','--plan',str(plan_path),'--approval',str(approval_path),'--ledger',str(ledger),'--reason','client_exit','--observed-ns',str(__import__('time').time_ns())]
+            with patch.object(runner,'STATE_ROOT',root),patch.dict(os.environ,{},clear=True),patch.object(runner,'current_source',side_effect=AssertionError('must not reauthorize')),contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(sys,'argv',base): self.assertEqual(0,runner.main())
+                complete=base[:];complete[1]='complete';complete=complete[:complete.index('--reason')]+['--receipt','1','--outcome','success','--cost','0']
+                with patch.object(sys,'argv',complete): self.assertEqual(0,runner.main())
+            state=runner.read_json(ledger)
+            self.assertTrue(state['stopped']);self.assertIsNone(state['inflight'])
+            with self.assertRaises(runner.Denied): runner.ledger_action(ledger,'admit')
+
     def invoke(self, plan, approval, source, env, **changes):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

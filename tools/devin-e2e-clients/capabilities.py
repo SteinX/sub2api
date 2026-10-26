@@ -13,6 +13,8 @@ import subprocess
 import threading
 import time
 from urllib.parse import urlsplit
+import batch_control
+from project_evidence import ToolEvidence
 
 
 class Rpc:
@@ -26,6 +28,8 @@ class Rpc:
         self.error_http_status = None
         self.error_vocabulary = set()
         self.serial = 0
+        self.control = batch_control.current()
+        self.tools = ToolEvidence(directory/'workspace', helpers.TEST_COMMAND)
         self.deadline = time.monotonic() + 180
         env = helpers.project_environment(directory)
         env['SUB2API_API_KEY'] = os.environ['DEVIN_JOURNEY_GATEWAY_KEY']
@@ -56,15 +60,39 @@ class Rpc:
             size += len(raw)
             if len(raw) > 4 * 1024 * 1024 or size > 32 * 1024 * 1024:
                 self.failed = True
-                os.killpg(self.proc.pid, signal.SIGKILL)
+                self.control.stop('reader_error')
+                self.h.kill_child(self.proc)
                 return
             try:
                 event = json.loads(raw)
+                tool = self.tools.observe(event)
+                self.control.tool(tool)
+                if self.control.stopped:
+                    self.failed=True
+                    self.h.kill_child(self.proc)
+                    return
                 self.events.put(event, timeout=1)
             except (ValueError, UnicodeDecodeError, queue.Full):
                 self.parse_errors += 1
+                self.control.stop('parse_error')
+                self.h.kill_child(self.proc)
+                return
 
     def call(self, kind, local_prompt=False, **fields):
+        model_operation = kind in {'prompt', 'compact'}
+        if model_operation:
+            self.control.begin()
+        try:
+            result = self._call(kind, local_prompt, **fields)
+            if model_operation and not local_prompt:
+                self.control.end(True)
+            return result
+        except (ValueError, OSError):
+            self.control.stop('protocol_error')
+            self.h.kill_child(self.proc)
+            raise
+
+    def _call(self, kind, local_prompt=False, **fields):
         self.serial += 1
         ident = str(self.serial)
         self.proc.stdin.write((json.dumps({'id': ident, 'type': kind, **fields}) + '\n').encode())
@@ -245,6 +273,8 @@ def run(args, directory, session_hash, nonce, helpers):
         if (completed.get('local_command_acknowledged') is not True or not compact.get('summary') or nonce not in compact['summary']
                 or compact.get('id') in prior_checkpoints or state.get('isCompacting') is not False):
             raise ValueError('compaction_not_persisted_or_lost_fact')
+        if style == 'soft':
+            rpc.control.end(True)
         result.update(compact='passed', summary_preserved_nonce=True, compaction_entry_observed=True,
                       compaction_tokens_before=compact.get('tokensBefore'), compact_mode='default compact RPC' if style == 'rpc' else 'explicit /compact soft',
                       usage_basis='synthetic input bytes/4; not provider usage' if args.upstream=='synthetic' else 'real usage must be verified in separate private execution records')

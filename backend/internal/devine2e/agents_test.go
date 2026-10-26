@@ -69,6 +69,7 @@ type agentAdmission struct {
 	interruptFile   string
 	active          chan struct{}
 	runBudget       journeyBudget
+	fence           *journeyFence
 	outputLimit     int
 	turnTimeout     time.Duration
 }
@@ -123,7 +124,7 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 				}
 			}
 			p.mu.Unlock()
-			if p.runBudget != nil {
+			if p.runBudget != nil || p.fence != nil {
 				record.response = &journeyResponseBody{ReadCloser: response.Body}
 				response.Body = record.response
 			}
@@ -196,6 +197,16 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 				return
 			}
 		}
+		if p.fence != nil {
+			ctx, cancel, err := p.fence.acquire(r.Context())
+			if err != nil {
+				http.Error(w, "shared batch admission stopped", 402)
+				return
+			}
+			defer cancel()
+			r = r.WithContext(ctx)
+			defer p.fence.finishResponse(record)
+		}
 		// A request may have passed the earlier check before another request
 		// took and released active. Recheck and reserve under the same lock.
 		p.mu.Lock()
@@ -233,6 +244,11 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 				}
 				_ = p.runBudget.Complete(record.receipt, outcome)
 			}()
+		}
+		if p.fence != nil && !p.fence.admit() {
+			p.mu.Unlock()
+			http.Error(w, "shared batch admission stopped", 402)
+			return
 		}
 		p.forwarded++
 		record.Forwarded = true
