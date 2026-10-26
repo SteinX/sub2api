@@ -216,14 +216,16 @@ class ContainerProcess:
             self._cleanup()
 
     def kill_owned(self):
-        # Close the sandbox's fixed egress immediately, before Docker cleanup.
-        if self.relay:
-            self.relay.close()
-        try:
-            os.killpg(self.process.pid,signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        self.cleanup()
+        with self.cleanup_lock:
+            if self.cleaned:
+                return
+            # Close egress first. Popen.kill checks the owned attach process;
+            # never signal its stale process group after wait/reap or cleanup.
+            if self.relay:
+                self.relay.close()
+            if self.process.poll() is None:
+                self.process.kill()
+            self._cleanup()
 
     def _cleanup(self):
         if self.cleaned:

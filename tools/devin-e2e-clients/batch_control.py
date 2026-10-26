@@ -74,6 +74,20 @@ class Control:
         else:
             self.stop('missing_terminal')
 
+    def observe_terminal(self, event):
+        """Stop on actual error terminals; normal text never ACKs a tool.
+
+        No-tool protocol completion is checked at the public boundary. It may
+        legitimately be followed by compact/main HTTP calls in the same phase.
+        """
+        kind=event.get('type')
+        reason=(event.get('part',{}).get('reason') if kind=='step_finish' else
+                event.get('message',{}).get('stopReason') if kind=='message_end' and event.get('message',{}).get('role')=='assistant' else None)
+        if reason in {'error','aborted','length','max_tokens'}:
+            self.stop('protocol_error')
+        elif kind=='auto_compaction_end' and (event.get('aborted') is True or event.get('errorMessage')):
+            self.stop('protocol_error')
+
     def finish(self, normal):
         try:
             if not normal:

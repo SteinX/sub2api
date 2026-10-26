@@ -73,6 +73,8 @@ class JourneyProofTests(unittest.TestCase):
             pid = 1073741823
             returncode = 0
             stdout = io.BytesIO(wire)
+            def poll(self):
+                return self.returncode
             def wait(self, timeout=None):
                 return 0
         with tempfile.TemporaryDirectory() as temporary:
@@ -150,6 +152,24 @@ class JourneyProofTests(unittest.TestCase):
 
 
 class ProtectedSnapshotTests(unittest.TestCase):
+    def test_changed_session_cannot_ack_a_completed_tool_or_normal_terminal(self):
+        import batch_control
+        for terminal in [{'type':'tool_use','part':{'callID':'public-call','tool':'read','state':{'status':'completed','input':{},'output':'synthetic'}}},
+                         {'type':'step_finish','part':{'reason':'stop'}}]:
+            with self.subTest(kind=terminal['type']), tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);workspace=root/'workspace';workspace.mkdir()
+                for name,content in {'requirements.json':'{"nonce":"synthetic"}','test_project.py':'protected','run_tests.py':'protected'}.items(): (workspace/name).write_text(content)
+                events=[{'type':'step_start','sessionID':'original'},{**terminal,'sessionID':'changed'}]
+                proc=Mock();proc.stdout=io.BytesIO(b''.join(json.dumps(event).encode()+b'\n' for event in events));proc.returncode=0
+                control=batch_control.Control()
+                with patch.object(journey,'start_child',return_value=proc),patch.object(journey,'kill_child'),patch.object(journey,'project_environment',return_value={}), \
+                     patch.object(journey.batch_control,'current',return_value=control),patch.object(control,'send',return_value=True) as send, \
+                     patch.dict(os.environ,{'DEVIN_JOURNEY_GATEWAY_KEY':'synthetic'}):
+                    result=journey.invoke(SimpleNamespace(client='opencode',model='synthetic',ui_url='http://127.0.0.1'),root)
+                self.assertTrue(result['session_changed']);self.assertFalse(result['passed'])
+                self.assertNotIn('tool',[call.args[0] for call in send.call_args_list])
+                self.assertNotIn('response',[call.args[0] for call in send.call_args_list])
+
     def test_client_cannot_replace_expected_test_fingerprints_during_start(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -184,10 +204,12 @@ class ProtectedSnapshotTests(unittest.TestCase):
                 return child
             with patch.object(journey,'isolation',return_value={}), patch.object(journey,'project_environment',return_value={}), \
                  patch.object(journey,'start_child',side_effect=start), patch.object(journey,'TestReceipts',ReceiptObserver), \
+                 patch.object(journey,'kill_child'), \
                  patch.dict(os.environ,{'DEVIN_JOURNEY_GATEWAY_KEY':'synthetic'}):
                 result = journey.invoke(SimpleNamespace(client='opencode',model='synthetic',ui_url='http://127.0.0.1'),directory)
             self.assertEqual(original_test,(workspace/'test_project.py').read_bytes())
-            self.assertTrue(result['normal_stop'])
+            self.assertFalse(result['normal_stop'],'invalid test proof stops consumption before a later false normal terminal')
+            self.assertFalse(result['passed'])
             self.assertFalse(result['client_tests_succeeded'],'the client cannot establish the expected protected-file baseline')
             self.assertEqual('wrong_project_or_tests',result['test_execution']['calls'][0]['receipt_status'])
 

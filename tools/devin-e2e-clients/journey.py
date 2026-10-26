@@ -40,6 +40,8 @@ def kill_child(proc):
     if isinstance(proc, container_sandbox.ContainerProcess):
         proc.kill_owned()
     else:
+        if proc.poll() is not None:
+            return
         try:
             os.killpg(proc.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -329,6 +331,19 @@ def invoke(args, directory, resume=False, protected=None):
                 return False
             result["frames"] += 1
             kind = event.get("type")
+            result["session_seen"] |= bool(event.get("sessionID") or kind == "session")
+            session = event.get("sessionID", event.get("sessionId", event.get("id") if kind == "session" else None))
+            if isinstance(session, str):
+                fingerprint = digest(session.encode())
+                result["session_changed"] |= result["client_session_sha256"] not in {None, fingerprint}
+                result["client_session_sha256"] = fingerprint
+                if result['session_changed']:
+                    fatal('parse_error')
+                    return False
+            if kind == "error":
+                result["event_error"] = True
+                fatal('protocol_error')
+                return False
             try:
                 tool = tool_evidence.observe(event)
                 tests.observe(tool, event)
@@ -344,22 +359,14 @@ def invoke(args, directory, resume=False, protected=None):
                     fatal(reason)
                     return False
                 control.tool(tool)
+                control.observe_terminal(event)
+                if control.stopped:
+                    result['event_error']=True
+                    kill_child(proc)
+                    return False
             except ValueError:
                 result['parse_errors'] += 1
                 fatal('parse_error')
-                return False
-            result["session_seen"] |= bool(event.get("sessionID") or kind == "session")
-            session = event.get("sessionID", event.get("sessionId", event.get("id") if kind == "session" else None))
-            if isinstance(session, str):
-                fingerprint = digest(session.encode())
-                result["session_changed"] |= result["client_session_sha256"] not in {None, fingerprint}
-                result["client_session_sha256"] = fingerprint
-                if result['session_changed']:
-                    fatal('parse_error')
-                    return False
-            if kind == "error":
-                result["event_error"] = True
-                fatal('protocol_error')
                 return False
             if kind == "tool_use":
                 part = event.get("part", {}); state = part.get("state", {})

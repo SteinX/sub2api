@@ -15,6 +15,25 @@ from test_journey_policy import proposal
 
 
 class ApprovedRunnerBoundaryTests(unittest.TestCase):
+    def test_settlement_scope_never_reads_a_concurrently_truncated_ledger(self):
+        import fcntl
+        plan,approval,*_=proposal()
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);ledger=root/(approval['approval_id']+'.json')
+            plan_path=root/'plan.json';plan_path.write_text(json.dumps(plan))
+            approval_path=root/'approval.json';approval_path.write_text(json.dumps(approval))
+            runner.claim(ledger,plan,'live')
+            args=SimpleNamespace(plan=plan_path,approval=approval_path,ledger=ledger,mode='live')
+            with ledger.open('r+') as writer:
+                fcntl.flock(writer,fcntl.LOCK_EX)
+                contents=writer.read();writer.seek(0);writer.truncate();writer.flush()
+                with patch.object(runner,'STATE_ROOT',root): scope=runner.settlement_scope(args)
+                writer.write(contents);writer.flush()
+            state=runner.ledger_action(ledger,'stop',reason='client_exit',observed_ns=__import__('time').time_ns(),expected_scope=scope)
+            self.assertTrue(state['stopped'])
+            with self.assertRaisesRegex(runner.Denied,'scope_or_state_mismatch'):
+                runner.ledger_action(ledger,'stop',reason='client_exit',observed_ns=__import__('time').time_ns(),expected_scope={**scope,'mode':'plan'})
+
     def test_stop_and_existing_settlement_need_no_new_credentials_or_source_approval(self):
         plan,approval,*_=proposal()
         with tempfile.TemporaryDirectory() as temporary:

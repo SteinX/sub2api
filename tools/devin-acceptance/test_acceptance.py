@@ -26,6 +26,7 @@ def evidence(live=False):
                     'final_text_bytes': 35, 'final_text_sha256': DIGEST, 'project_nonce_sha256': DIGEST,
                     'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0, 'plugin_runtime_started': True}
         case = {'id': ident, 'model_kind': kind, 'status': 'passed', 'artifact_sha256': DIGEST,
+                'batch_guard':{'installed':True,'stopped':False,'phase_active':False,'public_inflight':False,'pending_tools':0,'first_failure':None},
                 'source_before_task_sha256': '1' * 64, 'source_after_task_sha256': '2' * 64,
                 'source_changed_by_task': True, 'project_nonce_sha256': DIGEST,
                 'protected_project_sha256': {name: DIGEST for name in ['requirements.json','test_project.py','run_tests.py']},
@@ -101,6 +102,14 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_missing_stopped_or_unsettled_batch_guard_cannot_certify_a_case(self):
+        for change in [None,{'stopped':True},{'pending_tools':1},{'public_inflight':True},{'phase_active':True},{'first_failure':{'reason':'tool_error'}}]:
+            report,_=evidence();case=report['cases'][0]
+            if change is None: case.pop('batch_guard')
+            else: case['batch_guard'].update(change)
+            with self.subTest(change=change):
+                self.assertIn(case['id']+':first_error_guard_unverified',gate.validate(report,'client_mock',COMMIT,TREE))
+
     def test_role_counts_alone_cannot_replace_fusion_review_and_settlement(self):
         for target, field, value in [('session', 'complete', False), ('review', 'report_context_linked', False),
                                       ('review', 'sidekick_then_lead', False), ('handoff', 'report_present', False),

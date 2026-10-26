@@ -16,6 +16,14 @@ import journey
 
 
 class SandboxRegistryTests(unittest.TestCase):
+    def test_repeated_fatal_cleanup_never_signals_a_reaped_attach_process(self):
+        client=Mock();client.poll.return_value=0
+        proc=sandbox.ContainerProcess(client,'synthetic-cid','synthetic-scope','private-registry',Mock(),Mock())
+        result=subprocess.CompletedProcess([],0,b'{"Status":"exited","Running":false,"ExitCode":0}',b'')
+        with patch.object(sandbox,'docker',return_value=result),patch.object(sandbox,'cleanup_registry',return_value=True) as cleanup,patch.object(sandbox.os,'killpg') as group:
+            proc.kill_owned();proc.kill_owned();proc.cleanup()
+        client.kill.assert_not_called();group.assert_not_called();cleanup.assert_called_once()
+
     def test_zero_docker_client_exit_cannot_certify_unknown_child_outcome(self):
         for state,inspect_code in [({'Status':'running','Running':True,'ExitCode':0},0),
                                    ({'Status':'created','Running':False,'ExitCode':0},0),

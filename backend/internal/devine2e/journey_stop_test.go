@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -25,28 +26,30 @@ import (
 // This test-runner fence is shared by every public admission in a batch. It
 // does not purport to recall a request already sent to a remote provider.
 type journeyFence struct {
-	mu          sync.Mutex
-	changed     chan struct{}
-	stopped     bool
-	active      bool
-	phase       bool
-	terminal    bool
-	pending     map[string]bool
-	acks        map[string]bool
-	cancel      context.CancelFunc
-	stopOwned   func() bool
-	budget      journeyBudget
-	first       map[string]any
-	journal     []map[string]any
-	forwarded   int
-	denied      int
-	backendDead bool
-	deadline    *time.Timer
-	stopDone    chan struct{}
+	mu           sync.Mutex
+	changed      chan struct{}
+	stopped      bool
+	active       bool
+	phase        bool
+	terminal     bool
+	pending      map[string]bool
+	acks         map[string]bool
+	seenCalls    map[string]bool
+	acknowledged map[string]bool
+	cancel       context.CancelFunc
+	stopOwned    func() bool
+	budget       journeyBudget
+	first        map[string]any
+	journal      []map[string]any
+	forwarded    int
+	denied       int
+	backendDead  bool
+	deadline     *time.Timer
+	stopDone     chan struct{}
 }
 
 func newJourneyFence(app *application, budget journeyBudget) *journeyFence {
-	f := &journeyFence{changed: make(chan struct{}), pending: map[string]bool{}, acks: map[string]bool{}, budget: budget, stopDone: make(chan struct{})}
+	f := &journeyFence{changed: make(chan struct{}), pending: map[string]bool{}, acks: map[string]bool{}, seenCalls: map[string]bool{}, acknowledged: map[string]bool{}, budget: budget, stopDone: make(chan struct{})}
 	if app != nil && app.command != nil {
 		// Capture exactly this owned process, never a PID file or a later restart.
 		process, done := app.command.Process, app.done
@@ -107,8 +110,10 @@ func (f *journeyFence) stop(reason string, observed int64) {
 	}
 	deadAt := time.Now().UnixNano()
 	var persistErr error
+	var persistence any
 	if budget, ok := f.budget.(interface{ Stop(string, int64) error }); ok {
 		persistErr = budget.Stop(reason, observed)
+		persistence = persistErr == nil
 	}
 	f.mu.Lock()
 	f.backendDead = dead
@@ -118,7 +123,7 @@ func (f *journeyFence) stop(reason string, observed int64) {
 	} else {
 		f.first["owned_backend_dead_at_ns"] = nil
 	}
-	f.first["stop_persistence_verified"] = persistErr == nil
+	f.first["stop_persistence_verified"] = persistence
 	f.first["stop_actions_finished_at_ns"] = time.Now().UnixNano()
 	close(f.stopDone)
 	f.mu.Unlock()
@@ -132,8 +137,9 @@ func (f *journeyFence) acquire(ctx context.Context) (context.Context, context.Ca
 			f.mu.Unlock()
 			return nil, nil, errors.New("batch stopped")
 		}
-		if f.phase && !f.active && len(f.pending) == 0 && !f.terminal {
+		if f.phase && !f.active && len(f.pending) == 0 {
 			f.active = true
+			f.terminal = false
 			child, cancel := context.WithCancel(ctx)
 			f.cancel = cancel
 			f.mu.Unlock()
@@ -263,12 +269,19 @@ func (f *journeyFence) finishResponse(record *agentRequest) {
 	f.mu.Lock()
 	if !f.stopped {
 		for _, id := range calls {
+			if f.seenCalls[id] {
+				err = errors.New("reused public tool identity")
+			}
+			f.seenCalls[id] = true
 			if !f.acks[id] {
 				f.pending[id] = true
+			} else {
+				f.acknowledged[id] = true
 			}
 		}
-		// A text terminal also needs a trusted phase-completion acknowledgement;
-		// otherwise auto compact can race the client's final error/exit evidence.
+		// A normal no-tool response may be followed by compact/main requests in
+		// one CLI operation. It needs no tool ACK. CLI errors still close the
+		// fence when observed; protocol uncertainty closes it before release.
 		f.terminal = len(calls) == 0
 		for id := range f.acks {
 			found := false
@@ -345,7 +358,10 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 			if valid {
 				if f.pending[e.Call] {
 					delete(f.pending, e.Call)
-				} else if f.active {
+					f.acknowledged[e.Call] = true
+				} else if f.acknowledged[e.Call] {
+					// Duplicate observations cannot confirm a new active response.
+				} else if f.active && !f.seenCalls[e.Call] {
 					f.acks[e.Call] = true
 				} else {
 					valid = false
@@ -366,6 +382,9 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 	if valid {
 		f.journal = append(f.journal, map[string]any{"action": e.Kind, "at_ns": time.Now().UnixNano(), "observed_at_ns": e.Observed, "call_sha256": e.Call})
 		f.notify()
+	} else if !f.stopped {
+		// Keep new acquire calls blocked while stop takes over this lock.
+		f.phase = false
 	}
 	f.mu.Unlock()
 	if !valid {
@@ -409,7 +428,7 @@ func (f *journeyFence) bind(t *testing.T, cmd *exec.Cmd) func() {
 			var event journeyControlEvent
 			decoder := json.NewDecoder(bytes.NewReader(line))
 			decoder.DisallowUnknownFields()
-			if decoder.Decode(&event) != nil {
+			if decoder.Decode(&event) != nil || decoder.Decode(new(any)) != io.EOF {
 				f.stop("parse_error", time.Now().UnixNano())
 				return
 			}
@@ -438,7 +457,7 @@ func (f *journeyFence) bind(t *testing.T, cmd *exec.Cmd) func() {
 func (f *journeyFence) snapshot() map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return map[string]any{"stopped": f.stopped, "first_failure": f.first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
+	return map[string]any{"installed": true, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": f.first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
 		"pending_tools": len(f.pending), "owned_backend_death_verified": f.backendDead, "journal": append([]map[string]any(nil), f.journal...),
 		"guarantee": "no public admission after gate closure; owned backend death stops local background sends; already remote inflight remains unknown"}
 }

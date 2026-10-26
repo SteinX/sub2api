@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -155,4 +157,84 @@ func TestJourneyStopCancelsExistingInflightAndDoesNotResend(t *testing.T) {
 	<-finished
 	require.Equal(t, 1, f.snapshot()["public_admitted"])
 	require.Equal(t, "reader_error", f.snapshot()["first_failure"].(map[string]any)["reason"])
+}
+
+func TestJourneyStopNormalSummaryAllowsSamePhaseMainRequestWithoutDeadlock(t *testing.T) {
+	f := newJourneyFence(nil, nil)
+	require.True(t, f.control(controlEvent("begin")))
+	_, cancel, err := f.acquire(context.Background())
+	require.NoError(t, err)
+	defer cancel()
+	require.True(t, f.admit())
+	f.finishResponse(&agentRequest{Status: 200, response: &journeyResponseBody{eof: true, data: []byte(`{"choices":[{"finish_reason":"stop"}]}`)}})
+	// A real normal assistant response can precede automatic compaction or the
+	// main prompt in the same operation. Phase end would deadlock that client.
+	_, cancel2, err := f.acquire(context.Background())
+	require.NoError(t, err)
+	defer cancel2()
+	require.True(t, f.admit())
+	f.finishResponse(&agentRequest{Status: 200, response: &journeyResponseBody{eof: true, data: []byte(`{"choices":[{"finish_reason":"stop"}]}`)}})
+	require.True(t, f.control(controlEvent("end")))
+	require.Equal(t, 2, f.snapshot()["public_admitted"])
+	stop := controlEvent("stop")
+	stop.Reason = "reader_error"
+	require.False(t, f.control(stop))
+	require.False(t, f.control(controlEvent("begin")), "late compact restart cannot reopen after error")
+}
+
+func TestJourneyStopObserverExitKillsOwnedBackendAndCannotReopen(t *testing.T) {
+	backend := exec.Command("python3", "-c", "import time;time.sleep(30)")
+	require.NoError(t, backend.Start())
+	done := make(chan struct{})
+	go func() { _ = backend.Wait(); close(done) }()
+	t.Cleanup(func() { _ = backend.Process.Kill(); <-done })
+	f := newJourneyFence(&application{command: backend, done: done}, nil)
+	observer := exec.Command("python3", "-c", `import socket,os,json,time
+s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);s.connect(os.environ['DEVIN_JOURNEY_CONTROL_SOCKET'])
+s.sendall((json.dumps({'kind':'begin','observed_at_ns':time.time_ns()})+'\n').encode())
+assert b'true' in s.recv(4096)
+# Simulate an observer crash: no terminal/finish handshake.
+s.close()
+`)
+	observer.Env = os.Environ()
+	release := f.bind(t, observer)
+	require.NoError(t, observer.Run())
+	release()
+	require.Equal(t, true, f.snapshot()["stopped"])
+	require.Equal(t, true, f.snapshot()["owned_backend_death_verified"])
+	select {
+	case <-done:
+	default:
+		t.Fatal("owned backend was not reaped before reporting hard-stop success")
+	}
+	require.False(t, f.control(controlEvent("begin")))
+}
+
+func TestJourneyStopOldToolAckCannotConfirmNewResponse(t *testing.T) {
+	f := newJourneyFence(nil, nil)
+	require.True(t, f.control(controlEvent("begin")))
+	response := func(id string) *agentRequest {
+		return &agentRequest{Status: 200, response: &journeyResponseBody{eof: true, data: []byte(`{"choices":[{"message":{"tool_calls":[{"id":"` + id + `"}]},"finish_reason":"tool_calls"}]}`)}}
+	}
+	_, cancel, err := f.acquire(context.Background())
+	require.NoError(t, err)
+	defer cancel()
+	f.finishResponse(response("old"))
+	e := controlEvent("tool")
+	e.Call = callHash("old")
+	e.Status = "completed"
+	require.True(t, f.control(e))
+	_, cancel2, err := f.acquire(context.Background())
+	require.NoError(t, err)
+	defer cancel2()
+	require.True(t, f.control(e), "a duplicate old terminal must never be assigned to the active response")
+	f.finishResponse(response("new"))
+	require.Equal(t, 1, f.snapshot()["pending_tools"])
+	e.Call = callHash("new")
+	require.True(t, f.control(e))
+	_, cancel3, err := f.acquire(context.Background())
+	require.NoError(t, err)
+	defer cancel3()
+	f.finishResponse(response("old"))
+	require.Equal(t, true, f.snapshot()["stopped"], "provider UID reuse is ambiguous and must not consume an old ACK")
 }

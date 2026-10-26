@@ -147,6 +147,9 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 		}
 		var body map[string]any
 		if json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body) != nil || body["model"] != p.model {
+			if p.fence != nil {
+				p.fence.stop("protocol_error", time.Now().UnixNano())
+			}
 			http.Error(w, "unexpected E2E model or body", 400)
 			return
 		}
@@ -177,6 +180,9 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 		p.requests = append(p.requests, record)
 		if len(p.requests) > p.maxAttempts || p.forwarded >= p.maxForwarded {
 			p.mu.Unlock()
+			if p.fence != nil {
+				p.fence.stop("protocol_error", time.Now().UnixNano())
+			}
 			http.Error(w, "E2E request budget exhausted", 402)
 			return
 		}
@@ -212,6 +218,9 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 		p.mu.Lock()
 		if p.forwarded >= p.maxForwarded {
 			p.mu.Unlock()
+			if p.fence != nil {
+				p.fence.stop("protocol_error", time.Now().UnixNano())
+			}
 			http.Error(w, "E2E request budget exhausted", 402)
 			return
 		}

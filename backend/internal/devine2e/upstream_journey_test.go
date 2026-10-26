@@ -150,6 +150,16 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		reply.DeltaToolCalls = []*pb.ChatToolCall{{Id: "project-" + strconv.Itoa(len(request.ChatMessagePrompts)) + "-" + tool.Name, Name: tool.Name, ArgumentsJson: string(encoded)}}
 		reply.StopReason = pb.StopReason_STOP_REASON_FUNCTION_CALL
 	}
+	if testScenario == "read_error_retry" {
+		// Deliberately request the same missing file on every model call. The
+		// real CLI would retry/continue after the tool error without the fence.
+		for _, tool := range request.Tools {
+			if tool.Name == "read" {
+				call(tool, journeyPathArgs(tool, filepath.Join(workspace, "missing-probe.txt"), map[string]any{}))
+				return
+			}
+		}
+	}
 	for _, tool := range request.Tools {
 		if tool.Name == fusion.DelegateTool {
 			if lastReport < lastUser {

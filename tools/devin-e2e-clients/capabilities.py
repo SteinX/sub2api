@@ -67,6 +67,7 @@ class Rpc:
                 event = json.loads(raw)
                 tool = self.tools.observe(event)
                 self.control.tool(tool)
+                self.control.observe_terminal(event)
                 if self.control.stopped:
                     self.failed=True
                     self.h.kill_child(self.proc)

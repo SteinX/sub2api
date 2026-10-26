@@ -148,7 +148,7 @@ def claim(path, plan, mode):
     return state
 
 
-def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated_cost=None, reason=None, observed_ns=None):
+def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated_cost=None, reason=None, observed_ns=None, expected_scope=None):
     try:
         fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
     except OSError:
@@ -158,6 +158,8 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated
             raise Denied('run_ledger_not_private_regular_file')
         fcntl.flock(file, fcntl.LOCK_EX)
         state = json.load(file)
+        if expected_scope is not None and any(state.get(key)!=value for key,value in expected_scope.items()):
+            raise Denied('run_ledger_scope_or_state_mismatch')
         instant = time.time_ns()
         journal = state.setdefault('journal', [])
         if action == 'admit':

@@ -36,11 +36,11 @@ def settlement_scope(args):
     expected = (STATE_ROOT / (identity + '.json')).resolve()
     if not args.ledger or Path(args.ledger).resolve() != expected:
         raise Denied('approval_ledger_path_mismatch')
-    state = read_json(expected)
-    if (state.get('plan_sha256') != digest(plan) or approval.get('plan_sha256') != digest(plan)
-            or state.get('mode') != args.mode or state.get('source') != plan.get('source')):
+    if approval.get('plan_sha256') != digest(plan):
         raise Denied('run_ledger_scope_or_state_mismatch')
-    return state
+    # Never read a mutable ledger before its flock. Stop and late Complete are
+    # deliberately concurrent; immutable scope is checked inside ledger_action.
+    return {'plan_sha256':digest(plan),'mode':args.mode,'source':plan.get('source')}
 
 
 def checked(args):
@@ -163,9 +163,9 @@ def main():
     args = parser.parse_args()
     try:
         if args.action in {'stop', 'complete'}:
-            settlement_scope(args)
+            scope = settlement_scope(args)
             state = ledger_action(args.ledger, args.action, args.receipt, args.outcome, args.cost,
-                                  reason=args.reason, observed_ns=args.observed_ns)
+                                  reason=args.reason, observed_ns=args.observed_ns, expected_scope=scope)
             print(json.dumps({'authorized': True, 'receipt': state['inflight'], 'requests': state['requests'], 'stopped': state['stopped']}))
             return 0
         plan, checked_plan = checked(args)
