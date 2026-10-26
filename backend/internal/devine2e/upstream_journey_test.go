@@ -228,6 +228,29 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	case mutationTool == "noop":
 		reply.DeltaText = final // deliberately false success; no source repair or tests
 		return
+	case testScenario == "tool_limit_12" || testScenario == "tool_limit_13":
+		// Actual CLI execution creates unique protected test receipts. The
+		// thirteenth proposed tool is another exact permitted test command,
+		// so its absence can be proved independently of the response parser.
+		target := 12
+		if testScenario == "tool_limit_13" {
+			target = 13
+		}
+		if !tested || reads["requirements.json"] >= 2 && reads["report.json"] > 0 && requestedCommands["python3 run_tests.py"] < target-5 {
+			for _, tool := range request.Tools {
+				if tool.Name == "bash" {
+					call(tool, map[string]any{"command": "python3 run_tests.py", "description": "Bounded tool admission fixture"})
+					return
+				}
+			}
+		} else if reads["requirements.json"] < 2 {
+			readPath = "requirements.json"
+		} else if reads["report.json"] == 0 {
+			readPath = "out/report.json"
+		} else {
+			reply.DeltaText = final
+			return
+		}
 	case testScenario != "":
 
 		commands := map[string][]string{

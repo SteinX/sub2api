@@ -95,6 +95,10 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	require.NoError(t, json.Unmarshal([]byte(current.Get("extra").Raw), &extra))
 	extra["devin_fusion_profiles"] = []fusion.Profile{profile}
 	api(t, app, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra})
+	verifyProjectToolAdmission(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
+	if os.Getenv("DEVIN_JOURNEY_TOOL_LIMITS_ONLY") == "true" {
+		return
+	}
 	verifyProjectTestReceipts(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
 	verifyProjectFirstErrorClients(t, app, fixture, key, userPassword, keyID)
 	if os.Getenv("DEVIN_JOURNEY_EVIDENCE_ONLY") == "true" {

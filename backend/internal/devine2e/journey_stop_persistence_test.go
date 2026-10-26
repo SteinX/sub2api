@@ -54,9 +54,11 @@ plan=read_json(sys.argv[3]);scope={'plan_sha256':digest(plan),'mode':'live','sou
 action=sys.argv[4];kwargs={'expected_scope':scope}
 if action=='admit':kwargs['cost']=float(sys.argv[5])
 if action=='complete':kwargs.update(receipt=int(sys.argv[5]),outcome=sys.argv[6],cost=float(sys.argv[7]))
+if action=='tool_begin':kwargs['operation']=sys.argv[5]
+if action=='tool_reserve':kwargs.update(operation=sys.argv[5],calls=json.loads(sys.argv[6]))
 try:
  state=ledger_action(sys.argv[2],action,**kwargs)
- print(json.dumps({'authorized':True,'receipt':state['inflight'],'stopped':state['stopped']}))
+ print(json.dumps({'authorized':not state['stopped'],'receipt':state['inflight'],'stopped':state['stopped']}))
 except Denied as error:
  print(json.dumps({'authorized':False,'reason':str(error)}))
 `
@@ -73,11 +75,13 @@ func newFixtureLedgerBudget(t *testing.T, accounting *authorizedJourneyBudget) *
 	ledger, err = filepath.Abs(ledger)
 	require.NoError(t, err)
 	directory := t.TempDir()
-	b := &fixtureLedgerBudget{accounting: accounting, plan: filepath.Join(directory, "plan.json"), scope: filepath.Join(directory, "nonexecuting-scope.json"), ledger: ledger, policyRoot: policyRoot, settled: make(chan error, 1)}
+	b := &fixtureLedgerBudget{accounting: accounting, plan: filepath.Join(directory, "plan.json"), scope: filepath.Join(directory, "nonexecuting-scope.json"), ledger: ledger, policyRoot: policyRoot, settled: make(chan error, 64)}
 	initialize := `import json,sys
 sys.path.insert(0,sys.argv[1])
-from journey_policy import claim,digest
-plan={'source':{'commit':'a'*40,'tree':'b'*40},'limits':{'public_requests':12,'local_usd':1,'turn_usd':.5,'wall_seconds':180}}
+from journey_policy import claim,digest,TOOL_OPERATIONS
+plan={'source':{'commit':'a'*40,'tree':'b'*40},'clients':['opencode'],
+      'tool_budget':{'operations':TOOL_OPERATIONS,'per_operation':12,'total':48},
+      'limits':{'public_requests':40,'local_usd':1,'turn_usd':.5,'wall_seconds':300,'tools_per_turn':12}}
 scope={'schema_version':1,'approved':False,'approval_id':sys.argv[5],'plan_sha256':digest(plan)}
 for path,value in [(sys.argv[2],plan),(sys.argv[3],scope)]:
  with open(path,'w') as file:json.dump(value,file)
@@ -132,6 +136,33 @@ func (b *fixtureLedgerBudget) Complete(receipt int, outcome string) error {
 func (b *fixtureLedgerBudget) Stop(reason string, observed int64) error {
 	_, err := b.command(filepath.Join(b.policyRoot, "authorized_journey.py"), "stop", "--mode", "live", "--plan", b.plan, "--approval", b.scope, "--ledger", b.ledger, "--reason", reason, "--observed-ns", fmt.Sprint(observed))
 	return err
+}
+
+func (b *fixtureLedgerBudget) toolPolicy(action, operation string, calls []string) error {
+	arguments := []string{"-c", fixtureLedgerAction, b.policyRoot, b.ledger, b.plan, action, operation}
+	if calls != nil {
+		encoded, err := json.Marshal(calls)
+		if err != nil {
+			return err
+		}
+		arguments = append(arguments, string(encoded))
+	}
+	output, err := b.command(arguments...)
+	var decision struct {
+		Authorized bool `json:"authorized"`
+		Stopped    bool `json:"stopped"`
+	}
+	if err != nil || json.Unmarshal(output, &decision) != nil || !decision.Authorized || decision.Stopped {
+		return errors.New("synthetic tool ledger denied or unavailable")
+	}
+	return nil
+}
+
+func (b *fixtureLedgerBudget) ToolBegin(operation string) error {
+	return b.toolPolicy("tool_begin", operation, nil)
+}
+func (b *fixtureLedgerBudget) ToolReserve(operation string, calls []string) error {
+	return b.toolPolicy("tool_reserve", operation, calls)
 }
 
 func (b *fixtureLedgerBudget) verifyStopped(t *testing.T) map[string]any {

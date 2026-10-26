@@ -101,7 +101,7 @@ func TestJourneyStopResponseIdentityIsFailClosed(t *testing.T) {
 		_, err := journeyResponseCalls([]byte(data), strings.HasPrefix(data, "data:"))
 		require.Error(t, err)
 	}
-	ids, err := journeyResponseCalls([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\"}]}}]}\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\ndata: [DONE]\n"), true)
+	ids, err := journeyResponseCalls([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\"}]}}]}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"), true)
 	require.NoError(t, err)
 	require.Equal(t, []string{callHash("a")}, ids)
 }

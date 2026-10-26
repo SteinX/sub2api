@@ -282,7 +282,7 @@ def command(client, model, resume):
 
 def invoke(args, directory, resume=False, protected=None):
     control = batch_control.current()
-    control.begin()
+    control.begin('resume' if resume else 'task')
     env = project_environment(directory)
     for name in SENSITIVE_ENV | {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"}:
         env.pop(name, None)

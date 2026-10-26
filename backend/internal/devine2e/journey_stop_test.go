@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,8 @@ import (
 // does not purport to recall a request already sent to a remote provider.
 type journeyFence struct {
 	mu            sync.Mutex
+	toolMu        sync.Mutex // serializes reservations, never blocks fatal stop
+	tools         *journeyToolGate
 	changed       chan struct{}
 	stopped       bool
 	active        bool
@@ -90,7 +93,7 @@ func (f *journeyFence) notify() { close(f.changed); f.changed = make(chan struct
 
 func (f *journeyFence) stop(reason string, observed int64) {
 	switch reason {
-	case "tool_error", "permission_rejection", "test_failed", "reader_error", "parse_error", "client_exit", "protocol_error", "transport_uncertain", "control_lost", "supervisor_failure", "deadline", "missing_terminal", "source_or_oracle_failure":
+	case "tool_error", "permission_rejection", "test_failed", "reader_error", "parse_error", "client_exit", "protocol_error", "transport_uncertain", "control_lost", "supervisor_failure", "deadline", "missing_terminal", "source_or_oracle_failure", "tool_budget_exhausted", "tool_budget_unavailable":
 	default:
 		reason = "protocol_error"
 	}
@@ -251,12 +254,22 @@ func journeyResponseCalls(data []byte, stream bool) ([]string, error) {
 			return nil, err
 		}
 	} else {
-		for _, line := range bytes.Split(data, []byte("\n")) {
-			line = bytes.TrimSpace(line)
-			if !bytes.HasPrefix(line, []byte("data:")) {
+		reader := bufio.NewReader(bytes.NewReader(data))
+		for {
+			frame, err := readJourneyEvent(reader)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			raw, err := journeyEventData(frame)
+			if err != nil {
+				return nil, err
+			}
+			if len(bytes.TrimSpace(raw)) == 0 {
 				continue
 			}
-			raw := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 			if bytes.Equal(raw, []byte("[DONE]")) {
 				continue
 			}
@@ -291,6 +304,17 @@ func (f *journeyFence) finishResponse(record *agentRequest) {
 	calls, err := journeyResponseCalls(nil, false)
 	if record.response != nil && record.response.eof && record.Status < 400 {
 		calls, err = journeyResponseCalls(record.response.data, record.Stream)
+	}
+	if err == nil && f.toolGuardEnabled() {
+		if record.response.tools == nil {
+			err = errors.New("tool response bypassed pre-delivery guard")
+		} else {
+			actual := slices.Clone(calls)
+			slices.Sort(actual)
+			if !slices.Equal(actual, record.response.tools.offeredCalls()) {
+				err = errors.New("EOF tool set differs from pre-delivery reservation")
+			}
+		}
 	}
 	if err != nil {
 		f.stop("transport_uncertain", time.Now().UnixNano())
@@ -337,12 +361,13 @@ func (f *journeyFence) finishResponse(record *agentRequest) {
 }
 
 type journeyControlEvent struct {
-	Kind     string `json:"kind"`
-	Observed int64  `json:"observed_at_ns"`
-	Call     string `json:"call_sha256,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Reason   string `json:"reason,omitempty"`
-	epoch    int
+	Kind      string `json:"kind"`
+	Observed  int64  `json:"observed_at_ns"`
+	Call      string `json:"call_sha256,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Operation string `json:"operation,omitempty"`
+	epoch     int
 }
 
 func (f *journeyFence) control(e journeyControlEvent) bool {
@@ -353,6 +378,9 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 	if e.Kind == "stop" {
 		f.stop(e.Reason, e.Observed)
 		return false
+	}
+	if e.Kind == "begin" && f.toolGuardEnabled() {
+		return f.beginToolOperation(e)
 	}
 	if e.Kind == "end" {
 		deadline := time.NewTimer(5 * time.Second)
@@ -385,6 +413,9 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 		case "tool":
 			_, hashErr := hex.DecodeString(e.Call)
 			valid = len(e.Call) == 64 && hashErr == nil && e.Status == "completed" && f.phase
+			if valid && f.tools != nil {
+				valid = f.tools.calls[e.Call]
+			}
 			if valid {
 				if f.pending[e.Call] {
 					delete(f.pending, e.Call)
@@ -395,6 +426,9 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 					f.acks[e.Call] = true
 				} else {
 					valid = false
+				}
+				if valid && f.tools != nil {
+					f.tools.completed[e.Call] = true
 				}
 			}
 		case "end":
@@ -514,7 +548,7 @@ func (f *journeyFence) snapshot() map[string]any {
 			first[key] = value
 		}
 	}
-	return map[string]any{"installed": true, "response_observation": "original_stream_with_source_proof", "buffered_transport": false, "unverified_transport": []string{"live stream timing", "live early downstream cancellation"}, "response_buffer_max_bytes": 4 << 20, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
+	return map[string]any{"installed": true, "response_observation": "original_stream_with_source_proof", "buffered_transport": false, "tool_admission": f.toolSnapshotLocked(), "unverified_transport": []string{"live stream timing", "live early downstream cancellation"}, "response_buffer_max_bytes": 4 << 20, "phase_active": f.phase, "public_inflight": f.active, "stopped": f.stopped, "first_failure": first, "public_admitted": f.forwarded, "rejected_after_stop": f.denied,
 		"pending_tools": len(f.pending), "owned_backend_death_verified": f.backendDead, "journal": append([]map[string]any(nil), f.journal...),
 		"guarantee": "no public admission after gate closure; owned backend death stops local background sends; already remote inflight remains unknown"}
 }
@@ -522,6 +556,9 @@ func (f *journeyFence) snapshot() map[string]any {
 func runGuardedJourney(t *testing.T, cmd *exec.Cmd, app *application, admission *agentAdmission, fence *journeyFence) ([]byte, error) {
 	t.Helper()
 	admission.fence = fence
+	if fence.toolGuardEnabled() && !fence.selectToolCase(admission.toolCase) {
+		return nil, errors.New("unapproved tool operation case")
+	}
 	release := fence.bind(t, cmd)
 	if cancel := cmd.Cancel; cancel != nil {
 		cmd.Cancel = func() error { fence.stop("deadline", time.Now().UnixNano()); return cancel() }
