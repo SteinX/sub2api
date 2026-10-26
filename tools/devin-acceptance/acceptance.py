@@ -8,6 +8,7 @@ import argparse
 import base64
 from collections import Counter
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -85,6 +86,8 @@ def valid_client_test_receipt(case):
     if not valid_tool_evidence(task):
         return False
     execution = task.get('test_execution', {})
+    if not isinstance(execution, dict):
+        return False
     calls = execution.get('calls')
     if (execution.get('schema') != 'devin_project_test_v1' or execution.get('passed') is not True
             or execution.get('conflicting_evidence') is not False or not isinstance(calls, list) or not calls
@@ -117,6 +120,53 @@ def valid_client_test_receipt(case):
         return False
     stamps = [task.get('client_started_ns'), selected.get('started_ns'), selected.get('finished_ns'), task.get('client_finished_ns')]
     return all(type(value) is int and value > 0 for value in stamps) and stamps == sorted(stamps)
+
+
+def valid_fusion_audit(case):
+    audit = case.get('fusion_execution', {})
+    if (audit.get('schema_version') != 1 or audit.get('available') is not True or audit.get('complete') is not True
+            or audit.get('missing_session_headers') != 0 or not isinstance(audit.get('sessions'), list) or not audit['sessions']):
+        return False
+    sessions, attempts = set(), set()
+    def amount(value):
+        return type(value) in {int, float} and math.isfinite(value) and value >= 0
+    for session in audit['sessions']:
+        fingerprint = session.get('session_sha256')
+        if (not HEX64.fullmatch(str(fingerprint)) or fingerprint in sessions or session.get('available') is not True
+                or session.get('complete') is not True or session.get('state') != 'TURN_COMPLETED' or session.get('role') != 'lead'
+                or session.get('separate_contexts') is not True or session.get('role_usage_settled') is not True):
+            return False
+        sessions.add(fingerprint)
+        handoffs = [item for item in session.get('handoffs', []) if item.get('turn') == session.get('turns')]
+        if not handoffs or any(item.get('report_present') is not True or item.get('lead_report_linked') is not True
+                               or type(item.get('report_bytes')) is not int or item['report_bytes'] <= 0
+                               or not all(HEX64.fullmatch(str(item.get(key))) for key in ['handoff_sha256', 'report_sha256']) for item in handoffs):
+            return False
+        roles = Counter()
+        for attempt in session.get('attempts', []):
+            identity, role = attempt.get('attempt_sha256'), attempt.get('role')
+            if (not HEX64.fullmatch(str(identity)) or identity in attempts or role not in {'lead', 'sidekick'}
+                    or attempt.get('model_uid') != case.get('physical_' + role + '_uid') or attempt.get('status') != 'completed'
+                    or any(attempt.get(field) is not True for field in ['settled', 'applied', 'usage_available', 'usage_matches'])
+                    or attempt.get('failure_present') is not False or attempt.get('usage_rows') != 1
+                    or any(not amount(attempt.get(field)) for field in ['cost_usd', 'actual_cost_usd', 'total_cost_usd'])
+                    or abs(attempt['cost_usd'] - max(attempt['actual_cost_usd'], attempt['total_cost_usd'])) > 1e-9
+                    or any(type(attempt.get(field)) is not int or attempt[field] < 0 for field in ['input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens'])):
+                return False
+            attempts.add(identity)
+            if attempt.get('purpose') == 'inference':
+                roles[role] += 1
+            elif attempt.get('purpose') not in {'compaction', 'cache_refresh'}:
+                return False
+        review = session.get('lead_review', {})
+        if (roles.get('lead', 0) < 2 or roles.get('sidekick', 0) < 1 or dict(roles) != session.get('role_attempts')
+                or review.get('state') != 'completed_with_report_context' or review.get('current_turn') != session.get('turns')
+                or type(review.get('final_request_index')) is not int or review['final_request_index'] < 0
+                or type(review.get('final_answer_bytes')) is not int or review['final_answer_bytes'] <= 0
+                or not HEX64.fullmatch(str(review.get('final_answer_sha256')))
+                or any(review.get(field) is not True for field in ['report_context_linked', 'sidekick_then_lead', 'request_boundaries_valid'])):
+            return False
+    return True
 
 
 def validate(report, mode, commit, tree, state=None):
@@ -193,6 +243,8 @@ def validate(report, mode, commit, tree, state=None):
         if case.get('model_kind') == 'direct' and sidekick:
             errors.append(ident + ':unexpected_sidekick')
         if case.get('model_kind') == 'fusion':
+            if not valid_fusion_audit(case):
+                errors.append(ident + ':fusion_collaboration_unverified')
             contexts = case.get('native_context_hashes', {})
             lead_contexts, sidekick_contexts = set(contexts.get('lead', {})), set(contexts.get('sidekick', {}))
             if (not sidekick or physical.get(sidekick, 0) < 1 or not lead_contexts or not sidekick_contexts

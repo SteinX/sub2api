@@ -17,29 +17,34 @@ import (
 
 // These replies ask the actual CLI to execute tools. The fixture never executes
 // commands or writes a test receipt on the client's behalf.
-func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFixture, key, password string) {
+func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFixture, key, password, fusionModel string, keyID int64) {
 	t.Helper()
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
-	for _, scenario := range []string{"canonical", "whitespace", "after_extra", "after_forbidden", "fake_ok", "failed_tests", "forbidden_equiv"} {
+	for _, scenario := range []string{"canonical", "whitespace", "after_extra", "after_forbidden", "fake_ok", "failed_tests", "forbidden_equiv", "fusion_failure"} {
 		t.Run("test_receipt_"+scenario, func(t *testing.T) {
 			directory := t.TempDir()
 			fixture.journey.mu.Lock()
 			fixture.journey.workspace = filepath.Join(directory, "workspace")
 			fixture.journey.mutationTool = "write"
 			fixture.journey.testScenario = scenario
+			model := fixtureModel
+			if scenario == "fusion_failure" {
+				model = fusionModel
+				fixture.journey.testScenario = "fake_ok"
+			}
 			fixture.journey.mu.Unlock()
 			t.Cleanup(func() {
 				fixture.journey.mu.Lock()
 				fixture.journey.testScenario = ""
 				fixture.journey.mu.Unlock()
 			})
-			admission := newJourneyAdmission(t, app, fixtureModel, 16)
+			admission := newJourneyAdmission(t, app, model, 16)
 			ui := journeyUIServer(t, app.base, admission.server.URL)
 			script, err := filepath.Abs("../../../tools/devin-e2e-clients/journey.py")
 			require.NoError(t, err)
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", "opencode", "--model", fixtureModel, "--ui-url", ui.URL, "--profile", "project")
+			cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", "opencode", "--model", model, "--ui-url", ui.URL, "--profile", "project")
 			gracefulJourneyCommand(cmd)
 			processRegistry, containerRegistry := journeyRegistryEnvironment(t, app)
 			for _, variable := range os.Environ() {
@@ -52,15 +57,29 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 				"DEVIN_JOURNEY_PROCESS_REGISTRY="+processRegistry, "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
 			output, runErr := cmd.Output()
 			cleanupErr := cleanupJourneyProcessesAt(processRegistry, containerRegistry)
-			var report map[string]any
-			require.NoError(t, json.Unmarshal(output, &report))
+			report := map[string]any{"status": "failed", "stage": "runner_output"}
+			parseErr := json.Unmarshal(output, &report)
+			if report == nil {
+				report = map[string]any{"status": "failed", "stage": "runner_output"}
+			}
+			if scenario == "fusion_failure" {
+				_, records := admission.snapshot()
+				report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, records, false)
+			}
 			writeAgentArtifact(t, "journey-test-receipt-"+scenario+".json", report)
+			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
 			task := report["task"].(map[string]any)
-			if scenario == "canonical" || scenario == "whitespace" || scenario == "after_extra" {
+			if scenario == "canonical" || scenario == "after_extra" {
 				require.NoError(t, runErr, "permitted actual test executions must be recognized")
 				require.Equal(t, "passed", report["status"])
 				require.Equal(t, true, task["client_tests_succeeded"])
+				require.Equal(t, true, task["test_command_verified"])
+				if scenario == "after_extra" {
+					calls := task["test_execution"].(map[string]any)["calls"].([]any)
+					require.Len(t, calls, 2)
+					require.NotEqual(t, calls[0].(map[string]any)["run_sha256"], calls[1].(map[string]any)["run_sha256"], "each actual execution must produce its own receipt")
+				}
 			} else {
 				require.Error(t, runErr, "a denied command or missing/failed real test cannot pass")
 				require.Equal(t, "failed", report["status"])
@@ -69,6 +88,23 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 					require.Equal(t, true, task["client_tests_succeeded"], "a later denied tool must not erase the earlier successful test evidence")
 				} else {
 					require.Equal(t, false, task["client_tests_succeeded"])
+				}
+				if scenario == "fusion_failure" {
+					require.Equal(t, true, report["fusion_execution"].(map[string]any)["complete"], "a client failure must still retain verified local collaboration evidence")
+				}
+				if scenario == "whitespace" || scenario == "after_forbidden" || scenario == "fake_ok" || scenario == "forbidden_equiv" {
+					denied := false
+					for _, value := range task["tool_calls"].([]any) {
+						call := value.(map[string]any)
+						denied = denied || call["name"] == "bash" && call["status"] == "error" && call["error_kind"] == "client_permission_rejection"
+					}
+					require.True(t, denied, "prove the actual CLI rejected this command under the copied product policy")
+				}
+				if scenario == "failed_tests" {
+					call := task["test_execution"].(map[string]any)["calls"].([]any)[0].(map[string]any)
+					require.Equal(t, true, call["execution_verified"])
+					require.Equal(t, false, call["passed"])
+					require.Equal(t, float64(1), call["exit_code"])
 				}
 			}
 		})

@@ -69,6 +69,23 @@ def evidence(live=False):
         for key in ['initial_project_test_failed', 'protected_project_files_intact', 'artifact_verified_before_oracle',
                     'artifact_verified_after_resume', 'source_unchanged_after_resume', 'independent_project_test_passed', 'same_client_session']:
             case[key] = True
+        if kind == 'fusion':
+            attempts = [{'attempt_sha256': hashlib.sha256(str(index).encode()).hexdigest(), 'role': role,
+                         'model_uid': 'physical-' + ('lead' if role == 'lead' else 'sidekick'),
+                         'purpose': 'inference', 'status': 'completed', 'settled': True, 'applied': True, 'failure_present': False,
+                         'usage_available': True, 'usage_matches': True, 'usage_rows': 1,
+                         'cost_usd': .001, 'actual_cost_usd': .001, 'total_cost_usd': .001,
+                         'input_tokens': 4, 'output_tokens': 2, 'cache_creation_tokens': 0, 'cache_read_tokens': 0}
+                        for index, role in enumerate(['lead', 'sidekick', 'lead'])]
+            case['fusion_execution'] = {'schema_version': 1, 'available': True, 'complete': True, 'missing_session_headers': 0,
+                'sessions': [{'session_sha256': DIGEST, 'available': True, 'complete': True, 'state': 'TURN_COMPLETED',
+                             'turns': 1, 'role': 'lead', 'separate_contexts': True, 'role_usage_settled': True,
+                             'handoffs': [{'turn': 1, 'handoff_sha256': DIGEST, 'report_present': True, 'report_bytes': 30,
+                                           'report_sha256': DIGEST, 'lead_report_linked': True}],
+                             'attempts': attempts, 'role_attempts': {'lead': 2, 'sidekick': 1},
+                             'lead_review': {'state': 'completed_with_report_context', 'current_turn': 1, 'final_request_index': 3,
+                                             'final_answer_bytes': 30, 'final_answer_sha256': DIGEST,
+                                             'report_context_linked': True, 'sidekick_then_lead': True, 'request_boundaries_valid': True}}]}
         for key in ['context_pressure', 'compact', 'fork', 'worker', 'disconnect_recovery']:
             case[key] = 'passed' if live else 'not_run'
         cases.append(case)
@@ -84,6 +101,20 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_role_counts_alone_cannot_replace_fusion_review_and_settlement(self):
+        for target, field, value in [('session', 'complete', False), ('review', 'report_context_linked', False),
+                                      ('review', 'sidekick_then_lead', False), ('handoff', 'report_present', False),
+                                      ('handoff', 'report_bytes', 0), ('attempt', 'usage_rows', 2),
+                                      ('attempt', 'usage_available', False), ('attempt', 'actual_cost_usd', None),
+                                      ('attempt', 'total_cost_usd', .002)]:
+            report, _ = evidence()
+            case = next(case for case in report['cases'] if case['model_kind'] == 'fusion')
+            session = case['fusion_execution']['sessions'][0]
+            destination = {'session': session, 'review': session['lead_review'], 'handoff': session['handoffs'][0], 'attempt': session['attempts'][0]}[target]
+            destination[field] = value
+            with self.subTest(target=target, field=field):
+                self.assertIn(case['id'] + ':fusion_collaboration_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
+
     def test_aggregate_or_text_success_cannot_replace_per_call_test_receipt(self):
         for field, value in [('test_execution', None), ('tool_calls', []), ('tool_calls', None)]:
             report, _ = evidence()

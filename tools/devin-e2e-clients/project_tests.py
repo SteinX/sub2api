@@ -115,6 +115,7 @@ class TestReceipts:
             'command_sha256': tool.get('command_sha256'), 'state': tool['status'], 'exit_code': None,
             'exit_source': 'unverified', 'receipt_status': 'not_terminal', 'execution_verified': False, 'passed': None})
         record['state'] = tool['status']
+        record['tool_error_kind'] = tool.get('error_kind')
         record['command_class'] = tool.get('command_class', 'unidentified')
         record['command_sha256'] = tool.get('command_sha256')
         if tool['status'] not in {'completed', 'error'}:

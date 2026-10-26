@@ -104,14 +104,16 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	calls := map[string]priorCall{}
 	reads := map[string]int{}
 	wrote, tested, mutationFailed := false, false, false
-	requestedCommands := map[string]bool{}
+	requestedCommands := map[string]int{}
+	requestedCallIDs := map[string]bool{}
 	for i, prompt := range request.ChatMessagePrompts {
 		for _, call := range prompt.ToolCalls {
 			var args map[string]any
 			_ = json.Unmarshal([]byte(call.ArgumentsJson), &args)
-			if call.Name == "bash" {
+			if call.Name == "bash" && !requestedCallIDs[call.Id] {
 				if command, ok := args["command"].(string); ok {
-					requestedCommands[command] = true
+					requestedCommands[command]++
+					requestedCallIDs[call.Id] = true
 				}
 			}
 			path := ""
@@ -221,14 +223,16 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		commands := map[string][]string{
 			"canonical":       {"python3 run_tests.py"},
 			"whitespace":      {"python3   run_tests.py"},
-			"after_extra":     {"python3 run_tests.py", "python3   run_tests.py"},
+			"after_extra":     {"python3 run_tests.py", "python3 run_tests.py"},
 			"after_forbidden": {"python3 run_tests.py", "printf SYNTHETIC_EXTRA"},
 			"fake_ok":         {"printf 'Ran 1 test\\n\\nOK\\n'"},
 			"failed_tests":    {"python3 run_tests.py"},
 			"forbidden_equiv": {"python3 run_tests.py && printf SYNTHETIC_EXTRA"},
 		}[testScenario]
+		plannedCommands := map[string]int{}
 		for _, command := range commands {
-			if requestedCommands[command] {
+			plannedCommands[command]++
+			if requestedCommands[command] >= plannedCommands[command] {
 				continue
 			}
 			for _, tool := range request.Tools {

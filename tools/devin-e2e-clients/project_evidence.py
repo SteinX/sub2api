@@ -54,7 +54,7 @@ class ToolEvidence:
         if previous and previous['status'] in {'completed', 'error'} and status != previous['status']:
             raise ValueError('tool_terminal_changed')
         record = previous or {'name': name, 'call_sha256': digest(call_id.encode()), 'source_targeted': False,
-                              'test_command': False, 'states': []}
+                              'test_command': False, 'states': [], 'error_kind': None}
         if inputs is not None:
             record['source_targeted'] |= self.source_targeted(name, inputs)
             if name == 'bash' and isinstance(inputs, dict) and isinstance(inputs.get('command'), str):
@@ -65,6 +65,12 @@ class ToolEvidence:
                 record['command_class'] = command_class(inputs['command'], self.test_command)
                 record['test_command'] = record['command_class'] == 'configured_project_tests'
         record['status'] = status
+        if status == 'error':
+            # Classify the actual client error without retaining its body/rules.
+            detail = (event.get('part', {}).get('state', {}).get('error') if kind == 'tool_use' else None)
+            text = detail.lower() if isinstance(detail, str) else ''
+            denied = ('permission' in text and any(word in text for word in ['deny', 'denied', 'reject'])) or text.startswith('the user has specified a rule which prevents')
+            record['error_kind'] = 'client_permission_rejection' if denied else 'client_tool_error'
         if not record['states'] or record['states'][-1] != status:
             record['states'].append(status)
         self.calls[call_id] = record
