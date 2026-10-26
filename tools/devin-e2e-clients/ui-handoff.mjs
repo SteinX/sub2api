@@ -10,6 +10,7 @@ import { createModelDiagnostics, modelControlSnapshot } from './ui-model-diagnos
 let stage = 'input'
 let diagnostics = {}
 const journey = { auth_method: 'login_form', login_http_status: null, key_list_http_status: null, selected_key_matches: false, routes: [] }
+const catalogRecovery = { loading_visible: false, timeout_visible: false, no_configuration_on_error: false, manual_refresh: false }
 const uiScope = 'full product application: login, key list, selection and configuration copy'
 async function main() {
   let raw = ''
@@ -75,6 +76,18 @@ async function main() {
     stage = 'model-select-control'
     await page.getByTestId('devin-client-model').waitFor()
     Object.assign(diagnostics, await page.evaluate(modelControlSnapshot, input.model))
+    if (input.catalog_recovery_probe) {
+      catalogRecovery.loading_visible = await page.getByTestId('devin-models-loading').isVisible()
+      if (catalogRecovery.loading_visible) {
+        stage = 'catalog-timeout'
+        await page.getByTestId('devin-models-error').waitFor()
+        catalogRecovery.timeout_visible = await page.getByTestId('devin-models-error').getAttribute('data-timeout') === 'true'
+        catalogRecovery.no_configuration_on_error = await page.getByTestId('client-config-file').count() === 0
+        if (!catalogRecovery.timeout_visible || !catalogRecovery.no_configuration_on_error || !await page.getByTestId('devin-models-refresh').isEnabled()) throw new Error('Invalid catalog failure state')
+        await page.getByTestId('devin-models-refresh').click()
+        catalogRecovery.manual_refresh = true
+      }
+    }
     stage = 'model-target-option'
     await page.waitForFunction(model => [...document.querySelectorAll('#devin-client-model option')].some(option => option.value === model), input.model)
     Object.assign(diagnostics, await page.evaluate(modelControlSnapshot, input.model))
@@ -127,10 +140,12 @@ async function main() {
       const normalized = copied.replaceAll(origin, '<gateway>').replaceAll(input.workspace, '<workspace>')
       files.push({ name, sha256: createHash('sha256').update(normalized).digest('hex') })
     }
+    if (input.catalog_recovery_probe && !catalogRecovery.manual_refresh) throw new Error('Catalog recovery was not exercised')
     process.stdout.write(JSON.stringify({
       passed: true, source: 'UseKeyModal browser copy buttons', ui_scope: uiScope, product_journey: journey,
       client: input.client, profile: input.profile, selected_model: input.model, files,
-      instructions_sha256: createHash('sha256').update(instructions).digest('hex'), browser: browser.version()
+      instructions_sha256: createHash('sha256').update(instructions).digest('hex'), browser: browser.version(),
+      catalog_recovery: input.catalog_recovery_probe ? catalogRecovery : undefined
     }) + '\n')
   } catch (error) {
     if (page) {
