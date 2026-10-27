@@ -1,13 +1,51 @@
-"""Structural tool evidence; never persist tool inputs, outputs or raw call IDs."""
+"""Structural evidence with opt-in, allowlisted synthetic failure diagnostics."""
 from collections import Counter
 import os
 from pathlib import Path
 import re
+import shlex
 import time
-from project_tests import command_category, command_class, digest
+from project_tests import command_category, command_class, digest, output_text, terminal_details
 
 FILE_MUTATORS = frozenset({'write', 'edit', 'apply_patch'})
 TOOL_NAME = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
+PROGRAM_TOKENS = frozenset({'bash', 'sh', 'python', 'python3', 'pytest', 'pytest3', 'git', 'rg',
+    'ls', 'pwd', 'cat', 'tee', 'find', 'node', 'npm', 'pnpm', 'make', 'env', 'echo', 'printf', 'true', 'false'})
+SAFE_COMMAND_TOKENS = PROGRAM_TOKENS | frozenset({'run_tests.py', './run_tests.py', 'test_project.py',
+    'price_math.py', 'requirements.json', 'out/report.json', '-u', '-m', '-c', '--version', '--help',
+    '&&', '||', '|', ';', '>', '>>', '<', '&', '(', ')'})
+
+
+def synthetic_command_hint(command):
+    """A bounded lexical hint, never shell interpretation or command authority.
+
+    Only fixed public words survive; values, source, paths and credentials do
+    not. Even an unknown executable is redacted rather than copied verbatim.
+    """
+    lexer = shlex.shlex(command[:4096], posix=True, punctuation_chars=';&|()<>')
+    lexer.whitespace_split = True
+    lexer.commenters = ''
+    tokens = []
+    truncated = len(command) > 4096
+    try:
+        for _ in range(25):
+            token = lexer.get_token()
+            if not token:
+                break
+            tokens.append(token)
+    except ValueError:
+        return {'command_preview': '<unparsed>', 'recognized_program_tokens': [], 'command_truncated': truncated}
+    truncated |= len(tokens) > 24
+    rendered, programs = [], []
+    for token in tokens[:24]:
+        base = Path(token).name if '/' in token else token
+        if base in PROGRAM_TOKENS and base not in programs:
+            programs.append(base)
+        rendered.append(token if token in SAFE_COMMAND_TOKENS else
+                        '<path>/' + base if '/' in token and base in PROGRAM_TOKENS else '<redacted>')
+    preview = ' '.join(rendered)
+    return {'command_preview': preview[:240], 'recognized_program_tokens': programs,
+            'command_truncated': truncated or len(preview) > 240}
 
 
 def tool_error_categories(detail):
@@ -21,17 +59,22 @@ def tool_error_categories(detail):
         'read_only_filesystem': r'\berofs\b|read.only file system',
         'network_error': r'\benotfound\b|network is unreachable|fetch failed|tunnel connection failed',
         'invalid_arguments': r'invalid arguments|invalid input|schema validation',
+        'command_not_found': r'command not found|(?:^|\n)[^\n]{0,160}:\s*not found\b',
+        'python_module_missing': r'\bmodulenotfounderror\b|no module named',
+        'shell_syntax_error': r'syntax error|unexpected token',
     }
     return [name for name, pattern in patterns.items() if re.search(pattern, detail, re.I)] or ['unclassified']
 
 
 class ToolEvidence:
-    def __init__(self, workspace, test_command):
+    def __init__(self, workspace, test_command, *, synthetic_failure_diagnostics=False):
         self.workspace = Path(workspace)
         self.test_command = test_command
         self.calls = {}
         self.events = {}
         self.failed = False
+        self.synthetic_failure_diagnostics = synthetic_failure_diagnostics
+        self.command_hints = {}
 
     def source_targeted(self, name, inputs):
         if name not in FILE_MUTATORS or not isinstance(inputs, dict):
@@ -81,7 +124,24 @@ class ToolEvidence:
                 record['command_class'] = command_class(inputs['command'], self.test_command)
                 record['command_category'] = command_category(inputs['command'], self.test_command, self.workspace)
                 record['test_command'] = record['command_class'] == 'configured_project_tests'
+                if self.synthetic_failure_diagnostics:
+                    self.command_hints[call_id] = synthetic_command_hint(inputs['command'])
         record['status'] = status
+        if name == 'bash' and status in {'completed', 'error'} and self.synthetic_failure_diagnostics:
+            code, _, _ = terminal_details(event)
+            hint = self.command_hints.pop(call_id, None)
+            if status == 'error' or code is not None and code != 0:
+                detail = event.get('part', {}).get('state', {}).get('error')
+                source = 'client_error' if isinstance(detail, str) else 'client_combined_tool_output'
+                detail = detail if isinstance(detail, str) else output_text(event)
+                sample = detail if len(detail) <= 8192 else detail[:4096] + detail[-4096:]
+                record['failure_diagnostic'] = {
+                    'scope': 'synthetic_project_only', 'client_exit_code': code,
+                    **(hint or {'command_preview': '<unavailable>', 'recognized_program_tokens': [], 'command_truncated': False}),
+                    'output_source': source, 'output_categories': tool_error_categories(sample),
+                    'output_classification_truncated': len(detail) > 8192,
+                    'raw_command_or_output_retained': False,
+                }
         if status == 'error':
             # Classify the actual client error without retaining its body/rules.
             detail = (event.get('part', {}).get('state', {}).get('error') if kind == 'tool_use' else None)

@@ -318,7 +318,7 @@ def invoke(args, directory, resume=False, protected=None):
     result.update(reader_completed=False, reader_error=False, project_nonce_sha256=digest(nonce.encode()))
     result.update(native_permission_request_seen=False, native_noninteractive_auto_reject_seen=False, stderr_bytes=0)
     size = 0
-    tool_evidence = ToolEvidence(directory / 'workspace', TEST_COMMAND)
+    tool_evidence = ToolEvidence(directory / 'workspace', TEST_COMMAND, synthetic_failure_diagnostics=True)
     completion = CompletionEvidence()
 
     def fatal(reason, observed_ns=None):

@@ -245,6 +245,20 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		reply.DeltaText = longRecallText(history.String(), testScenario)
 		return
 	}
+	const missingProgram = "env PATH=/sub2api-e2e-missing python3 -c pass"
+	if testScenario == "shell_exit127" {
+		if requestedCommands[missingProgram] == 0 {
+			for _, tool := range request.Tools {
+				if tool.Name == "bash" {
+					call(tool, map[string]any{"command": missingProgram, "workdir": workspace, "description": "Synthetic missing-program probe"})
+					return
+				}
+			}
+		}
+		// The scripted model could recover on its next turn, but the unchanged
+		// first-error contract must stop before admitting that continuation.
+		testScenario = "result_bash"
+	}
 	if strings.HasPrefix(testScenario, "result_") {
 		logReread := !resume && tested && testScenario == "result_log_reread" && requestedCommands["cat out/test.log"] == 0
 		if resume && testScenario == "result_history_resume" || tested && !logReread {
@@ -259,6 +273,8 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 			// one ordinary compound command. No fixture executes or rewrites it.
 			command = `python3 -c "from pathlib import Path; p=Path('price_math.py'); p.write_text(p.read_text().replace('return subtotal + discount','return subtotal - discount'))" && python3 -u run_tests.py && cat out/report.json`
 			switch testScenario {
+			case "result_shell_fallback":
+				command = missingProgram + " || " + command
 			case "result_log_reread":
 				command = strings.Replace(command, "python3 -u run_tests.py", "python3 -u run_tests.py | tee out/test.log", 1)
 			case "result_wrong_artifact":
