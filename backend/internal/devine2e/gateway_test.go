@@ -526,6 +526,28 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 			extra["devin_fusion_enabled"] = true
 			extra["devin_fusion_profiles"] = []fusion.Profile{profile}
 			api(t, a, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra})
+			t.Run("unpriced_member_rejected_before_inference_and_group_cache_refreshed", func(t *testing.T) {
+				// The key has already warmed its auth/group cache. Updating pricing
+				// through the real admin API must invalidate that snapshot as well.
+				t.Cleanup(func() {
+					api(t, a, "PUT", fmt.Sprintf("/admin/groups/%d", groupID), admin, map[string]any{"model_pricing": groupInput["model_pricing"]})
+				})
+				api(t, a, "PUT", fmt.Sprintf("/admin/groups/%d", groupID), admin, map[string]any{
+					"model_pricing": []any{map[string]any{
+						"models": []string{profile.PublicModel}, "billing_mode": "token",
+						"input_price": 0.000001, "output_price": 0.000002,
+					}},
+				})
+				fixture.mu.Lock()
+				before := len(fixture.chats)
+				fixture.mu.Unlock()
+				body := request(t, a, "POST", "/v1/responses", key, map[string]any{"model": profile.PublicModel, "input": "Reply with E2E_OK only."}, 400)
+				require.Equal(t, "devin_fusion_pricing_unavailable", gjson.GetBytes(body, "error.code").String())
+				require.True(t, strings.Contains(gjson.GetBytes(body, "error.message").String(), model), "missing physical UID must be reported; body withheld")
+				fixture.mu.Lock()
+				defer fixture.mu.Unlock()
+				require.Equal(t, before, len(fixture.chats), "unidentified pricing must stop before physical inference")
+			})
 			for _, name := range []string{profile.PublicModel, "fusion-" + model + "-sidekick-" + model} {
 				t.Run(name, func(t *testing.T) {
 					fixture.mu.Lock()

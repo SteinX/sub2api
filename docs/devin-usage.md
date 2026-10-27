@@ -64,3 +64,7 @@ Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以
 ## Fusion 协作
 
 网关 Fusion 默认开启，按 `fusion-<lead>-sidekick-<sidekick>` model ID 和账号目录推断配对，账号编辑支持覆盖或关闭配对，为 Responses、Chat Completions、Anthropic Messages 提供统一的 Lead 委派、Sidekick 工具执行和 Lead 审查。会话固定账号和角色模型，工具由接入客户端执行，两个模型按各次实际用量计费。配置、会话关联、取消与验收边界见 [网关 Fusion](DEVIN_FUSION.md)。
+
+遇到 `devin_fusion_pricing_unavailable` 时，错误会指出未通过检查的真实成员 UID。管理员需分别核对 Lead 和 Sidekick：价格按当前 Key 分组的模型定价、关联渠道中 Devin 平台的模型定价、全局已识别价卡依次解析；仅给虚拟 `fusion-*` 名称配价不够。渠道中给其他分组或其他平台配置的同名规则不会生效。
+
+普通模型请求成功、模型出现在目录中，都不能证明它满足 Fusion 的价格准入。`GET /api/v1/admin/channels/model-pricing?model=<真实 UID>` 只查询全局默认价，不能据其 `identified` 判断分组或渠道覆盖是否生效。没有已发布 token 费率的模型，应先由管理员确认并配置真实费率；不能从 Devin credits 倍率推导美元 token 单价，也不能用另一模型的价格或系列猜测价放行。修改分组／渠道定价应走管理接口，以执行正常的缓存失效流程。

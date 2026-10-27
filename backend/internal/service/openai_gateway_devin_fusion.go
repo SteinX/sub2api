@@ -119,7 +119,7 @@ func (x *devinFusionExecutor) cost(ctx context.Context, model string, u UsageTok
 		return nil, fusion.E("billing_unavailable", "physical model pricing is unavailable", 503)
 	}
 	if identified, _ := s.hasIdentifiedOpenAIResponsePricing(ctx, model, x.key); !identified {
-		return nil, fusion.E("pricing_unavailable", "configure identified pricing for each real Fusion model UID", 400)
+		return nil, fusion.E("pricing_unavailable", fmt.Sprintf("configure identified pricing for real Fusion model UID %q", model), 400)
 	}
 	multiplier := 1.0
 	if s.cfg != nil {
@@ -131,7 +131,7 @@ func (x *devinFusionExecutor) cost(ctx context.Context, model string, u UsageTok
 	multiplier, _ = computePeakAwareMultipliers(x.key, multiplier, at)
 	cost, err := s.calculateOpenAIRecordUsageTokenCost(ctx, x.key, model, multiplier, at, u, "", "", openAILongContextBillingGate(x.account), false)
 	if err != nil || cost == nil {
-		return nil, fusion.E("pricing_unavailable", "configure pricing for each real Fusion member before inference", 400)
+		return nil, fusion.E("pricing_unavailable", fmt.Sprintf("configure calculable pricing for real Fusion model UID %q before inference", model), 400)
 	}
 	return cost, nil
 }
