@@ -422,6 +422,39 @@ class SnapshotTests(unittest.TestCase):
 
 
 class ReleaseBoundaryTests(unittest.TestCase):
+    def test_reviewed_ci_release_is_explicit_limited_and_source_bound(self):
+        import base64
+        _, state = evidence(True)
+        declaration = {'schema_version': 1, 'commit': COMMIT, 'tree': TREE,
+                       'validation': 'ci_and_independent_review', 'real_user_e2e_certified': False,
+                       'limitations': ['real_upstream_acceptance_not_certified']}
+
+        def evaluate(release, fresh):
+            annotation = release_guard.REVIEWED_PREFIX + base64.b64encode(json.dumps(
+                {'release': release, 'prerequisites': state}).encode()).decode()
+            def git(*args):
+                return {'rev-parse': TREE if args[-1].endswith('^{tree}') else COMMIT,
+                        'cat-file': 'tag', 'for-each-ref': annotation}[args[0]]
+            with patch.object(release_guard, 'requires_acceptance', return_value=True), patch.object(release_guard, 'git', side_effect=git), patch.object(release_guard, 'collect', return_value=fresh):
+                return release_guard.evaluate('v9.9.9', 'owner/repo')
+
+        verdict = evaluate(declaration, state)
+        self.assertTrue(verdict['accepted'])
+        self.assertFalse(verdict['real_user_e2e_certified'])
+        self.assertEqual(verdict['validation'], 'ci_and_independent_review')
+        for key, value in [('commit', 'd' * 40), ('tree', 'd' * 40), ('real_user_e2e_certified', True),
+                           ('limitations', []), ('schema_version', True)]:
+            with self.subTest(key=key):
+                changed = dict(declaration, **{key: value})
+                self.assertFalse(evaluate(changed, state)['accepted'])
+        for key, value in [('outstanding_checks', [1]), ('unresolved_findings', 1), ('snapshot_complete', False),
+                           ('independent_review', dict(state['independent_review'], status='pending'))]:
+            with self.subTest(key=key):
+                self.assertFalse(evaluate(declaration, dict(state, **{key: value}))['accepted'])
+        pending = copy.deepcopy(state)
+        pending['checks'][0]['status'] = 'in_progress'
+        self.assertFalse(evaluate(declaration, pending)['accepted'])
+
     def test_any_target_with_devin_still_requires_acceptance_after_failed_tag(self):
         with patch.object(release_guard, 'git', return_value='') as git:
             self.assertTrue(release_guard.requires_acceptance(COMMIT))
