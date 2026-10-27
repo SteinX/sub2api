@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import secrets
 import selectors
+import shutil
 import signal
 import socket
 import socketserver
@@ -174,6 +175,27 @@ class FixedRelay:
         self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=2)
 
 
+def rg_executable_mount():
+    """Resolve only the public rg executable, never its containing opt tree."""
+    path = shutil.which('rg')
+    if not path:
+        return None
+    executable = Path(path).resolve()
+    if executable.is_relative_to(Path.home()) or executable.is_relative_to(ROOT.parents[1]):
+        raise ValueError('sandbox_rg_dependency_outside_public_runtime')
+    if executable.is_relative_to('/usr'):
+        return None  # Already provided by the existing read-only /usr mount.
+    if not executable.is_relative_to('/opt') or executable.name != 'rg':
+        raise ValueError('sandbox_rg_dependency_outside_public_runtime')
+    info = executable.stat()
+    if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111 or info.st_mode & 0o022:
+        raise ValueError('sandbox_rg_dependency_not_fixed_executable')
+    with executable.open('rb') as source:
+        if source.read(4) != b'\x7fELF':
+            raise ValueError('sandbox_rg_dependency_not_ELF')
+    return str(executable), str(executable)
+
+
 def runtime_mounts():
     # Public executable/library roots only. Never mount /, /proc, /run, /var,
     # the repository root, Docker config/socket or the operator's personal home.
@@ -185,11 +207,13 @@ def runtime_mounts():
     # distribution. Mount that directory, never the surrounding /opt tree.
     if Path('/opt/google/chrome').is_dir():
         roots.append(('/opt/google/chrome','/opt/google/chrome'))
-    import shutil
     node=Path(shutil.which('node')).resolve()
     if str(node).startswith('/opt/'):
         prefix=node.parent.parent
         roots.append((str(prefix),str(prefix)))
+    rg_mount = rg_executable_mount()
+    if rg_mount:
+        roots.append(rg_mount)
     for key in ['CODEX_PROXY_CERT','NODE_EXTRA_CA_CERTS','SSL_CERT_FILE','REQUESTS_CA_BUNDLE']:
         value=os.environ.get(key)
         if value and Path(value).is_file(): roots.append((value,value))

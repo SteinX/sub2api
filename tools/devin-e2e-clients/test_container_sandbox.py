@@ -4,18 +4,34 @@ import os
 from pathlib import Path
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, mock_open
 
 import container_sandbox as sandbox
 import journey
 
 
 class SandboxRegistryTests(unittest.TestCase):
+    def test_rg_symlink_resolution_mounts_one_read_only_public_executable(self):
+        with patch('container_sandbox.shutil.which', return_value='/usr/local/bin/rg'), patch('container_sandbox.Path.resolve', return_value=Path('/opt/public-tools/rg')), patch('container_sandbox.Path.stat', return_value=Mock(st_mode=stat.S_IFREG | 0o755)), patch('container_sandbox.Path.open', mock_open(read_data=b'\x7fELF')):
+            self.assertEqual(('/opt/public-tools/rg', '/opt/public-tools/rg'), sandbox.rg_executable_mount())
+
+    def test_rg_resolution_rejects_private_paths_writable_files_and_nonexecutables(self):
+        with patch('container_sandbox.shutil.which', return_value='/usr/local/bin/rg'):
+            for resolved in ['/home/agent/private/rg', '/workspace/private/rg', '/opt/public-tools/not-rg']:
+                with self.subTest(path=resolved), patch('container_sandbox.Path.resolve', return_value=Path(resolved)), self.assertRaises(ValueError):
+                    sandbox.rg_executable_mount()
+            for mode in [stat.S_IFREG | 0o777, stat.S_IFREG | 0o644, stat.S_IFDIR | 0o755]:
+                with self.subTest(mode=mode), patch('container_sandbox.Path.resolve', return_value=Path('/opt/public-tools/rg')), patch('container_sandbox.Path.stat', return_value=Mock(st_mode=mode)), self.assertRaises(ValueError):
+                    sandbox.rg_executable_mount()
+            with patch('container_sandbox.Path.resolve', return_value=Path('/opt/public-tools/rg')), patch('container_sandbox.Path.stat', return_value=Mock(st_mode=stat.S_IFREG | 0o755)), patch('container_sandbox.Path.open', mock_open(read_data=b'private data')), self.assertRaises(ValueError):
+                sandbox.rg_executable_mount()
+
     def test_repeated_fatal_cleanup_never_signals_a_reaped_attach_process(self):
         client=Mock();client.poll.return_value=0
         proc=sandbox.ContainerProcess(client,'synthetic-cid','synthetic-scope','private-registry',Mock(),Mock())
@@ -57,6 +73,17 @@ class SandboxRegistryTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('DEVIN_SANDBOX_INTEGRATION')=='true','explicit local Docker boundary suite')
 class RootlessSandboxIntegrationTests(unittest.TestCase):
+    def test_rg_dependency_executes_in_the_actual_networkless_cli_isolation(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            (directory / 'workspace').mkdir()
+            result = journey.run_project_python(directory, [str(sandbox.ROOT / 'runtime_dependencies.py')])
+            self.assertEqual(0, result.returncode)
+            data = json.loads(result.stdout)['rg']
+            self.assertTrue(data['runnable'], data['error_category'])
+            self.assertIsNotNone(data['version'])
+            self.assertEqual(64, len(data['sha256']))
+
     def test_model_written_oracle_output_limit_cleans_container_and_disables_docker_log(self):
         with tempfile.TemporaryDirectory() as private,tempfile.TemporaryDirectory() as project:
             directory=Path(project);(directory/'workspace').mkdir(); registry=Path(private)/'containers'

@@ -515,6 +515,10 @@ def main():
         print(json.dumps({'status':'handoff_only', 'handoff':handoff, 'client_identity':client_identity,
                           'client':args.client, 'profile':args.profile, 'tier':tier, 'eligible_for_real_e2e':False,'isolation':isolated}))
         return 0
+    dependencies = {}
+    if args.upstream == 'synthetic' and args.client == 'opencode':
+        probe = run_project_python(directory, [str(ROOT / 'runtime_dependencies.py')])
+        dependencies = json.loads(probe.stdout) if probe.returncode == 0 else {'available': False}
     source_before_task = digest(project_bytes(workspace, 'price_math.py'))
     first = invoke(args, directory, protected=protected)
     # Snapshot before executing any oracle: a correct output alone cannot prove
@@ -576,7 +580,7 @@ def main():
               "same_client_session": same_session,
               "context_pressure": extended.get('context_pressure', 'not_run'), "compact": extended.get('compact', 'not_run'),
               "fork": extended.get('fork', 'not_run'), "disconnect_recovery": 'not_run', "worker": "not_run",
-              "capability_evidence": extended}
+              "capability_evidence": extended, 'runtime_dependencies': dependencies}
     if args.project_kind=='long':
         report.update(project_kind='long', context_pressure='passed' if first.get('long_reads',{}).get('complete') else 'failed',
                       compact='not_claimed', compression_claim=False, dataset_bytes=long_project.PARTS*long_project.PART_BYTES,

@@ -150,6 +150,8 @@ func verifyRestrictedProjectGuidance(t *testing.T, app *application, fixture *na
 				require.NotContains(t, tools, name)
 			}
 			task := report["task"].(map[string]any)
+			dependencies := report["runtime_dependencies"].(map[string]any)["rg"].(map[string]any)
+			require.Equal(t, true, dependencies["runnable"], "the isolated CLI test environment must supply its rg dependency; do not download it from the networkless client")
 			if scenario == "canonical" {
 				require.NoError(t, runErr)
 				require.Equal(t, "passed", report["status"])

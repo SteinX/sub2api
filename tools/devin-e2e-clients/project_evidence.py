@@ -10,6 +10,21 @@ FILE_MUTATORS = frozenset({'write', 'edit', 'apply_patch'})
 TOOL_NAME = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
 
 
+def tool_error_categories(detail):
+    """Fixed text markers, not root-cause claims or retained error bodies."""
+    if not isinstance(detail, str):
+        return ['unavailable']
+    patterns = {
+        'ripgrep_error': r'ripgrep',
+        'missing_path': r'\benoent\b|no such file|executable (?:file )?not found',
+        'access_denied': r'\beacces\b|\beperm\b|permission denied',
+        'read_only_filesystem': r'\berofs\b|read.only file system',
+        'network_error': r'\benotfound\b|network is unreachable|fetch failed|tunnel connection failed',
+        'invalid_arguments': r'invalid arguments|invalid input|schema validation',
+    }
+    return [name for name, pattern in patterns.items() if re.search(pattern, detail, re.I)] or ['unclassified']
+
+
 class ToolEvidence:
     def __init__(self, workspace, test_command):
         self.workspace = Path(workspace)
@@ -73,6 +88,7 @@ class ToolEvidence:
             text = detail.lower() if isinstance(detail, str) else ''
             denied = ('permission' in text and any(word in text for word in ['deny', 'denied', 'reject'])) or text.startswith('the user has specified a rule which prevents')
             record['error_kind'] = 'client_permission_rejection' if denied else 'client_tool_error'
+            record['tool_error_categories'] = tool_error_categories(detail)
         if not record['states'] or record['states'][-1] != status:
             record['states'].append(status)
             record['observations'].append({'status': status, 'observed_at_ns': time.time_ns()})
