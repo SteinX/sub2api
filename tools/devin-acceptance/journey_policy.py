@@ -112,7 +112,7 @@ def validate(plan, approval, mode, source, environment, now=None):
         raise Denied('client_scope_not_supported')
     limits = plan.get('limits', {})
     integer_caps = {'public_requests': 144, 'output_tokens': 1024, 'wall_seconds': 3600, 'turn_seconds': 300,
-                    'internal_calls_per_turn': 16, 'tools_per_turn': 12, 'handoffs_per_turn': 2}
+                    'internal_calls_per_turn': 32, 'tools_per_turn': 12, 'handoffs_per_turn': 2}
     for key, cap in integer_caps.items():
         value = limits.get(key)
         if type(value) is not int or not 0 < value <= cap:

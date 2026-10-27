@@ -25,6 +25,50 @@ def proposal():
 
 
 class RealJourneyPolicyTests(unittest.TestCase):
+    def test_internal_call_limit_preserves_16_and_accepts_explicit_32(self):
+        self.assertEqual(16, proposal()[0]['limits']['internal_calls_per_turn'])
+        for mode in ('plan', 'live'):
+            for calls in (16, 32):
+                plan, approval, source, env = proposal()
+                plan['limits']['internal_calls_per_turn'] = calls
+                approval.update(mode=mode, plan_sha256=policy.digest(plan))
+                with self.subTest(mode=mode, calls=calls):
+                    result = policy.validate(plan, approval, mode, source, env, NOW)
+                    self.assertEqual(calls, result['limits']['internal_calls_per_turn'])
+
+    def test_internal_call_limit_rejects_33_missing_nonpositive_and_noninteger(self):
+        for mode in ('plan', 'live'):
+            for value in (33, 64, 0, -1, -32, True, False, 16.0, 32.0, '32', None, [], {}):
+                plan, approval, source, env = proposal()
+                plan['limits']['internal_calls_per_turn'] = value
+                approval.update(mode=mode, plan_sha256=policy.digest(plan))
+                with self.subTest(mode=mode, value=value), self.assertRaisesRegex(policy.Denied, '^invalid_internal_calls_per_turn_limit$'):
+                    policy.validate(plan, approval, mode, source, env, NOW)
+            plan, approval, source, env = proposal()
+            plan['limits'].pop('internal_calls_per_turn')
+            approval.update(mode=mode, plan_sha256=policy.digest(plan))
+            with self.subTest(mode=mode, missing=True), self.assertRaisesRegex(policy.Denied, '^invalid_internal_calls_per_turn_limit$'):
+                policy.validate(plan, approval, mode, source, env, NOW)
+
+    def test_internal_call_increase_requires_a_new_approved_hash_and_cannot_rebind_a_ledger(self):
+        plan, approval, source, env = proposal()
+        original_hash = approval['plan_sha256']
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / 'synthetic-ledger.json'
+            policy.claim(ledger, plan, 'live')
+            original_ledger = ledger.read_bytes()
+            plan['limits']['internal_calls_per_turn'] = 32
+            self.assertNotEqual(original_hash, policy.digest(plan))
+            with self.assertRaisesRegex(policy.Denied, '^approved_plan_changed$'):
+                policy.validate(plan, approval, 'live', source, env, NOW)
+            approval['plan_sha256'] = policy.digest(plan)
+            policy.validate(plan, approval, 'live', source, env, NOW)
+            with self.assertRaisesRegex(policy.Denied, '^approval_run_already_claimed$'):
+                policy.claim(ledger, plan, 'live')
+            with self.assertRaisesRegex(policy.Denied, '^run_ledger_scope_or_state_mismatch$'):
+                policy.ledger_action(ledger, 'admit', expected_scope={'plan_sha256':policy.digest(plan), 'mode':'live', 'source':plan['source']})
+            self.assertEqual(original_ledger, ledger.read_bytes())
+
     def test_fatal_stop_is_durable_and_inflight_can_only_settle_once(self):
         plan, *_ = proposal()
         with tempfile.TemporaryDirectory() as temporary:
