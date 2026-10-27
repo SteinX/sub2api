@@ -246,16 +246,21 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		return
 	}
 	if strings.HasPrefix(testScenario, "result_") {
-		if resume && testScenario == "result_history_resume" || tested {
+		logReread := !resume && tested && testScenario == "result_log_reread" && requestedCommands["cat out/test.log"] == 0
+		if resume && testScenario == "result_history_resume" || tested && !logReread {
 			reply.DeltaText = final
 			return
 		}
 		command := "cat out/report.json"
-		if !resume {
+		if logReread {
+			command = "cat out/test.log"
+		} else if !resume {
 			// The MODEL asks the genuine CLI's Bash tool to repair and test in
 			// one ordinary compound command. No fixture executes or rewrites it.
 			command = `python3 -c "from pathlib import Path; p=Path('price_math.py'); p.write_text(p.read_text().replace('return subtotal + discount','return subtotal - discount'))" && python3 -u run_tests.py && cat out/report.json`
 			switch testScenario {
+			case "result_log_reread":
+				command = strings.Replace(command, "python3 -u run_tests.py", "python3 -u run_tests.py | tee out/test.log", 1)
 			case "result_wrong_artifact":
 				command += ` && python3 -c "import json; from pathlib import Path; p=Path('out/report.json'); d=json.loads(p.read_text()); d['totals']=[0]; p.write_text(json.dumps(d))"`
 			case "result_stale_test":

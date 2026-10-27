@@ -112,8 +112,8 @@ def prompt(resume):
                 'previously observed random facts part00 through part07 from the retained conversation. Return each label '
                 'and its exact value (JSON or label=value is fine). Do not guess. This is a BOUNDED_LONG_RECALL checkpoint.')
     return ('BOUNDED_LONG_PROJECT: Complete the project using all eight context/part00.txt through context/part07.txt files, '
-            'retaining each part00..part07 random fact. Repair only the calculation in price_math.py, run '
-            'the project test runner (python3 run_tests.py) and produce the correct out/report.json cross-file totals. Keep the facts only in conversation history, never add them to the artifact or another file. '
+            'retaining each part00..part07 random fact. Repair only the calculation in price_math.py so the project tests pass '
+            'and produce the correct out/report.json cross-file totals. Keep the facts only in conversation history, never add them to the artifact or another file. '
             'Do not change requirements, tests, runner or context files. Choose tools and order freely within the12-public-tool budget. '
             'Lead: delegate implementation to Sidekick, review its report '
             'and finish with a concise verified summary. A later same-session restart will ask you to recall the facts '

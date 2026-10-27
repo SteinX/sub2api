@@ -26,6 +26,8 @@ func TestJourneyToolLimitLongScenarioDoesNotInheritEarlierErrorTerminal(t *testi
 	}
 	add("edit", "price_math.py")
 	add("bash", "")
+	// This fixture models completed tests, not an arbitrary Bash file read.
+	request.ChatMessagePrompts[len(request.ChatMessagePrompts)-1].Prompt = "SUB2API_TEST_RECEIPT_V1:{}"
 	add("read", "out/report.json")
 	fixture := &projectJourney{workspace: workspace, mutationTool: "early_marker_error", testScenario: "bounded_long_complete"}
 	previous := &pb.GetChatMessageResponse{Usage: &pb.ModelUsageStats{}}

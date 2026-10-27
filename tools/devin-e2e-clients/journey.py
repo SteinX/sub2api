@@ -278,7 +278,7 @@ def command(client, model, resume, project_kind='short'):
         return cmd + [long_project.prompt(resume)]
     prompt = ("Resume this project session. Confirm the completed project result using the existing session history and any tools you need. Summarize what you verified."
               if resume else
-              "Repair price_math.py so the project tests pass. Produce the correct out/report.json for requirements.json and run the project test runner (python3 run_tests.py). Choose the tools and order you need. Do not change the requirements, tests or test runner. Summarize the verified result.")
+              "Repair price_math.py so the project tests pass and produce the correct out/report.json for requirements.json. Choose the tools and order you need. Do not change the requirements, tests or test runner. Summarize the verified result.")
     if model.startswith('fusion-') and not resume:
         prompt = "Lead: delegate the project implementation to Sidekick, then review its returned work and verify the result. " + prompt
     return cmd + [prompt]
@@ -571,17 +571,23 @@ def main():
     # the client repaired the source, nor can a later helper supply the change.
     source_after_task = digest(project_bytes(workspace, 'price_math.py'))
     artifact = workspace / "out/report.json"
-    valid = artifact.exists() and json.loads(project_bytes(workspace, 'out/report.json')) == expected
+    artifact_before_oracle = project_bytes(workspace, 'out/report.json') if artifact.exists() else None
+    valid = artifact_before_oracle is not None and json.loads(artifact_before_oracle) == expected
     intact = all(digest(project_bytes(workspace, name)) == fingerprint for name, fingerprint in protected.items())
     # An independent oracle verifies the client's changes; it is not counted as
     # the client running tests and cannot repair or generate the final artifact.
     oracle_samples = [[100 + int.from_bytes(os.urandom(2), "big"), byte] for byte in os.urandom(16)]
     after = run_project_python(directory, ['-c', "import json,sys; from price_math import discounted; assert all(discounted(a,b)==a-b for a,b in json.load(sys.stdin))"],
                                json.dumps(oracle_samples).encode()) if intact and first['exit_code'] is not None and not first['timed_out'] and first['incomplete_tool_calls'] == 0 else None
+    # The frozen artifact above must already be correct. Independently running
+    # protected tests below verifies the result; it never proves what commands
+    # the client ran, nor supplies a previously missing artifact to that check.
+    project_tests = run_project_python(directory, ['run_tests.py']) if after is not None else None
     task_checks = {'terminal': first['passed'], 'artifact': valid, 'protected_files': intact,
                    'project_nonce': first['project_nonce_sha256'] == project_nonce_hash,
                    'source_changed': source_before_task != source_after_task,
-                   'client_tests': first['client_tests_succeeded'], 'oracle': after.returncode == 0 if after is not None else None}
+                   'project_tests': project_tests.returncode == 0 if project_tests is not None else None,
+                   'oracle': after.returncode == 0 if after is not None else None}
     if args.project_kind=='long':
         task_checks['long_files_unchanged'] = all(digest(project_bytes(workspace,name))==fingerprint for name,fingerprint in long_parts.items())
     task_passed = all(task_checks.values())
@@ -618,8 +624,12 @@ def main():
               'project_nonce_sha256': project_nonce_hash,
               'protected_project_sha256': protected,
               "initial_project_test_failed": True, "artifact_verified_before_oracle": valid, **final,
+              "artifact_before_oracle_sha256": digest(artifact_before_oracle) if artifact_before_oracle is not None else None,
               "independent_project_test_executed": after is not None,
               "independent_project_test_passed": after.returncode == 0 if after is not None else None,
+              "independent_project_tests_executed": project_tests is not None,
+              "independent_project_tests_passed": project_tests.returncode == 0 if project_tests is not None else None,
+              "independent_project_tests_exit_code": project_tests.returncode if project_tests is not None else None,
               "same_client_session": same_session,
               "context_pressure": extended.get('context_pressure', 'not_run'), "compact": extended.get('compact', 'not_run'),
               "fork": extended.get('fork', 'not_run'), "disconnect_recovery": 'not_run', "worker": "not_run",

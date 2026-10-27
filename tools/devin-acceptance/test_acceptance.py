@@ -31,6 +31,7 @@ def evidence(live=False):
                 'source_changed_by_task': True, 'project_nonce_sha256': DIGEST,
                 'protected_project_sha256': {name: DIGEST for name in ['requirements.json','test_project.py','run_tests.py']},
                 'independent_project_test_executed': True,
+                'independent_project_tests_executed': True, 'independent_project_tests_passed': True, 'independent_project_tests_exit_code': 0,
                 'tier': 'user_e2e' if live else 'client_mock', 'eligible_for_real_e2e': live,
                 'public_model_uid': 'fusion-test' if kind == 'fusion' else 'physical-lead',
                 'physical_lead_uid': 'physical-lead', 'physical_sidekick_uid': 'physical-sidekick' if kind == 'fusion' else '',
@@ -129,16 +130,22 @@ class AcceptanceTests(unittest.TestCase):
             with self.subTest(target=target, field=field):
                 self.assertIn(case['id'] + ':fusion_collaboration_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
 
-    def test_aggregate_or_text_success_cannot_replace_per_call_test_receipt(self):
-        for field, value in [('test_execution', None), ('tool_calls', []), ('tool_calls', None)]:
+    def test_client_receipts_do_not_replace_independent_test_results(self):
+        for value in [None, {}, {'passed': True, 'execution_verified': True}]:
             report, _ = evidence()
-            report['cases'][0]['task'][field] = value
-            with self.subTest(field=field, value=value):
-                if field == 'test_execution':
-                    report['cases'][0]['task'].pop(field)
-                self.assertIn(report['cases'][0]['id'] + ':client_test_receipt_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
+            case=report['cases'][0]
+            case['task']['test_execution']=value
+            case['task']['client_tests_succeeded']=False
+            self.assertEqual([],gate.validate(report,'client_mock',COMMIT,TREE))
+            for key in ['independent_project_tests_executed','independent_project_tests_passed']:
+                case[key]=False
+                self.assertIn(case['id']+':independent_project_tests_unverified',gate.validate(report,'client_mock',COMMIT,TREE))
+                case[key]=True
+            for code in [None,False,1]:
+                case['independent_project_tests_exit_code']=code
+                self.assertIn(case['id']+':independent_project_tests_unverified',gate.validate(report,'client_mock',COMMIT,TREE))
 
-    def test_wrong_stale_unproven_or_empty_test_receipts_are_rejected(self):
+    def test_wrong_stale_or_forged_client_receipts_are_diagnostic_only(self):
         for field, value in [('tests_run', 0), ('exit_code', False), ('state', 'error'), ('execution_verified', False),
                              ('project_nonce_sha256', '0' * 64), ('source_after_sha256', '0' * 64),
                              ('protected_sha256', {}), ('started_ns', 0), ('finished_ns', 5), ('receipt_sha256', '')]:
@@ -146,7 +153,7 @@ class AcceptanceTests(unittest.TestCase):
             case = report['cases'][0]
             case['task']['test_execution']['calls'][0][field] = value
             with self.subTest(field=field):
-                self.assertIn(case['id'] + ':client_test_receipt_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
+                self.assertEqual([],gate.validate(report,'client_mock',COMMIT,TREE))
 
     def test_natural_language_completion_does_not_need_exact_marker(self):
         report, _ = evidence()

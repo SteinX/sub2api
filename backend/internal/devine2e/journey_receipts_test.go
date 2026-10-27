@@ -21,7 +21,7 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 	t.Helper()
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
 	for _, scenario := range []string{"canonical", "whitespace", "after_extra", "after_forbidden", "fake_ok", "failed_tests", "forbidden_equiv", "fusion_failure",
-		"result_bash", "result_history_resume", "result_wrong_artifact", "result_forged_test", "result_stale_test", "result_fusion"} {
+		"result_bash", "result_history_resume", "result_wrong_artifact", "result_forged_test", "result_stale_test", "result_fusion", "result_log_reread"} {
 		t.Run("test_receipt_"+scenario, func(t *testing.T) {
 			directory := t.TempDir()
 			fixture.journey.mu.Lock()
@@ -89,11 +89,15 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
 			task := report["task"].(map[string]any)
-			if scenario == "canonical" || scenario == "after_extra" || scenario == "result_bash" || scenario == "result_history_resume" || scenario == "result_fusion" {
+			if scenario == "canonical" || scenario == "after_extra" || strings.HasPrefix(scenario, "result_") && scenario != "result_wrong_artifact" {
 				require.NoError(t, runErr, "permitted actual test executions must be recognized")
 				require.Equal(t, "passed", report["status"])
-				require.Equal(t, true, task["client_tests_succeeded"])
-				require.Equal(t, true, task["test_command_verified"])
+				require.Equal(t, true, report["independent_project_tests_passed"])
+				if scenario == "result_forged_test" || scenario == "result_stale_test" {
+					require.Equal(t, false, task["client_tests_succeeded"], "untrusted client receipt cannot decide result correctness")
+				} else {
+					require.Equal(t, true, task["client_tests_succeeded"], "diagnostic only; independent tests authorize success")
+				}
 				if strings.HasPrefix(scenario, "result_") {
 					require.Empty(t, task["source_mutation_tools"], "Bash repair is proved by changed source and oracle, not a named Edit/Write tool")
 					require.Equal(t, float64(0), task["tools"].(map[string]any)["read"])
@@ -105,6 +109,17 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 					}
 					if scenario == "result_fusion" {
 						require.Equal(t, true, report["fusion_execution"].(map[string]any)["complete"])
+					}
+					if scenario == "result_log_reread" {
+						diagnostics := task["test_execution"].(map[string]any)
+						calls := diagnostics["calls"].([]any)
+						require.Len(t, calls, 2)
+						require.Equal(t, "repeated_display", calls[1].(map[string]any)["receipt_status"])
+						require.Equal(t, false, diagnostics["conflicting_evidence"])
+					}
+					if scenario == "result_forged_test" {
+						receipt := task["test_execution"].(map[string]any)["calls"].([]any)[0].(map[string]any)
+						require.Equal(t, "file_unavailable", receipt["receipt_status"])
 					}
 				}
 				if scenario == "after_extra" {
@@ -128,10 +143,6 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 						require.Equal(t, false, report["artifact_verified_before_oracle"])
 					} else {
 						require.Equal(t, true, report["artifact_verified_before_oracle"])
-					}
-					if scenario == "result_forged_test" {
-						receipt := task["test_execution"].(map[string]any)["calls"].([]any)[0].(map[string]any)
-						require.Equal(t, "file_unavailable", receipt["receipt_status"], "a fabricated output reference must reach the real receipt validator")
 					}
 				}
 				if scenario == "fusion_failure" {
