@@ -298,6 +298,12 @@ def validate(report, mode, commit, tree, state=None):
             errors.append(str(case.get('id')) + ':identity_or_pricing_missing')
     if report.get('unverified'):
         errors.append('unverified_required_scope')
+    return errors + review_state_errors(state, commit)
+
+
+def review_state_errors(state, commit):
+    """Validate fresh source-bound CI and review state independently of E2E."""
+    errors = []
     if (state is None or state.get('commit') != commit or state.get('snapshot_complete') is not True
             or not isinstance(state.get('pr'), int) or state['pr'] <= 0):
         return errors + ['review_security_state_unavailable']

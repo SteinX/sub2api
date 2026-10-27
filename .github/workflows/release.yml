@@ -36,6 +36,11 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
       owner_lower: ${{ steps.plan.outputs.owner_lower }}
@@ -72,7 +77,7 @@ jobs:
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" plan "${args[@]}"
-      - name: Require actual user journey acceptance and current review/security state
+      - name: Require declared validation and current review/security state
         env:
           GH_TOKEN: ${{ github.token }}
           ACCEPTANCE_REF: ${{ inputs.tag || github.ref_name }}
@@ -208,6 +213,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+      actions: read
+      checks: read
+      pull-requests: read
     env:
       SIMPLE_RELEASE: ${{ needs.prepare.outputs.simple }}
       DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
@@ -262,7 +270,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Recheck user acceptance and exact-SHA review/security before publishing
+      - name: Recheck declared validation and exact-SHA review/security before publishing
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -277,7 +285,11 @@ jobs:
       - name: Get annotated tag notes
         id: tag_message
         run: |
-          TAG_MESSAGE=$(git tag -l --format='%(contents:body)' "$RELEASE_TAG" | sed '/^Sub2API-Devin-Acceptance-v1: /d')
+          ANNOTATION=$(git tag -l --format='%(contents)' "$RELEASE_TAG")
+          if grep -q '^Sub2API-Reviewed-CI-Release-v1: ' <<< "$ANNOTATION"; then
+            echo 'reviewed_ci=true' >> "$GITHUB_OUTPUT"
+          fi
+          TAG_MESSAGE=$(git tag -l --format='%(contents:body)' "$RELEASE_TAG" | sed '/^Sub2API-Devin-Acceptance-v1: /d; /^Sub2API-Reviewed-CI-Release-v1: /d')
           DELIMITER="TAG_MESSAGE_$(openssl rand -hex 16)"
           {
             echo "message<<$DELIMITER"
@@ -289,7 +301,7 @@ jobs:
           args=(publish --output "$RUNNER_TEMP/goreleaser.publisher.yaml")
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" config "${args[@]}"
-      - name: Recheck user acceptance and exact-SHA review/security before publishing archives
+      - name: Recheck declared validation and exact-SHA review/security before publishing archives
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -336,7 +348,7 @@ jobs:
 
       # Send Telegram notification
       - name: Send Telegram Notification
-        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && (github.event.repository.fork != true || vars.PUBLISH_TELEGRAM == 'true') }}
+        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && steps.tag_message.outputs.reviewed_ci != 'true' && (github.event.repository.fork != true || vars.PUBLISH_TELEGRAM == 'true') }}
         env:
           TAG_MESSAGE: ${{ steps.tag_message.outputs.message }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
