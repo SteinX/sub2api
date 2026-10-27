@@ -65,7 +65,7 @@ func verifyProjectFinalFailureClients(t *testing.T, app *application, fixture *n
 			fixture.mu.Unlock()
 			report["public_requests"], report["observed_native_calls"] = forwarded, nativeCalls
 			defer func() { writeAgentArtifact(t, "journey-first-error-"+client+".json", report) }()
-			report["durable_stop"] = budget.verifyStopped(t)
+			report["durable_stop"] = budget.verifyStopped(t, forwarded)
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
 			require.Error(t, runErr)
