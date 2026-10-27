@@ -28,4 +28,3 @@ class RuntimeDependencyTests(unittest.TestCase):
             self.assertEqual(64, len(result['sha256']))
             for private in ['synthetic-secret', root, 'private-output', 'private-error']:
                 self.assertNotIn(private, json.dumps(result))
-
