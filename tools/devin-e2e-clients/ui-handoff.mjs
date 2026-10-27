@@ -5,9 +5,10 @@ import { writeFile, mkdir, access } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { createModelDiagnostics, modelControlSnapshot } from './ui-model-diagnostics.mjs'
 
 let stage = 'input'
-const diagnostics = { model_http_statuses: [], page_errors: 0, model_count: 0, selected_model_available: false }
+let diagnostics = {}
 const journey = { auth_method: 'login_form', login_http_status: null, key_list_http_status: null, selected_key_matches: false, routes: [] }
 const uiScope = 'full product application: login, key list, selection and configuration copy'
 async function main() {
@@ -16,6 +17,8 @@ async function main() {
   const input = JSON.parse(raw)
   const origin = new URL(input.ui_url).origin
   if (!/^http:\/\/127\.0\.0\.1:[0-9]+$/.test(origin)) throw new Error('Only the disposable UI is supported')
+  const observer = createModelDiagnostics(origin, input.model)
+  diagnostics = observer.diagnostics
   let executablePath = process.env.CHROMIUM_EXECUTABLE_PATH
   if (!executablePath) {
     for (const candidate of ['/usr/bin/chromium', '/usr/bin/google-chrome', '/usr/bin/chromium-browser']) {
@@ -25,10 +28,13 @@ async function main() {
   if (!executablePath) throw new Error('Install a supported browser before running the journey')
   stage = 'browser-launch'
   const browser = await chromium.launch({ executablePath, headless: true })
+  let page
   try {
     const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] })
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort())
-    const page = await context.newPage()
+    page = await context.newPage()
+    page.on('request', observer.request)
+    page.on('requestfailed', observer.requestFailed)
     page.on('response', async response => {
       const route = new URL(response.url()).pathname
       if (route === '/api/v1/auth/login') journey.login_http_status = response.status()
@@ -41,14 +47,7 @@ async function main() {
           journey.selected_key_matches = Boolean(selected?.key && createHash('sha256').update(selected.key).digest('hex') === input.expected_key_sha256)
         } catch { /* never log key responses */ }
       }
-      if (!new URL(response.url()).pathname.endsWith('/models')) return
-      diagnostics.model_http_statuses.push(response.status())
-      try {
-        const catalog = await response.json()
-        const models = catalog.models ?? catalog.data ?? []
-        diagnostics.model_count = models.length
-        diagnostics.selected_model_available = models.some(model => (model.slug ?? model.id) === input.model)
-      } catch { /* retain only safe structural diagnostics */ }
+      await observer.response(response)
     })
     page.on('pageerror', () => { diagnostics.page_errors++ })
     stage = 'navigate'
@@ -71,11 +70,14 @@ async function main() {
     }
     if (!selectedButton || !journey.selected_key_matches || journey.login_http_status !== 200 || journey.key_list_http_status !== 200) throw new Error('Authenticated product key selection failed')
     await selectedButton.click()
-    stage = 'model-discovery'
+    stage = 'product-key-modal'
+    await page.getByTestId('use-key-modal').waitFor()
+    stage = 'model-select-control'
     await page.getByTestId('devin-client-model').waitFor()
+    Object.assign(diagnostics, await page.evaluate(modelControlSnapshot, input.model))
+    stage = 'model-target-option'
     await page.waitForFunction(model => [...document.querySelectorAll('#devin-client-model option')].some(option => option.value === model), input.model)
-    diagnostics.model_count = await page.locator('#devin-client-model option').count()
-    diagnostics.selected_model_available = true
+    Object.assign(diagnostics, await page.evaluate(modelControlSnapshot, input.model))
     await page.getByTestId('devin-client-model').selectOption(input.model)
     stage = 'client-tab'
     await page.locator(`button[data-client="${input.client}"]`).click()
@@ -91,6 +93,7 @@ async function main() {
     stage = 'config-generation'
     const instructions = await page.getByTestId('devin-instructions').innerText()
     const nodes = page.getByTestId('client-config-file')
+    diagnostics.config_file_count = await nodes.count()
     if (await page.getByTestId('devin-omp-incompatible').count()) {
       if (input.client !== 'omp' || input.profile !== 'default' || !input.model.startsWith('fusion-') || await nodes.count() !== 0) throw new Error('Invalid product refusal')
       process.stdout.write(JSON.stringify({ passed: false, blocked: true, reason: 'omp_default_fusion_history_pruning',
@@ -120,6 +123,7 @@ async function main() {
       if (provider && !['{env:SUB2API_API_KEY}', 'SUB2API_API_KEY'].includes(provider.apiKey)) throw new Error('Generated configuration must reference the environment')
       await mkdir(path.dirname(targets[name]), { recursive: true })
       await writeFile(targets[name], copied, { mode: 0o600 })
+      diagnostics.copied_files++
       const normalized = copied.replaceAll(origin, '<gateway>').replaceAll(input.workspace, '<workspace>')
       files.push({ name, sha256: createHash('sha256').update(normalized).digest('hex') })
     }
@@ -128,6 +132,11 @@ async function main() {
       client: input.client, profile: input.profile, selected_model: input.model, files,
       instructions_sha256: createHash('sha256').update(instructions).digest('hex'), browser: browser.version()
     }) + '\n')
+  } catch (error) {
+    if (page) {
+      try { Object.assign(diagnostics, await page.evaluate(modelControlSnapshot, input.model)) } catch { /* keep prior structural snapshot */ }
+    }
+    throw error
   } finally { await browser.close() }
 }
-main().catch(error => { process.stdout.write(JSON.stringify({ passed: false, stage, diagnostics, error_kind: ['Error', 'TimeoutError', 'TypeError'].includes(error.name) ? error.name : 'other' }) + '\n'); process.exitCode = 1 })
+main().catch(error => { process.stdout.write(JSON.stringify({ passed: false, stage, diagnostics, ui_scope: uiScope, product_journey: journey, error_kind: ['Error', 'TimeoutError', 'TypeError'].includes(error.name) ? error.name : 'other' }) + '\n'); process.exitCode = 1 })

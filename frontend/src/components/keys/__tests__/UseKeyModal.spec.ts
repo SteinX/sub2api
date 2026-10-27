@@ -82,6 +82,30 @@ describe('UseKeyModal', () => {
     }
   })
 
+  it('loads a 239-model catalog when a real key selection opens the closed modal', async () => {
+    const models = Array.from({ length: 239 }, (_, i) => ({ slug: i === 238 ? 'swe-2-high' : `synthetic-${i}` }))
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = mount(UseKeyModal, {
+      props: { show: false, apiKey: '', baseUrl: '', platform: null },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="devin-client-model"]').exists()).toBe(false)
+    await wrapper.setProps({ show: true, apiKey: 'sk-synthetic', platform: 'devin' })
+    await flushPromises()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, options] = fetchMock.mock.calls[0]!
+    expect(new URL(url).pathname).toBe('/v1/models')
+    expect(new URL(url).searchParams.get('client_version')).toBe('0.158.0')
+    expect(options.signal.aborted).toBe(false)
+    expect(wrapper.get('[data-testid="use-key-modal"]').attributes('data-platform')).toBe('devin')
+    expect(wrapper.findAll('#devin-client-model option')).toHaveLength(240)
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('swe-2-high')
+    expect((wrapper.get('#devin-client-model').element as HTMLSelectElement).value).toBe('swe-2-high')
+    wrapper.unmount()
+  })
+
   it('generates the bounded OMP compatibility profile with the selected Fusion model', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,

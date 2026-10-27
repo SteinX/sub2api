@@ -118,3 +118,4 @@ test-devin-user-journeys-mock:
 
 test-devin-acceptance:
 	@python3 -m unittest discover -s tools/devin-acceptance -p 'test_*.py'
+	@node --test tools/devin-e2e-clients/test_ui_model_diagnostics.mjs
