@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+from project_tests import output_text
 
 PARTS = 8
 PART_BYTES = 16 * 1024
@@ -77,26 +78,17 @@ class ReadEvidence:
         self.calls = {}
 
     def observe(self, event, tool):
-        if not tool or tool['name'] != 'read' or tool['status'] != 'completed':
+        if not tool or tool['status'] != 'completed':
             return
-        part = event.get('part', {})
-        state = part.get('state', {})
-        inputs, text = state.get('input', {}), state.get('output')
-        if not isinstance(inputs, dict) or not isinstance(text, str):
-            return
-        path = inputs.get('filePath')
-        if not isinstance(path, str):
-            return
-        absolute = os.path.abspath(self.workspace / path)
+        text = output_text(event)
         for relative, raw in self.parts.items():
-            if absolute == str(self.workspace / relative):
-                complete = raw.decode() in normalize(text)
-                self.calls[tool['call_sha256']] = {'part': relative, 'file_sha256': sha(raw), 'bytes': len(raw),
-                    'output_sha256': sha(text.encode()), 'complete': complete, 'call_sha256': tool['call_sha256']}
+            if raw.decode() in normalize(text):
+                self.calls[(tool['call_sha256'], relative)] = {'part': relative, 'file_sha256': sha(raw), 'bytes': len(raw),
+                    'output_sha256': sha(text.encode()), 'complete': True, 'call_sha256': tool['call_sha256']}
 
     def report(self):
         complete = {call['part'] for call in self.calls.values() if call['complete']}
-        return {'scope': 'actual completed OpenCode read outputs; not native model context or compaction',
+        return {'scope': 'complete frozen content in actual completed tool outputs; not native model context or compaction',
                 'complete': len(complete) == PARTS, 'parts': list(self.calls.values()),
                 'unique_complete_parts': len(complete), 'complete_payload_bytes': sum(len(self.parts[name]) for name in complete),
                 'file_sha256': {name: sha(raw) for name, raw in self.parts.items()},
@@ -119,10 +111,10 @@ def prompt(resume):
         return ('Resume this bounded long project session. Without calling ANY tools or reading any files, recall the eight '
                 'previously observed random facts part00 through part07 from the retained conversation. Return each label '
                 'and its exact value (JSON or label=value is fine). Do not guess. This is a BOUNDED_LONG_RECALL checkpoint.')
-    return ('BOUNDED_LONG_PROJECT: Read price_math.py and all eight context/part00.txt through context/part07.txt files '
-            'completely, retaining each part00..part07 random fact. Repair only the calculation in price_math.py, run '
-            'python3 run_tests.py and read out/report.json to verify all cross-file totals. Keep the facts only in conversation history, never add them to the artifact or another file. '
-            'Do not change requirements, tests, runner or context files. Use at most12 public tools: source read1, data reads8, '
-            'one edit, one test command and one artifact read. Lead: delegate implementation to Sidekick, review its report '
+    return ('BOUNDED_LONG_PROJECT: Complete the project using all eight context/part00.txt through context/part07.txt files, '
+            'retaining each part00..part07 random fact. Repair only the calculation in price_math.py, run '
+            'the project test runner (python3 run_tests.py) and produce the correct out/report.json cross-file totals. Keep the facts only in conversation history, never add them to the artifact or another file. '
+            'Do not change requirements, tests, runner or context files. Choose tools and order freely within the12-public-tool budget. '
+            'Lead: delegate implementation to Sidekick, review its report '
             'and finish with a concise verified summary. A later same-session restart will ask you to recall the facts '
             'without tools; the expected values will not be in that prompt.')

@@ -83,8 +83,11 @@ def valid_tool_evidence(result):
             if call['name'] not in FILE_MUTATORS:
                 return False
             mutations[call['name']] += 1
+    mutation_stats = result.get('source_mutation_tools')
     return (all(completed[name] == count for name, count in tools.items())
-            and dict(mutations) == result.get('source_mutation_tools')
+            and isinstance(mutation_stats, dict)
+            and all(name in FILE_MUTATORS and type(count) is int and count > 0 for name, count in mutation_stats.items())
+            and dict(mutations) == mutation_stats
             and all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
                     and events[name].get('completed', 0) >= tools[name] for name, counts in states.items()))
 
@@ -109,9 +112,10 @@ def valid_client_test_receipt(case):
         tool = actual.get(call.get('call_sha256'), {})
         if (call.get('state') != tool.get('status') or call.get('command_class') != tool.get('command_class')
                 or call.get('command_sha256') != tool.get('command_sha256') or not HEX64.fullmatch(str(call.get('command_sha256', '')))
+                or 'test_runner_candidate' in call and type(call['test_runner_candidate']) is not bool
                 or type(call.get('completion_sequence')) is not int or call['completion_sequence'] <= 0):
             return False
-    candidates = [call for call in calls if call.get('command_class') == 'configured_project_tests']
+    candidates = [call for call in calls if call.get('test_runner_candidate', call.get('command_class') == 'configured_project_tests') is True]
     selected = max(candidates, key=lambda call: call['completion_sequence'], default={})
     protected = case.get('protected_project_sha256', {})
     if (execution.get('selected_call_sha256') != selected.get('call_sha256') or selected.get('execution_verified') is not True
@@ -272,7 +276,7 @@ def validate(report, mode, commit, tree, state=None):
                 errors.append(ident + ':fusion_roles_unverified')
         for phase in ['task', 'resume']:
             result = case.get(phase) or {}
-            if (result.get('completion_contract') != 'project_artifacts_v2' or result.get('terminal_event_seen') is not True
+            if (result.get('completion_contract') != 'project_results_v3' or result.get('terminal_event_seen') is not True
                     or result.get('reader_completed') is not True or result.get('reader_error') is not False
                     or type(result.get('final_text_bytes')) is not int or result['final_text_bytes'] <= 0
                     or not HEX64.fullmatch(str(result.get('final_text_sha256', '')))
@@ -289,19 +293,13 @@ def validate(report, mode, commit, tree, state=None):
                 errors.append(ident + ':' + phase + '_terminal_failure')
         if case.get('task', {}).get('client_session_sha256') != (case.get('resume') or {}).get('client_session_sha256'):
             errors.append(ident + ':session_identity_mismatch')
-        tools = case.get('task', {}).get('tools', {})
-        mutations = case.get('task', {}).get('source_mutation_tools', {})
-        allowed_mutators = {'write'} if client == 'omp' else FILE_MUTATORS
         before, after = case.get('source_before_task_sha256'), case.get('source_after_task_sha256')
         if (not HEX64.fullmatch(str(before or '')) or not HEX64.fullmatch(str(after or '')) or before == after
-                or case.get('source_changed_by_task') is not True or not isinstance(mutations, dict) or not mutations
-                or any(name not in allowed_mutators or type(count) is not int or count <= 0
-                       or count > tools.get(name, 0) for name, count in mutations.items())):
+                or case.get('source_changed_by_task') is not True):
             errors.append(ident + ':source_mutation_unverified')
-        if (tools.get('read', 0) < 3 or tools.get('bash', 0) < 1
-                or case.get('task', {}).get('client_tests_succeeded') is not True or case.get('task', {}).get('test_command_verified') is not True
-                or case.get('task', {}).get('bash_exit_code') != 0 or case.get('resume', {}).get('tools', {}).get('read', 0) < 1):
-            errors.append(ident + ':actual_client_tools_missing')
+        if (case.get('task', {}).get('client_tests_succeeded') is not True or case.get('task', {}).get('test_command_verified') is not True
+                or case.get('task', {}).get('bash_exit_code') != 0):
+            errors.append(ident + ':client_test_execution_unverified')
         if not valid_client_test_receipt(case):
             errors.append(ident + ':client_test_receipt_unverified')
         if case.get('capabilities_required') is True:

@@ -90,6 +90,21 @@ class ProjectTestReceiptTests(unittest.TestCase):
         self.assertEqual('test_path_alias', call['command_category'])
         self.assertTrue(call['execution_verified'])
 
+    def test_compound_command_needs_the_same_real_receipt_not_a_particular_spelling(self):
+        result=subprocess.run('python3 -u run_tests.py && printf done',shell=True,cwd=self.root,capture_output=True)
+        self.event(result,command='python3 -u run_tests.py && printf done')
+        report=self.receipts.report()
+        self.assertTrue(report['client_tests_succeeded'])
+        self.assertEqual('other_shell',report['test_execution']['calls'][0]['command_class'])
+        self.assertNotIn('printf done',json.dumps(report))
+
+    def test_fabricated_receipt_reference_does_not_replace_a_real_receipt(self):
+        output=PREFIX+json.dumps({'run_id':'f'*32,'sha256':'f'*64})
+        self.event(subprocess.CompletedProcess([],0,b'',b''),command='printf fake-receipt',output=output)
+        report=self.receipts.report()
+        self.assertFalse(report['client_tests_succeeded'])
+        self.assertEqual('file_unavailable',report['test_execution']['calls'][0]['receipt_status'])
+
     def test_each_actual_call_survives_later_command_and_duplicate_terminal(self):
         result = self.run_tests()
         event = self.event(result)

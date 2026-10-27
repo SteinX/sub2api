@@ -20,7 +20,8 @@ import (
 func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFixture, key, password, fusionModel string, keyID int64) {
 	t.Helper()
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
-	for _, scenario := range []string{"canonical", "whitespace", "after_extra", "after_forbidden", "fake_ok", "failed_tests", "forbidden_equiv", "fusion_failure"} {
+	for _, scenario := range []string{"canonical", "whitespace", "after_extra", "after_forbidden", "fake_ok", "failed_tests", "forbidden_equiv", "fusion_failure",
+		"result_bash", "result_history_resume", "result_wrong_artifact", "result_forged_test", "result_stale_test", "result_fusion"} {
 		t.Run("test_receipt_"+scenario, func(t *testing.T) {
 			directory := t.TempDir()
 			fixture.journey.mu.Lock()
@@ -31,6 +32,10 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 			if scenario == "fusion_failure" {
 				model = fusionModel
 				fixture.journey.testScenario = "fake_ok"
+			}
+			if scenario == "result_fusion" {
+				model = fusionModel
+				fixture.journey.testScenario = "result_bash"
 			}
 			fixture.journey.mu.Unlock()
 			t.Cleanup(func() {
@@ -73,7 +78,7 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 			if report == nil {
 				report = map[string]any{"status": "failed", "stage": "runner_output"}
 			}
-			if scenario == "fusion_failure" {
+			if scenario == "fusion_failure" || scenario == "result_fusion" {
 				_, records := admission.snapshot()
 				report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, records, false)
 			}
@@ -83,11 +88,24 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
 			task := report["task"].(map[string]any)
-			if scenario == "canonical" || scenario == "after_extra" {
+			if scenario == "canonical" || scenario == "after_extra" || scenario == "result_bash" || scenario == "result_history_resume" || scenario == "result_fusion" {
 				require.NoError(t, runErr, "permitted actual test executions must be recognized")
 				require.Equal(t, "passed", report["status"])
 				require.Equal(t, true, task["client_tests_succeeded"])
 				require.Equal(t, true, task["test_command_verified"])
+				if strings.HasPrefix(scenario, "result_") {
+					require.Empty(t, task["source_mutation_tools"], "Bash repair is proved by changed source and oracle, not a named Edit/Write tool")
+					require.Equal(t, float64(0), task["tools"].(map[string]any)["read"])
+					require.Equal(t, true, report["independent_project_test_passed"])
+					resumed := report["resume"].(map[string]any)
+					require.Equal(t, float64(0), resumed["tools"].(map[string]any)["read"])
+					if scenario == "result_history_resume" {
+						require.Empty(t, resumed["tool_calls"], "a correct same-session resume need not reread the file")
+					}
+					if scenario == "result_fusion" {
+						require.Equal(t, true, report["fusion_execution"].(map[string]any)["complete"])
+					}
+				}
 				if scenario == "after_extra" {
 					calls := task["test_execution"].(map[string]any)["calls"].([]any)
 					require.Len(t, calls, 2)
@@ -97,10 +115,19 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 				require.Error(t, runErr, "a denied command or missing/failed real test cannot pass")
 				require.Equal(t, "failed", report["status"])
 				require.Nil(t, report["resume"])
-				if scenario == "after_forbidden" {
+				if scenario == "after_forbidden" || scenario == "result_wrong_artifact" {
 					require.Equal(t, true, task["client_tests_succeeded"], "a later denied tool must not erase the earlier successful test evidence")
 				} else {
 					require.Equal(t, false, task["client_tests_succeeded"])
+				}
+				if strings.HasPrefix(scenario, "result_") {
+					require.Equal(t, true, report["source_changed_by_task"])
+					require.Equal(t, true, report["independent_project_test_passed"])
+					if scenario == "result_wrong_artifact" {
+						require.Equal(t, false, report["artifact_verified_before_oracle"])
+					} else {
+						require.Equal(t, true, report["artifact_verified_before_oracle"])
+					}
 				}
 				if scenario == "fusion_failure" {
 					require.Contains(t, report["fusion_execution"], "complete", "retain partial local collaboration evidence before cleanup; a stopped turn is not retrospectively complete")

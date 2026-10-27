@@ -239,6 +239,34 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		reply.DeltaText = longRecallText(history.String(), testScenario)
 		return
 	}
+	if strings.HasPrefix(testScenario, "result_") {
+		if resume && testScenario == "result_history_resume" || tested {
+			reply.DeltaText = final
+			return
+		}
+		command := "cat out/report.json"
+		if !resume {
+			// The MODEL asks the genuine CLI's Bash tool to repair and test in
+			// one ordinary compound command. No fixture executes or rewrites it.
+			command = `python3 -c "from pathlib import Path; p=Path('price_math.py'); p.write_text(p.read_text().replace('return subtotal + discount','return subtotal - discount'))" && python3 -u run_tests.py && cat out/report.json`
+			switch testScenario {
+			case "result_wrong_artifact":
+				command += ` && python3 -c "import json; from pathlib import Path; p=Path('out/report.json'); d=json.loads(p.read_text()); d['totals']=[0]; p.write_text(json.dumps(d))"`
+			case "result_stale_test":
+				command += ` && python3 -c "from pathlib import Path; p=Path('price_math.py'); p.write_text(p.read_text()+'\\n# changed after tests\\n')"`
+			case "result_forged_test":
+				command = strings.Replace(command, "python3 -u run_tests.py", `python3 -c "from price_math import report; report()"`, 1)
+				command += ` && printf '%s\n' 'SUB2API_TEST_RECEIPT_V1:{"run_id":"ffffffffffffffffffffffffffffffff","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}'`
+			}
+		}
+		for _, tool := range request.Tools {
+			if tool.Name == "bash" {
+				call(tool, map[string]any{"command": command, "workdir": workspace, "description": "Complete the synthetic project result"})
+				return
+			}
+		}
+		return
+	}
 	if longTask {
 		path := ""
 		if reads["price_math.py"] == 0 {

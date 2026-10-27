@@ -25,28 +25,29 @@ func normalizedLongOutput(value string) string {
 
 // Pressure at the actual PUBLIC boundary; not a claim about a native model's
 // context after role isolation/compaction. Only successful, source-complete
-// requests and actual completed read call IDs can supply this proof.
+// requests and actual completed tool call IDs can supply this optional proof.
 func longPublicContext(directory string, records []agentRequest, report map[string]any) map[string]any {
-	result := map[string]any{"complete": false, "max_complete_parts": 0, "complete_payload_bytes": 0, "scope": "single successful public request, completed read tool outputs; not native role context/compaction", "compression": "not_claimed"}
+	result := map[string]any{"complete": false, "max_complete_parts": 0, "complete_payload_bytes": 0, "scope": "single successful public request, complete frozen content from completed tool outputs; not native role context/compaction", "compression": "not_claimed"}
 	root, err := os.OpenRoot(filepath.Join(directory, "workspace"))
 	if err != nil {
 		return result
 	}
 	defer root.Close()
 	task, _ := report["task"].(map[string]any)
-	actualReads := map[string]bool{}
+	actualCalls := map[string]bool{}
 	actualTools, _ := task["tool_calls"].([]any)
 	for _, value := range actualTools {
 		tool, _ := value.(map[string]any)
 		id, _ := tool["call_sha256"].(string)
-		if tool["name"] == "read" && tool["status"] == "completed" {
-			actualReads[id] = true
+		if tool["status"] == "completed" {
+			actualCalls[id] = true
 		}
 	}
 	reads, _ := task["long_reads"].(map[string]any)
 	parts, _ := reads["parts"].([]any)
 	type partData struct{ name, text string }
-	expected := map[string]partData{}
+	expected := map[string][]partData{}
+	expectedNames := map[string]bool{}
 	hashes, _ := report["long_file_sha256"].(map[string]any)
 	for _, value := range parts {
 		part, ok := value.(map[string]any)
@@ -55,7 +56,7 @@ func longPublicContext(directory string, records []agentRequest, report map[stri
 		}
 		name, _ := part["part"].(string)
 		id, _ := part["call_sha256"].(string)
-		if !actualReads[id] {
+		if !actualCalls[id] {
 			continue
 		}
 		if !regexp.MustCompile(`^context/part0[0-7]\.txt$`).MatchString(name) {
@@ -65,7 +66,8 @@ func longPublicContext(directory string, records []agentRequest, report map[stri
 		if readErr != nil || len(raw) != 16384 || callHash(string(raw)) != hashes[name] || callHash(string(raw)) != part["file_sha256"] {
 			continue
 		}
-		expected[id] = partData{name, string(raw)}
+		expected[id] = append(expected[id], partData{name, string(raw)})
+		expectedNames[name] = true
 	}
 	best := 0
 	for _, record := range records {
@@ -78,8 +80,10 @@ func longPublicContext(directory string, records []agentRequest, report map[stri
 				continue
 			}
 			id := callHash(item.CallID)
-			if raw, ok := expected[id]; ok && strings.Contains(normalizedLongOutput(item.Output), raw.text) {
-				found[raw.name] = true
+			for _, raw := range expected[id] {
+				if strings.Contains(normalizedLongOutput(item.Output), raw.text) {
+					found[raw.name] = true
+				}
 			}
 		}
 		if len(found) > best {
@@ -88,7 +92,7 @@ func longPublicContext(directory string, records []agentRequest, report map[stri
 			result["complete_payload_bytes"] = best * 16384
 		}
 	}
-	result["complete"] = best == 8 && len(expected) == 8
+	result["complete"] = best == 8 && len(expectedNames) == 8
 	return result
 }
 
@@ -149,7 +153,12 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 			}
 			report["public_error_codes"] = errors
 			report["batch_guard"] = fence.snapshot()
-			report["public_context_witness"] = longPublicContext(directory, records, report)
+			witness := longPublicContext(directory, records, report)
+			report["public_context_witness"] = witness
+			report["context_pressure"] = "not_observed"
+			if witness["complete"] == true {
+				report["context_pressure"] = "passed"
+			}
 			report["client_process_cleanup_verified"] = cleanupErr == nil
 			report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, records, false)
 			fixture.mu.Lock()
@@ -180,7 +189,8 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 				require.Error(t, runErr)
 				require.Equal(t, "failed", report["status"])
 				if scenario == "missing_part" {
-					require.Nil(t, report["resume"])
+					require.NotNil(t, report["resume"], "missing pressure evidence alone does not reject a correct task; recall still checks the facts")
+					require.Equal(t, false, report["resume"].(map[string]any)["memory_recall"].(map[string]any)["passed"])
 					require.Equal(t, false, report["public_context_witness"].(map[string]any)["complete"])
 				}
 				if scenario == "wrong_fact" {

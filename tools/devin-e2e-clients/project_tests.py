@@ -166,12 +166,16 @@ class TestReceipts:
         self.sequence += 1
         record['completion_sequence'] = self.sequence
         record['exit_code'], record['exit_source'] = code, exit_source
-        candidate = record['command_class'] == 'configured_project_tests' or record['command_category'] == 'test_path_alias'
+        lines = [line[len(PREFIX):] for line in text.splitlines() if line.startswith(PREFIX)]
+        # A genuine runner receipt can come from an alias, wrapper or compound
+        # shell command. Spelling is diagnostic; the fresh protected receipt,
+        # actual tool exit and final source still decide whether tests passed.
+        candidate = (bool(lines) or record['command_class'] == 'configured_project_tests'
+                     or record['command_category'] == 'test_path_alias')
         record['test_runner_candidate'] = candidate
         record['receipt_status'] = 'missing' if candidate else 'not_test_command'
         if not candidate:
             return
-        lines = [line[len(PREFIX):] for line in text.splitlines() if line.startswith(PREFIX)]
         if len(lines) != 1:
             record['receipt_status'] = 'missing' if not lines else 'ambiguous'
             return

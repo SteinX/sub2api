@@ -21,7 +21,7 @@ def evidence(live=False):
         terminal = {'exit_code': 0, 'normal_stop': True, 'final_text_matches': True, 'event_error': False,
                     'timed_out': False, 'parse_errors': 0, 'session_changed': False, 'session_seen': True,
                     'client_session_sha256': DIGEST, 'tools': {'read': 4, 'write': 1, 'bash': 1},
-                    'completion_contract': 'project_artifacts_v2', 'terminal_event_seen': True,
+                    'completion_contract': 'project_results_v3', 'terminal_event_seen': True,
                     'reader_completed': True, 'reader_error': False,
                     'final_text_bytes': 35, 'final_text_sha256': DIGEST, 'project_nonce_sha256': DIGEST,
                     'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0, 'plugin_runtime_started': True}
@@ -190,7 +190,21 @@ class AcceptanceTests(unittest.TestCase):
         case['source_after_task_sha256'] = case['source_before_task_sha256']
         self.assertIn(case['id'] + ':source_mutation_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
 
-    def test_mutation_stats_are_required_and_bash_or_failed_tools_cannot_supply_them(self):
+    def test_results_do_not_require_read_or_mutator_tools_or_resume_tools(self):
+        report,_=evidence()
+        case=report['cases'][0]
+        task=case['task'];bash=next(call for call in task['tool_calls'] if call['name']=='bash')
+        bash.update(command_class='other_shell',source_targeted=False)
+        task.update(tools={'bash':1},tool_states={'bash':{'completed':1}},tool_events={'bash':{'completed':1}},
+                    tool_calls=[bash],source_mutation_tools={})
+        receipt=task['test_execution']['calls'][0]
+        receipt.update(command_class='other_shell',test_runner_candidate=True)
+        case['resume'].update(tools={},tool_states={},tool_events={},tool_calls=[],source_mutation_tools={})
+        self.assertEqual([],gate.validate(report,'client_mock',COMMIT,TREE))
+        case['artifact_verified_before_oracle']=False
+        self.assertIn(case['id']+':artifact_verified_before_oracle',gate.validate(report,'client_mock',COMMIT,TREE))
+
+    def test_tool_diagnostics_must_match_actual_events_and_remain_well_typed(self):
         for changes in [ {'source_mutation_tools': {}}, {'source_mutation_tools': {'bash': 1}},
                          {'source_mutation_tools': {'write': 2}}, {'source_mutation_tools': {'write': True}},
                          {'tool_states': {'write': {'error': 1}}}, {'tool_states': {'write': {'pending': 1}}},

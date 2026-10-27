@@ -276,9 +276,9 @@ def command(client, model, resume, project_kind='short'):
         cmd.append("--continue")
     if project_kind == 'long':
         return cmd + [long_project.prompt(resume)]
-    prompt = ("Resume this project session. Read out/report.json and confirm the completed project using the existing session history. Summarize what you verified."
+    prompt = ("Resume this project session. Confirm the completed project result using the existing session history and any tools you need. Summarize what you verified."
               if resume else
-              "Repair price_math.py so the project tests pass. Read requirements.json and price_math.py, fix the calculation, run python3 run_tests.py, then re-read requirements.json and out/report.json to verify the result. Do not change the requirements, tests or test runner. Summarize the verified result.")
+              "Repair price_math.py so the project tests pass. Produce the correct out/report.json for requirements.json and run the project test runner (python3 run_tests.py). Choose the tools and order you need. Do not change the requirements, tests or test runner. Summarize the verified result.")
     if model.startswith('fusion-') and not resume:
         prompt = "Lead: delegate the project implementation to Sidekick, then review its returned work and verify the result. " + prompt
     return cmd + [prompt]
@@ -459,7 +459,6 @@ def invoke(args, directory, resume=False, protected=None):
                         and not result['session_changed'] and (args.client != 'omo' or result['plugin_runtime_started']))
     if reads is not None:
         result['long_reads'] = reads.report()
-        result['passed'] &= result['long_reads']['complete']
     if is_long:
         result['passed'] &= result['client_exit_cleanup_verified']
     if is_long and resume:
@@ -581,12 +580,9 @@ def main():
                                json.dumps(oracle_samples).encode()) if intact and first['exit_code'] is not None and not first['timed_out'] and first['incomplete_tool_calls'] == 0 else None
     task_checks = {'terminal': first['passed'], 'artifact': valid, 'protected_files': intact,
                    'project_nonce': first['project_nonce_sha256'] == project_nonce_hash,
-                   'reads': first['tools']['read'] >= 3,
-                   'source_mutation_tool': sum(first['source_mutation_tools'].values()) >= 1,
                    'source_changed': source_before_task != source_after_task,
                    'client_tests': first['client_tests_succeeded'], 'oracle': after.returncode == 0 if after is not None else None}
     if args.project_kind=='long':
-        task_checks['all_long_files_read'] = first.get('long_reads',{}).get('complete') is True
         task_checks['long_files_unchanged'] = all(digest(project_bytes(workspace,name))==fingerprint for name,fingerprint in long_parts.items())
     task_passed = all(task_checks.values())
     source_before_resume = source_after_task
@@ -602,7 +598,7 @@ def main():
     if resumed is None:
         final['artifact_verified_after_resume'] = final['source_unchanged_after_resume'] = None
     resume_contract = (resumed is not None and resumed.get('memory_recall',{}).get('passed') is True and len(resumed['tool_calls'])==0
-                       if args.project_kind=='long' else resumed is not None and resumed['tools']['read']>=1)
+                       if args.project_kind=='long' else resumed is not None)
     passed = task_passed and resumed is not None and resumed["passed"] and resume_nonce_valid and resume_contract and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
     if args.project_kind=='long':
         final['long_files_unchanged_after_resume'] = (all(digest(project_bytes(workspace,name))==fingerprint for name,fingerprint in long_parts.items()) if resumed is not None else None)
@@ -631,7 +627,7 @@ def main():
               'native_user_policy_fixture': args.fixture_user_policy,
               'approval_flags': {'auto': False, 'yolo': False, 'dangerously_skip_permissions': False}}
     if args.project_kind=='long':
-        report.update(project_kind='long', context_pressure='passed' if first.get('long_reads',{}).get('complete') else 'failed',
+        report.update(project_kind='long', context_pressure='observed_client_output' if first.get('long_reads',{}).get('complete') else 'not_observed',
                       compact='not_claimed', compression_claim=False, dataset_bytes=long_project.PARTS*long_project.PART_BYTES,
                       long_file_sha256=long_parts)
     print(json.dumps(report, sort_keys=True))

@@ -68,7 +68,7 @@ class CompletionEvidence:
 
     def report(self, expected_marker):
         text = ''.join(self.parts.values()).strip().encode()
-        return {'completion_contract': 'project_artifacts_v2', 'terminal_event_seen': self.terminal_seen,
+        return {'completion_contract': 'project_results_v3', 'terminal_event_seen': self.terminal_seen,
                 'normal_stop': self.normal_stop, 'final_text_bytes': len(text),
                 'final_text_sha256': hashlib.sha256(text).hexdigest(), 'final_text_parts': len(self.parts),
                 'marker_seen_anywhere': self.marker_seen_anywhere,
