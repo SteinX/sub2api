@@ -164,7 +164,8 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		case "write", "edit":
 			wrote = true
 		case "bash":
-			tested = true
+			// Ordinary Bash file inspection is not a completed project test.
+			tested = tested || !strings.HasPrefix(testScenario, "bounded_long_") || strings.Contains(prompt.Prompt, "SUB2API_TEST_RECEIPT_V1:")
 		case "glob":
 			globbed = true
 		case "grep":
