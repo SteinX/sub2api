@@ -15,9 +15,10 @@ def proposal():
     source = {'commit': 'a'*40, 'tree': 'b'*40}
     plan = {'schema_version': 1, 'source': source, 'upstream_origins': ['https://server.codeium.com'],
             'product': 'isolated_complete_preview', 'dataset': 'synthetic_price_project_v1', 'models': {'direct': 'model-direct', 'lead': 'model-lead', 'sidekick': 'model-sidekick'},
-            'clients': ['opencode', 'omo', 'omp'], 'reference_pricing_sha256': 'c'*64, 'stop_on_failure': True, 'retry_after_uncertain_send': False,
+            'clients': ['opencode'], 'tool_budget': {'operations': policy.TOOL_OPERATIONS, 'per_operation': 12, 'total': 48},
+            'reference_pricing_sha256': 'c'*64, 'stop_on_failure': True, 'retry_after_uncertain_send': False,
             'limits': {'public_requests': 144, 'output_tokens': 1024, 'wall_seconds': 3600, 'turn_seconds': 300,
-                       'internal_calls_per_turn': 64, 'tools_per_turn': 20, 'handoffs_per_turn': 2, 'parallelism': 1, 'local_usd': 3, 'turn_usd': .5}}
+                       'internal_calls_per_turn': 16, 'tools_per_turn': 12, 'handoffs_per_turn': 2, 'parallelism': 1, 'local_usd': 3, 'turn_usd': .5}}
     approval = {'schema_version': 1, 'approved': True, 'approval_id': 'test-approval-0001', 'mode': 'live', 'plan_sha256': policy.digest(plan), 'expires_at': '2026-10-25T01:00:00Z',
                 'scopes': ['native_auth', 'temporary_credential_storage', 'local_preview_accounts', 'model_generation']}
     return plan, approval, {**source, 'dirty': False}, {'DEVIN_E2E_PAT': 'synthetic-reference'}
@@ -123,6 +124,72 @@ class RealJourneyPolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(policy.Denied,'direct_turn_or_remaining_cost'):
                     policy.ledger_action(ledger,'admit',cost=cost,estimated_cost=estimate)
                 self.assertEqual(0,policy.read_json(ledger)['requests'])
+
+    def test_tool_scope_cannot_expand_by_client_session_or_capability(self):
+        for mutation in ('missing', 'extra', 'total', 'per', 'client', 'advanced'):
+            plan, approval, source, env = proposal()
+            if mutation == 'missing': plan.pop('tool_budget')
+            elif mutation == 'extra': plan['tool_budget']['operations'] = [*policy.TOOL_OPERATIONS, 'another/session']
+            elif mutation == 'total': plan['tool_budget']['total'] = 49
+            elif mutation == 'per': plan['tool_budget']['per_operation'] = 13
+            elif mutation == 'client': plan['clients'] = ['opencode', 'omp']
+            elif mutation == 'advanced': plan['omp_capabilities'] = 'true'
+            approval['plan_sha256'] = policy.digest(plan)
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(policy.Denied, 'fixed_tool_operation'):
+                policy.validate(plan, approval, 'live', source, env, NOW)
+
+    def test_twelfth_tool_reserved_thirteenth_stops_without_partial_batch(self):
+        plan, *_ = proposal()
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / 'ledger.json'; policy.claim(ledger, plan, 'live')
+            operation = policy.TOOL_OPERATIONS[0]
+            policy.ledger_action(ledger, 'tool_begin', operation=operation)
+            policy.ledger_action(ledger, 'admit')
+            calls = [policy.digest({'call': i}) for i in range(13)]
+            state = policy.ledger_action(ledger, 'tool_reserve', operation=operation, calls=calls[:11])
+            self.assertEqual(11, state['tools_reserved'])
+            state = policy.ledger_action(ledger, 'tool_reserve', operation=operation, calls=calls[11:12])
+            self.assertEqual(12, state['tools_reserved']); self.assertFalse(state['stopped'])
+            state = policy.ledger_action(ledger, 'tool_reserve', operation=operation, calls=calls[12:])
+            self.assertEqual(12, state['tools_reserved']); self.assertTrue(state['stopped'])
+            policy.ledger_action(ledger, 'complete', 1, 'success', 0)
+            for action in ('admit', 'tool_begin', 'tool_reserve'):
+                with self.assertRaises(policy.Denied):
+                    policy.ledger_action(ledger, action, operation=policy.TOOL_OPERATIONS[1], calls=calls[12:])
+            self.assertEqual(12, policy.read_json(ledger)['tools_reserved'])
+
+    def test_tool_budget_survives_requests_processes_and_four_operations(self):
+        import subprocess, sys, json
+        plan, *_ = proposal()
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / 'ledger.json'; policy.claim(ledger, plan, 'live')
+            for index, operation in enumerate(policy.TOOL_OPERATIONS):
+                policy.ledger_action(ledger, 'tool_begin', operation=operation)
+                for number in range(12):
+                    state = policy.ledger_action(ledger, 'admit')
+                    call = policy.digest({'operation': operation, 'number': number})
+                    policy.ledger_action(ledger, 'tool_reserve', operation=operation, calls=[call])
+                    policy.ledger_action(ledger, 'complete', state['inflight'], 'success', 0)
+                self.assertEqual((index+1)*12, policy.read_json(ledger)['tools_reserved'])
+            result = subprocess.check_output([sys.executable, '-c',
+                "import json,sys;from journey_policy import ledger_action,Denied\ntry: ledger_action(sys.argv[1],'tool_begin',operation=sys.argv[2])\nexcept Denied as e: print(json.dumps({'denied':str(e)}))", str(ledger), policy.TOOL_OPERATIONS[0]], cwd=Path(policy.__file__).parent)
+            self.assertIn('already_claimed', json.loads(result)['denied'])
+            self.assertEqual(48, policy.read_json(ledger)['tools_reserved'])
+
+    def test_tool_batch_is_atomic_and_uncertain_reservation_never_refunded(self):
+        plan, *_ = proposal()
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / 'ledger.json'; policy.claim(ledger, plan, 'live')
+            operation = policy.TOOL_OPERATIONS[0]
+            policy.ledger_action(ledger, 'tool_begin', operation=operation)
+            policy.ledger_action(ledger, 'admit')
+            calls = [policy.digest({'call': i}) for i in range(13)]
+            policy.ledger_action(ledger, 'tool_reserve', operation=operation, calls=calls[:11])
+            state = policy.ledger_action(ledger, 'tool_reserve', operation=operation, calls=calls[11:])
+            self.assertTrue(state['stopped']); self.assertEqual(11, state['tools_reserved'])
+            self.assertEqual(calls[:11], state['tool_operations'][operation])
+            policy.ledger_action(ledger, 'complete', 1, 'uncertain', 0)
+            self.assertEqual(11, policy.read_json(ledger)['tools_reserved'])
 
 
 if __name__ == '__main__':

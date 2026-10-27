@@ -70,6 +70,7 @@ type agentAdmission struct {
 	active          chan struct{}
 	runBudget       journeyBudget
 	fence           *journeyFence
+	toolCase        string // trusted runner case, never a public session header
 	outputLimit     int
 	turnTimeout     time.Duration
 }
@@ -108,8 +109,13 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 					// Error JSON is bounded separately and can never pass admission.
 					source, sourceErr = preloadJourneyResponse(response.Body)
 				} else {
-					// Observe while ReverseProxy flushes original chunks immediately.
+					// Preserve streaming; the optional tool guard holds only one
+					// complete SSE event before delivering executable arguments.
 					source = &journeyResponseBody{ReadCloser: response.Body, guard: p.fence, stream: record.Stream}
+					if p.fence.toolGuardEnabled() {
+						source.tools = newJourneyToolBody(response.Body, p.fence, record.Stream)
+						source.ReadCloser = source.tools
+					}
 				}
 			}
 			p.mu.Lock()

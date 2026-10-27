@@ -3,6 +3,7 @@
 package devine2e
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -166,6 +167,36 @@ func (b *authorizedJourneyBudget) Stop(reason string, observed int64) error {
 	return err
 }
 
+func (b *authorizedJourneyBudget) toolPolicy(action, operation string, calls []string) error {
+	if b.fatal.Load() {
+		return errors.New("run stopped")
+	}
+	arguments := []string{"--operation", operation}
+	if calls != nil {
+		encoded, err := json.Marshal(calls)
+		if err != nil {
+			return err
+		}
+		arguments = append(arguments, "--calls-json", string(encoded))
+	}
+	output, err := journeyPolicy(action, arguments...)
+	var decision struct {
+		Authorized bool `json:"authorized"`
+		Stopped    bool `json:"stopped"`
+	}
+	if err != nil || json.Unmarshal(output, &decision) != nil || !decision.Authorized || decision.Stopped || b.fatal.Load() {
+		return errors.New("durable tool admission denied or uncertain")
+	}
+	return nil
+}
+
+func (b *authorizedJourneyBudget) ToolBegin(operation string) error {
+	return b.toolPolicy("tool_begin", operation, nil)
+}
+func (b *authorizedJourneyBudget) ToolReserve(operation string, calls []string) error {
+	return b.toolPolicy("tool_reserve", operation, calls)
+}
+
 func (b *authorizedJourneyBudget) healthy() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -180,6 +211,7 @@ type journeyResponseBody struct {
 	preloaded   bool
 	mu          sync.Mutex
 	guard       *journeyFence
+	tools       *journeyToolBody
 	stream      bool
 	sourceError bool
 	closeOnce   sync.Once
@@ -288,6 +320,9 @@ func (b *journeyResponseBody) Close() error {
 func validJourneyCompletion(data []byte, stream bool) bool {
 	normal := false
 	consume := func(raw []byte) bool {
+		if strictJourneyJSON(raw) != nil {
+			return false
+		}
 		var v struct {
 			Error   json.RawMessage `json:"error"`
 			Choices []struct {
@@ -311,15 +346,22 @@ func validJourneyCompletion(data []byte, stream bool) bool {
 		return consume(data) && normal
 	}
 	done := false
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if bytes.HasPrefix(line, []byte("event:")) && bytes.Contains(line, []byte("error")) {
+	reader := bufio.NewReader(bytes.NewReader(data))
+	for {
+		frame, err := readJourneyEvent(reader)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
 			return false
 		}
-		if !bytes.HasPrefix(line, []byte("data:")) {
+		raw, err := journeyEventData(frame)
+		if err != nil {
+			return false
+		}
+		if len(bytes.TrimSpace(raw)) == 0 {
 			continue
 		}
-		raw := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 		if bytes.Equal(raw, []byte("[DONE]")) {
 			done = true
 			continue

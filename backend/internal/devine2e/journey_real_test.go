@@ -29,9 +29,10 @@ type approvedJourneyPlan struct {
 		Lead     string `json:"lead"`
 		Sidekick string `json:"sidekick"`
 	} `json:"models"`
-	Clients             []string `json:"clients"`
-	ReferencePricingSHA string   `json:"reference_pricing_sha256"`
-	GroupPricingSHA     string   `json:"group_pricing_sha256"`
+	Clients             []string          `json:"clients"`
+	ReferencePricingSHA string            `json:"reference_pricing_sha256"`
+	GroupPricingSHA     string            `json:"group_pricing_sha256"`
+	ToolBudget          journeyToolLimits `json:"tool_budget"`
 	Limits              struct {
 		Requests    int     `json:"public_requests"`
 		Output      int     `json:"output_tokens"`
@@ -138,6 +139,9 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 		require.Equal(t, true, entry["calculable"], "physical UID %v price cannot be calculated; stop before inference", entry["model"])
 	}
 	fence := newJourneyFence(app, budget)
+	if mode == "live" {
+		require.NoError(t, fence.installToolLimits(plan.ToolBudget))
+	}
 	defer func() {
 		if fence.deadline != nil {
 			fence.deadline.Stop()
@@ -160,6 +164,7 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					require.NoError(t, err)
 					t.Cleanup(func() { _ = os.RemoveAll(directory) })
 					admission := newJourneyAdmission(t, app, model, plan.Limits.Requests)
+					admission.toolCase = id
 					admission.runBudget, admission.outputLimit = budget, plan.Limits.Output
 					admission.turnTimeout = time.Duration(plan.Limits.TurnSeconds) * time.Second
 					budget.direct = kind == "direct"

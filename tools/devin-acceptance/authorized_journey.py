@@ -147,7 +147,7 @@ def run(args, plan):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['run', 'verify', 'admit', 'complete', 'stop'])
+    parser.add_argument('action', choices=['run', 'verify', 'admit', 'complete', 'stop', 'tool_begin', 'tool_reserve'])
     parser.add_argument('--mode', choices=['plan', 'live'], required=True)
     parser.add_argument('--plan', default=os.environ.get('DEVIN_JOURNEY_PLAN_FILE'))
     parser.add_argument('--approval', default=os.environ.get('DEVIN_JOURNEY_APPROVAL_FILE'))
@@ -160,6 +160,8 @@ def main():
     parser.add_argument('--estimated-cost', type=float)
     parser.add_argument('--reason')
     parser.add_argument('--observed-ns', type=int)
+    parser.add_argument('--operation')
+    parser.add_argument('--calls-json')
     args = parser.parse_args()
     try:
         if args.action in {'stop', 'complete'}:
@@ -186,8 +188,11 @@ def main():
             if args.action == 'verify':
                 result = {'authorized': True, 'executed': False}
             else:
-                state = ledger_action(args.ledger, args.action, args.receipt, args.outcome, args.cost, args.estimated_cost)
-                result = {'authorized': True, 'receipt': state['inflight'], 'requests': state['requests'], 'stopped': state['stopped']}
+                state = ledger_action(args.ledger, args.action, args.receipt, args.outcome, args.cost, args.estimated_cost,
+                                      expected_scope={'plan_sha256': digest(plan), 'mode': args.mode, 'source': plan['source']},
+                                      operation=args.operation, calls=json.loads(args.calls_json) if args.calls_json else None)
+                result = {'authorized': not state['stopped'], 'receipt': state['inflight'], 'requests': state['requests'],
+                          'stopped': state['stopped'], 'tools_reserved': state.get('tools_reserved')}
         print(json.dumps(result))
         return 0
     except Denied as error:

@@ -56,8 +56,8 @@ class Control:
                 self.stopped = True
             return accepted
 
-    def begin(self):
-        if self.stopped or not self.send('begin'):
+    def begin(self, operation='task'):
+        if self.stopped or not self.send('begin', operation=operation):
             raise ValueError('batch_stopped')
         self.phase = True
         self.acknowledged.clear()

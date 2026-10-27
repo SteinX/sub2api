@@ -21,7 +21,22 @@ HEX = re.compile(r'^[a-f0-9]{40}$')
 UID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
 STOP_REASONS = frozenset({'tool_error', 'permission_rejection', 'test_failed', 'reader_error', 'parse_error',
     'client_exit', 'protocol_error', 'transport_uncertain', 'control_lost', 'supervisor_failure', 'deadline',
-    'missing_terminal', 'source_or_oracle_failure'})
+    'missing_terminal', 'source_or_oracle_failure', 'tool_budget_exhausted', 'tool_budget_unavailable'})
+TOOL_OPERATIONS = [f'opencode/{kind}/project/{phase}' for kind in ('direct', 'fusion') for phase in ('task', 'resume')]
+
+
+def validate_tool_budget(plan):
+    """Four explicitly approved CLI operations, never inferred from sessions.
+
+    This bounds the implemented real pilot, not the product's client support.
+    Further clients/capabilities need their own reviewed finite operation plan.
+    """
+    expected = {'operations': TOOL_OPERATIONS, 'per_operation': plan['limits']['tools_per_turn'],
+                'total': 4 * plan['limits']['tools_per_turn']}
+    if (plan.get('clients') != ['opencode'] or plan.get('omp_capabilities', 'false') != 'false'
+            or plan.get('tool_budget') != expected):
+        raise Denied('explicit_fixed_tool_operation_scope_required')
+    return expected
 
 
 class Denied(ValueError):
@@ -89,7 +104,7 @@ def validate(plan, approval, mode, source, environment, now=None):
         raise Denied('client_scope_not_supported')
     limits = plan.get('limits', {})
     integer_caps = {'public_requests': 144, 'output_tokens': 1024, 'wall_seconds': 3600, 'turn_seconds': 300,
-                    'internal_calls_per_turn': 64, 'tools_per_turn': 20, 'handoffs_per_turn': 2}
+                    'internal_calls_per_turn': 16, 'tools_per_turn': 12, 'handoffs_per_turn': 2}
     for key, cap in integer_caps.items():
         value = limits.get(key)
         if type(value) is not int or not 0 < value <= cap:
@@ -98,6 +113,8 @@ def validate(plan, approval, mode, source, environment, now=None):
         value = limits.get(key)
         if type(value) not in {float, int} or not math.isfinite(value) or not 0 < value <= cap:
             raise Denied('invalid_' + key + '_limit')
+    if mode == 'live':
+        validate_tool_budget(plan)
     if limits.get('parallelism') != 1 or plan.get('stop_on_failure') is not True or plan.get('retry_after_uncertain_send') is not False:
         raise Denied('single_concurrency_and_failure_stop_required')
     if not re.fullmatch(r'[a-f0-9]{64}', str(plan.get('reference_pricing_sha256', ''))):
@@ -142,13 +159,18 @@ def claim(path, plan, mode):
              'requests': 0, 'local_cost_usd': 0, 'inflight': None, 'stopped': False, 'closed': False,
              'source': plan['source'], 'provider_spending_hard_cap': False}
     state['deadline_unix'] = time.time() + plan['limits']['wall_seconds']
+    if mode == 'live' and plan.get('tool_budget') is not None:
+        state['tool_budget'] = validate_tool_budget(plan)
+        state['tool_operations'] = {}
+        state['tools_reserved'] = 0
     with os.fdopen(fd, 'w') as out:
         json.dump(state, out, allow_nan=False)
         out.flush(); os.fsync(out.fileno())
     return state
 
 
-def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated_cost=None, reason=None, observed_ns=None, expected_scope=None):
+def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated_cost=None, reason=None, observed_ns=None, expected_scope=None,
+                  operation=None, calls=None):
     try:
         fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
     except OSError:
@@ -162,7 +184,42 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated
             raise Denied('run_ledger_scope_or_state_mismatch')
         instant = time.time_ns()
         journal = state.setdefault('journal', [])
-        if action == 'admit':
+        if action in {'tool_begin', 'tool_reserve'}:
+            if state['mode'] != 'live' or state['closed'] or state['stopped']:
+                raise Denied('run_stopped_or_previous_send_uncertain')
+            if time.time() >= state['deadline_unix']:
+                raise Denied('approved_wall_time_exhausted')
+            budget = state.get('tool_budget', {})
+            operations = state.get('tool_operations', {})
+            if operation not in budget.get('operations', []):
+                raise Denied('unapproved_tool_operation')
+            if action == 'tool_begin':
+                if operation in operations or state['inflight'] is not None:
+                    raise Denied('tool_operation_already_claimed_or_inflight')
+                operations[operation] = []
+                state['tool_operations'] = operations
+            else:
+                if (operation not in operations or state['inflight'] is None or not isinstance(calls, list)
+                        or not 0 < len(calls) <= 64 or len(set(calls)) != len(calls)
+                        or any(not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value) for value in calls)):
+                    raise Denied('invalid_tool_reservation')
+                if any(value in prior for prior in operations.values() for value in calls):
+                    raise Denied('reused_tool_identity')
+                if (len(operations[operation]) + len(calls) > budget['per_operation']
+                        or state['tools_reserved'] + len(calls) > budget['total']):
+                    # Persist the stop with the rejecting decision; no partial
+                    # reservation and no refund on failure, ACK or cancellation.
+                    state['stopped'] = True
+                    state.setdefault('first_failure', {'reason': 'tool_budget_exhausted', 'observed_at_ns': instant,
+                        'persisted_at_ns': instant, 'requests_at_stop': state['requests'],
+                        'tools_reserved_at_stop': state['tools_reserved']})
+                    journal.append({'action': 'tool_rejected', 'at_ns': instant, 'operation': operation, 'count': len(calls)})
+                else:
+                    operations[operation].extend(calls)
+                    state['tools_reserved'] += len(calls)
+            journal.append({'action': action, 'at_ns': instant, 'operation': operation,
+                            'tools_reserved': state['tools_reserved']})
+        elif action == 'admit':
             if state['mode'] != 'live' or state['closed'] or state['stopped'] or state['inflight'] is not None:
                 raise Denied('run_stopped_or_previous_send_uncertain')
             if time.time() >= state['deadline_unix']:
