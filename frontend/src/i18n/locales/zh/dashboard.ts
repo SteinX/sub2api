@@ -179,7 +179,7 @@ export default {
         fusion: '直接模型与 fusion-* 模型使用同一接入方式。Fusion 需要管理员启用并出现在目录中；切换模型时新建会话，续接时保留原始消息和工具结果。',
         check: '保存配置后新建会话，先测试简短文本，再让客户端读取工作目录内的 probe.txt 并续接。遇到预算或历史冲突时停止重试，检查用量和配置。',
         opencodeInstructions: '将服务和模型设置合并到 opencode.json，然后在项目目录运行 opencode。客户端原有 agent 和审批设置继续生效；需要确认的操作请在交互客户端中审阅。若曾复制 devin-project/devin-check 条目，请自行审阅并移除这些已停用的生成条目。本接入配置不提供文件隔离或整条 shell 命令的精确约束；非交互 run 在需要审批时可能拒绝操作。',
-        omoInstructions: 'OMO 模板固定 oh-my-opencode 5.1.44，不替换原有 agent 或审批设置。Fusion 配置关闭会改写历史用户消息的 category-skill-reminder hook。合并 opencode.json 和 .omo/omo.jsonc 后，在项目目录启动客户端并审阅需要确认的操作。合并前请检查旧模板生成的 devin-project/devin-check 条目。本接入配置不提供文件隔离，也未证明客户端 Worker／Senpi 兼容。',
+        omoInstructions: 'OMO 模板固定 oh-my-opencode 5.1.44，不替换原有 agent 或审批设置。插件选项须放在 [opencode] 区块，请将旧的平铺插件键移入该区块。Fusion 配置关闭会改写历史用户消息的 category-skill-reminder hook。合并 opencode.json 和 .omo/omo.jsonc 后，在项目目录启动客户端并审阅需要确认的操作。合并前请检查旧模板生成的 devin-project/devin-check 条目。本配置不提供文件隔离，也未证明客户端 Worker／Senpi 兼容。',
         ompInstructions: 'OMP 18.12.6：将两个 JSON 格式的 YAML 文件合并到 ~/.omp/agent（Windows 为 %USERPROFILE%\\.omp\\agent），运行 omp 并选择 devin/模型名。必须保留 supersedeReads:false 和 dropUseless:false；默认读取裁剪会导致 Fusion 历史冲突。关闭裁剪会增加历史占用，长会话需单独验证。',
         codexInstructions: 'Codex 使用 Responses 配置；保留 disable_response_storage=true，非 Fusion HTTP 请求不支持 store:true 或 previous_response_id。配置供接入参考，工具和会话行为仍需按客户端版本验证。',
         claudeInstructions: 'Claude Code 使用 Messages 配置，ANTHROPIC_BASE_URL 不含重复的 /v1。配置供接入参考，工具和会话行为仍需按客户端版本验证。',
