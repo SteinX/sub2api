@@ -22,7 +22,7 @@ CONDITIONAL_CHECKS = {'cla-check', 'cla-lock', 'live', 'sync'}
 REQUIRED_CHECKS = {
     ('backend-ci.yml', name) for name in ['shell', 'test', 'frontend', 'golangci-lint', 'release-helpers']
 } | {('security-scan.yml', name) for name in ['backend-security', 'frontend-security']} | {
-    ('devin-e2e.yml', name) for name in ['mock', 'clients-mock', 'user-journeys-mock']
+    ('devin-e2e.yml', name) for name in ['mock', 'clients-mock', 'user-journeys-contracts', 'user-journeys-matrix', 'user-journeys-mock']
 }
 CLIENT_PINS = {'opencode': ('opencode-ai', '1.19.4'), 'omo': ('oh-my-opencode', '5.1.44'),
                'omp': ('@oh-my-pi/pi-coding-agent', '18.12.6')}

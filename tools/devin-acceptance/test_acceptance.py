@@ -103,6 +103,12 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_both_mock_journey_shards_remain_required_with_the_aggregate_context(self):
+        for name in ['user-journeys-contracts','user-journeys-matrix','user-journeys-mock']:
+            report,state=evidence(live=True)
+            state['checks']=[check for check in state['checks'] if check['name']!=name]
+            self.assertIn('required_check_missing:devin-e2e.yml/'+name,gate.validate(report,'user_e2e',COMMIT,TREE,state))
+
     def test_buffered_guard_does_not_certify_unmodified_live_transport(self):
         report,_=evidence(live=True);case=report['cases'][0]
         case['batch_guard'].update(buffered_transport=True,response_observation='bounded_response_buffer')
