@@ -149,14 +149,16 @@ class ProjectTestReceiptTests(unittest.TestCase):
         self.assertEqual('exit_unverified', self.receipts.report()['test_execution']['calls'][1]['receipt_status'])
         self.assertFalse(self.receipts.report()['client_tests_succeeded'])
 
-    def test_actual_nonzero_exit_stops_but_untrusted_receipt_cannot_stop_a_successful_tool(self):
-        for code,output,reason in [(1,'truncated before receipt','test_failed'),(0,'OK',None)]:
+    def test_receipts_remain_diagnostic_for_completed_nonzero_or_successful_tools(self):
+        for code,output in [(1,'truncated before receipt'),(0,'OK')]:
             with self.subTest(code=code):
                 self.event(self.run_tests(),call_id='no-proof-'+str(code),output=output,code=code)
                 tool=self.tracker.calls['no-proof-'+str(code)]
-                self.assertEqual(reason,self.receipts.fatal_reason(tool))
+                self.assertEqual(code,self.receipts.calls[tool['call_sha256']]['client_exit_code'])
+                self.assertIsNone(tool['fatal_reason'])
+                self.assertEqual(code!=0,tool['recoverable_error'])
         self.event(self.run_tests(),call_id='actual-valid')
-        self.assertIsNone(self.receipts.fatal_reason(self.tracker.calls['actual-valid']))
+        self.assertIsNone(self.tracker.calls['actual-valid']['fatal_reason'])
 
     def test_log_reread_is_a_repeated_display_not_a_new_test_or_conflict(self):
         result=self.run_tests()
@@ -185,7 +187,7 @@ class ProjectTestReceiptTests(unittest.TestCase):
         call=self.receipts.report()['test_execution']['calls'][0]
         self.assertEqual(1,call['exit_code'],'untrusted receipt remains diagnostic')
         self.assertIsNone(call['client_exit_code'],'the actual success event omitted an exit code')
-        self.assertIsNone(self.receipts.fatal_reason(self.tracker.calls['synthetic-call']))
+        self.assertIsNone(self.tracker.calls['synthetic-call']['fatal_reason'])
 
     def test_stale_wrong_nonce_changed_protected_source_and_zero_tests_are_rejected(self):
         result = self.run_tests()

@@ -72,11 +72,15 @@ class Control:
     def tool(self, record):
         if not record or record['status'] not in {'completed', 'error'}:
             return
-        if record['status']=='error':
-            self.stop('permission_rejection' if record.get('error_kind')=='client_permission_rejection' else 'tool_error',
-                      record.get('observations', [{}])[-1].get('observed_at_ns'))
+        reason = record.get('fatal_reason')
+        if record.get('error_kind') == 'client_permission_rejection':
+            reason = 'permission_rejection'
+        elif record['status'] == 'error' and record.get('recoverable_error') is not True:
+            reason = reason or 'transport_uncertain'
+        if reason:
+            self.stop(reason, record.get('observations', [{}])[-1].get('observed_at_ns'))
         elif record['call_sha256'] not in self.acknowledged:
-            if not self.send('tool', call_sha256=record['call_sha256'], status='completed'):
+            if not self.send('tool', call_sha256=record['call_sha256'], status=record['status'], failed=record.get('recoverable_error') is True):
                 raise ValueError('batch_stopped')
             self.acknowledged.add(record['call_sha256'])
 

@@ -8,7 +8,7 @@ from project_evidence import ToolEvidence, synthetic_command_hint, tool_error_ca
 
 def event(name, status='completed', inputs=None, call_id='call-1'):
     return {'type': 'tool_use', 'part': {'callID': call_id, 'tool': name,
-            'state': {'status': status, 'input': inputs or {}}}}
+            'state': {'status': status, 'input': inputs or {}, **({'metadata':{'exit':0}} if name=='bash' and status=='completed' else {})}}}
 
 
 class ProjectToolEvidenceTests(unittest.TestCase):
@@ -134,6 +134,34 @@ class ProjectToolEvidenceTests(unittest.TestCase):
         self.assertEqual(['python_module_missing'], diagnostic['output_categories'])
         self.assertTrue(diagnostic['output_classification_truncated'])
         self.assertNotIn('private', json.dumps(tracker.report()))
+
+    def test_completed_nonzero_and_returned_local_error_are_recoverable(self):
+        for name, status, code, detail in [('bash','completed',127,'bash: python: command not found'),
+                                          ('read','error',None,'File not found: synthetic.txt'),
+                                          ('edit','error',None,'oldString not found in content')]:
+            with self.subTest(name=name):
+                tracker=ToolEvidence(self.workspace,'python3 run_tests.py')
+                value=event(name,status)
+                value['part']['state'].update(metadata={'exit':code} if code is not None else {},
+                                             **({'error':detail} if status=='error' else {'output':detail}))
+                tool=tracker.observe(value)
+                self.assertTrue(tool['recoverable_error'])
+                self.assertIsNone(tool['fatal_reason'])
+                self.assertFalse(tracker.failed)
+
+    def test_permissions_timeout_async_and_ambiguous_execution_remain_fatal(self):
+        cases=[({'exit':1},'Permission denied','permission_rejection'),
+               ({'exit':127,'timedOut':True},'command not found','transport_uncertain'),
+               ({'exit':1,'async':True},'failed','transport_uncertain'),
+               ({},'missing exit','transport_uncertain'),
+               ({'exit':1},'request timed out; remote outcome unknown','transport_uncertain')]
+        for metadata,detail,reason in cases:
+            with self.subTest(metadata=metadata):
+                tracker=ToolEvidence(self.workspace,'python3 run_tests.py')
+                value=event('bash');value['part']['state'].update(metadata=metadata,output=detail)
+                tool=tracker.observe(value)
+                self.assertEqual(reason,tool['fatal_reason'])
+                self.assertFalse(tool['recoverable_error']);self.assertTrue(tracker.failed)
 
     def test_changed_or_missing_tool_identity_is_rejected(self):
         self.tracker.observe(event('edit', 'running'))

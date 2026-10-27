@@ -127,6 +127,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	globbed, grepped := false, false
 	requestedCommands := map[string]int{}
 	requestedCallIDs := map[string]bool{}
+	missingReadReturned := false
 	for i, prompt := range request.ChatMessagePrompts {
 		if strings.HasPrefix(testScenario, "bounded_long_") {
 			restoreLongFixtureReads(prompt.Prompt, reads)
@@ -149,6 +150,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 			calls[call.Id] = priorCall{call.Name, path}
 		}
 		call := calls[prompt.ToolCallId]
+		missingReadReturned = missingReadReturned || prompt.ToolCallId != "" && filepath.Base(call.path) == "missing-probe.txt"
 		if prompt.ToolResultIsError && (call.name == "edit" || call.name == "write") {
 			mutationFailed = true
 		}
@@ -210,15 +212,20 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 			}
 		}
 	}
-	if testScenario == "read_error_retry" {
-		// Deliberately request the same missing file on every model call. The
-		// real CLI would retry/continue after the tool error without the fence.
-		for _, tool := range request.Tools {
-			if tool.Name == "read" {
-				call(tool, journeyPathArgs(tool, filepath.Join(workspace, "missing-probe.txt"), map[string]any{}))
-				return
+	if testScenario == "read_error_recover" || testScenario == "read_error_final_failure" {
+		if !missingReadReturned {
+			for _, tool := range request.Tools {
+				if tool.Name == "read" {
+					call(tool, journeyPathArgs(tool, filepath.Join(workspace, "missing-probe.txt"), map[string]any{}))
+					return
+				}
 			}
 		}
+		if testScenario == "read_error_final_failure" {
+			reply.DeltaText = final // Completed ordinary error, but an incorrect final result.
+			return
+		}
+		testScenario = "result_bash" // The model chooses another ordinary method.
 	}
 	for _, tool := range request.Tools {
 		if tool.Name == fusion.DelegateTool {
@@ -255,9 +262,10 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 				}
 			}
 		}
-		// The scripted model could recover on its next turn, but the unchanged
-		// first-error contract must stop before admitting that continuation.
+		// A completed nonzero tool result reaches the model. It chooses another
+		// command and must still produce a correct independently checked result.
 		testScenario = "result_bash"
+		tested = strings.Contains(history.String(), "SUB2API_TEST_RECEIPT_V1:")
 	}
 	if strings.HasPrefix(testScenario, "result_") {
 		logReread := !resume && tested && testScenario == "result_log_reread" && requestedCommands["cat out/test.log"] == 0

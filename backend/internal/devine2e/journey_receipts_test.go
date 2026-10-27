@@ -21,7 +21,7 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 	t.Helper()
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
 	for _, scenario := range []string{"canonical", "whitespace", "after_extra", "after_forbidden", "fake_ok", "failed_tests", "forbidden_equiv", "fusion_failure",
-		"result_bash", "result_history_resume", "result_wrong_artifact", "result_forged_test", "result_stale_test", "result_fusion", "result_log_reread", "shell_exit127", "result_shell_fallback"} {
+		"result_bash", "result_history_resume", "result_wrong_artifact", "result_forged_test", "result_stale_test", "result_fusion", "result_log_reread", "shell_exit127", "read_error_recover", "result_shell_fallback"} {
 		t.Run("test_receipt_"+scenario, func(t *testing.T) {
 			directory := t.TempDir()
 			fixture.journey.mu.Lock()
@@ -89,10 +89,22 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
 			task := report["task"].(map[string]any)
-			if scenario == "canonical" || scenario == "after_extra" || strings.HasPrefix(scenario, "result_") && scenario != "result_wrong_artifact" {
+			if scenario == "canonical" || scenario == "after_extra" || scenario == "shell_exit127" || scenario == "read_error_recover" || strings.HasPrefix(scenario, "result_") && scenario != "result_wrong_artifact" {
 				require.NoError(t, runErr, "permitted actual test executions must be recognized")
 				require.Equal(t, "passed", report["status"])
 				require.Equal(t, true, report["independent_project_tests_passed"])
+				if scenario == "shell_exit127" || scenario == "read_error_recover" {
+					require.Equal(t, float64(1), task["recoverable_tool_errors"])
+					require.Equal(t, true, report["same_client_session"])
+					require.Equal(t, true, report["artifact_verified_before_oracle"])
+					require.Equal(t, false, report["batch_guard"].(map[string]any)["stopped"])
+					forwarded, _ := admission.snapshot()
+					require.Greater(t, forwarded, 1, "the actual CLI delivered failure feedback before a new model decision")
+					if scenario == "shell_exit127" {
+						diagnostic := task["tool_calls"].([]any)[0].(map[string]any)["failure_diagnostic"].(map[string]any)
+						require.Equal(t, float64(127), diagnostic["client_exit_code"])
+					}
+				}
 				if scenario == "result_forged_test" || scenario == "result_stale_test" {
 					require.Equal(t, false, task["client_tests_succeeded"], "untrusted client receipt cannot decide result correctness")
 				} else {
@@ -175,16 +187,6 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 					require.Equal(t, true, call["execution_verified"])
 					require.Equal(t, false, call["passed"])
 					require.Equal(t, float64(1), call["exit_code"])
-				}
-				if scenario == "shell_exit127" {
-					calls := task["tool_calls"].([]any)
-					require.Len(t, calls, 1)
-					diagnostic := calls[0].(map[string]any)["failure_diagnostic"].(map[string]any)
-					require.Equal(t, float64(127), diagnostic["client_exit_code"])
-					require.Equal(t, []any{"env", "python3"}, diagnostic["recognized_program_tokens"])
-					require.Contains(t, diagnostic["output_categories"], "missing_path")
-					forwarded, _ := admission.snapshot()
-					require.Equal(t, 1, forwarded, "current first-error policy blocks the model's otherwise scripted recovery")
 				}
 			}
 		})

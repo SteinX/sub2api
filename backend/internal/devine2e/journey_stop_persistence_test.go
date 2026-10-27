@@ -172,7 +172,7 @@ func (b *fixtureLedgerBudget) ToolReserve(operation string, calls []string) erro
 	return b.toolPolicy("tool_reserve", operation, calls)
 }
 
-func (b *fixtureLedgerBudget) verifyStopped(t *testing.T) map[string]any {
+func (b *fixtureLedgerBudget) verifyStopped(t *testing.T, expectedRequests int) map[string]any {
 	t.Helper()
 	select {
 	case err := <-b.settled:
@@ -187,7 +187,7 @@ func (b *fixtureLedgerBudget) verifyStopped(t *testing.T) map[string]any {
 	require.Equal(t, true, state["stopped"])
 	require.Equal(t, false, state["closed"])
 	require.Nil(t, state["inflight"])
-	require.EqualValues(t, 1, state["requests"])
+	require.EqualValues(t, expectedRequests, state["requests"])
 	require.Greater(t, state["deadline_unix"].(float64), float64(time.Now().UnixNano())/1e9)
 	require.Less(t, state["local_cost_usd"].(float64), float64(1))
 	// A new interpreter attempts admission with unchanged source/plan/ledger.

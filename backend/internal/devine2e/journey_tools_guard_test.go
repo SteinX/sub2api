@@ -127,6 +127,36 @@ func TestJourneyToolLimitTwelveInOneEventAllowedAndACKCannotRefund(t *testing.T)
 	require.Empty(t, data)
 }
 
+func TestJourneyToolLimitCompletedErrorAcknowledgementNeverRefunds(t *testing.T) {
+	f := toolFixture(t, "direct", 12, 12, nil)
+	_, cancel, err := f.acquire(context.Background())
+	require.NoError(t, err)
+	defer cancel()
+	require.True(t, f.admit())
+	wire := toolStream("failed-tool")
+	body := newJourneyToolBody(io.NopCloser(strings.NewReader(wire)), f, true)
+	capture := &journeyResponseBody{ReadCloser: body, tools: body, guard: f, stream: true}
+	_, err = io.ReadAll(capture)
+	require.NoError(t, err)
+	f.finishResponse(&agentRequest{Status: 200, Stream: true, response: capture})
+	e := controlEvent("tool")
+	e.Call, e.Status, e.Failed = callHash("failed-tool"), "error", true
+	require.True(t, f.control(e))
+	require.True(t, f.control(e), "duplicate failure feedback is not a new tool")
+	for i := 1; i < 12; i++ {
+		_, err := deliverToolResponse(t, f, toolStream(fmt.Sprint(i)), true)
+		require.NoError(t, err)
+	}
+	snapshot := f.snapshot()["tool_admission"].(map[string]any)
+	require.Equal(t, 12, snapshot["reserved"])
+	require.Equal(t, 1, snapshot["failed"])
+	require.Equal(t, 11, snapshot["completed"])
+	require.Equal(t, 12, snapshot["terminal_acknowledged"])
+	_, err = deliverToolResponse(t, f, toolStream("over-budget"), true)
+	require.Error(t, err)
+	require.Equal(t, "tool_budget_exhausted", f.snapshot()["first_failure"].(map[string]any)["reason"])
+}
+
 type oneByteReader struct{ io.Reader }
 
 func (r oneByteReader) Read(p []byte) (int, error) {
