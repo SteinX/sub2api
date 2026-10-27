@@ -516,9 +516,17 @@ def main():
                           'client':args.client, 'profile':args.profile, 'tier':tier, 'eligible_for_real_e2e':False,'isolation':isolated}))
         return 0
     dependencies = {}
-    if args.upstream == 'synthetic' and args.client == 'opencode':
+    if args.client in {'opencode', 'omo'}:
         probe = run_project_python(directory, [str(ROOT / 'runtime_dependencies.py')])
-        dependencies = json.loads(probe.stdout) if probe.returncode == 0 else {'available': False}
+        try:
+            dependencies = json.loads(probe.stdout) if probe.returncode == 0 else {'available': False}
+            dependency_ready = dependencies['rg']['runnable'] is True
+        except (ValueError, KeyError, TypeError):
+            dependencies, dependency_ready = {'available': False}, False
+        if not dependency_ready:
+            print(json.dumps({'status': 'failed', 'stage': 'client-runtime-dependency', 'runtime_dependencies': dependencies,
+                              'handoff': handoff, 'client_identity': client_identity, 'tier': tier, 'isolation': isolated}))
+            return 1
     source_before_task = digest(project_bytes(workspace, 'price_math.py'))
     first = invoke(args, directory, protected=protected)
     # Snapshot before executing any oracle: a correct output alone cannot prove

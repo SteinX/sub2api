@@ -58,9 +58,20 @@ def require_available():
             script="import os,pathlib,sys; s=pathlib.Path('/proc/self/status').read_text(); assert '0000000000000000' in next(x for x in s.splitlines() if x.startswith('CapEff:')); assert next(x for x in s.splitlines() if x.startswith('NoNewPrivs:')).split()[-1]=='1'; assert pathlib.Path('allowed').read_text()=='allowed'; assert not pathlib.Path(sys.argv[1]).exists(); assert not pathlib.Path('/var/run/docker.sock').exists(); assert not pathlib.Path('/proc/%s/environ'%sys.argv[2]).exists(); assert not os.access(os.environ.get('HOME','/home/agent'),os.W_OK)"
             result=run(['/usr/bin/python3','-c',script,str(outside),str(os.getpid())],directory,env,timeout=15)
             if result.returncode: raise ValueError('rootless_sandbox_boundary_probe_failed')
+            dependency = run(['/usr/bin/python3', str(ROOT / 'runtime_dependencies.py')], directory, env, timeout=15)
+            try:
+                rg = json.loads(dependency.stdout)['rg']
+                ready = (dependency.returncode == 0 and rg.get('runnable') is True
+                         and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', str(rg.get('version')))
+                         and re.fullmatch(r'[a-f0-9]{64}', str(rg.get('sha256'))))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                ready = False
+            if not ready:
+                raise ValueError('rootless_sandbox_rg_dependency_unavailable')
             _proof={'mode':'networkless_container_fixed_unix_relay','image':IMAGE,'private_pid_namespace':True,
                     'read_only_rootfs':True,'no_new_privileges':True,'capabilities':'none','network':'none',
-                    'private_parent_file_hidden':True,'parent_proc_hidden':True,'docker_socket_absent':True,'personal_home_writable':False}
+                    'private_parent_file_hidden':True,'parent_proc_hidden':True,'docker_socket_absent':True,'personal_home_writable':False,
+                    'rg_dependency':rg}
     except BaseException:
         _available=False
         _proof=None
@@ -180,19 +191,26 @@ def rg_executable_mount():
     path = shutil.which('rg')
     if not path:
         return None
-    executable = Path(path).resolve()
-    if executable.is_relative_to(Path.home()) or executable.is_relative_to(ROOT.parents[1]):
+    try:
+        executable = Path(path).resolve(strict=True)
+        home = Path.home().resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError('sandbox_rg_dependency_unavailable') from None
+    if executable.is_relative_to(home) or executable.is_relative_to(ROOT.parents[1]):
         raise ValueError('sandbox_rg_dependency_outside_public_runtime')
     if executable.is_relative_to('/usr'):
         return None  # Already provided by the existing read-only /usr mount.
     if not executable.is_relative_to('/opt') or executable.name != 'rg':
         raise ValueError('sandbox_rg_dependency_outside_public_runtime')
-    info = executable.stat()
-    if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111 or info.st_mode & 0o022:
-        raise ValueError('sandbox_rg_dependency_not_fixed_executable')
-    with executable.open('rb') as source:
-        if source.read(4) != b'\x7fELF':
-            raise ValueError('sandbox_rg_dependency_not_ELF')
+    try:
+        info = executable.stat()
+        if not stat.S_ISREG(info.st_mode) or not info.st_mode & 0o111 or info.st_mode & 0o022:
+            raise ValueError('sandbox_rg_dependency_not_fixed_executable')
+        with executable.open('rb') as source:
+            if source.read(4) != b'\x7fELF':
+                raise ValueError('sandbox_rg_dependency_not_ELF')
+    except OSError:
+        raise ValueError('sandbox_rg_dependency_unavailable') from None
     return str(executable), str(executable)
 
 
