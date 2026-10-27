@@ -103,7 +103,7 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 	original := api(t, app, "GET", fmt.Sprintf("/keys/%d", originalKeyID), user, nil)
 	api(t, app, "PUT", fmt.Sprintf("/keys/%d", originalKeyID), user, map[string]any{"name": "saved-short-fixture-key"})
 	defer api(t, app, "PUT", fmt.Sprintf("/keys/%d", originalKeyID), user, map[string]any{"name": "e2e-key"})
-	for _, scenario := range []string{"complete", "missing_part", "wrong_fact", "tool_recall"} {
+	for _, scenario := range []string{"complete", "bash", "missing_part", "wrong_fact", "tool_recall"} {
 		// Independent synthetic fixtures, not budget resets of an authorized batch.
 		// The real combined runner always retains ONE key and ONE durable ledger.
 		created := api(t, app, "POST", "/keys", user, map[string]any{"name": "e2e-key", "group_id": original.Get("group_id").Int(), "quota": 1})
@@ -175,13 +175,16 @@ func verifyBoundedLongJourney(t *testing.T, app *application, fixture *nativeFix
 			require.EqualValues(t, 131072, report["dataset_bytes"])
 			require.Equal(t, false, report["compression_claim"])
 			require.Equal(t, "not_claimed", report["compact"])
-			if scenario == "complete" {
+			if scenario == "complete" || scenario == "bash" {
 				require.NoError(t, runErr)
 				require.Equal(t, "passed", report["status"])
 				require.Equal(t, true, report["same_client_session"])
 				require.Equal(t, true, report["client_restarted_verified"])
 				require.Equal(t, true, report["public_context_witness"].(map[string]any)["complete"])
 				require.Equal(t, true, report["fusion_execution"].(map[string]any)["complete"])
+				if scenario == "bash" {
+					require.EqualValues(t, 2, report["task"].(map[string]any)["tools"].(map[string]any)["bash"], "test plus ordinary Bash file output; no Read-count contract")
+				}
 				resumed := report["resume"].(map[string]any)
 				require.Empty(t, resumed["tool_calls"])
 				require.Equal(t, true, resumed["memory_recall"].(map[string]any)["passed"])

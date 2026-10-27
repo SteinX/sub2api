@@ -83,6 +83,7 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 				report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, records, false)
 			}
 			report["batch_guard"] = fence.snapshot()
+			report["client_process_cleanup_verified"] = cleanupErr == nil
 			report["fixture_batch_billing"] = snapshotMockBilling(t, app, fixture, keyID)
 			writeAgentArtifact(t, "journey-test-receipt-"+scenario+".json", report)
 			require.NoError(t, parseErr)
@@ -127,6 +128,10 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 						require.Equal(t, false, report["artifact_verified_before_oracle"])
 					} else {
 						require.Equal(t, true, report["artifact_verified_before_oracle"])
+					}
+					if scenario == "result_forged_test" {
+						receipt := task["test_execution"].(map[string]any)["calls"].([]any)[0].(map[string]any)
+						require.Equal(t, "file_unavailable", receipt["receipt_status"], "a fabricated output reference must reach the real receipt validator")
 					}
 				}
 				if scenario == "fusion_failure" {

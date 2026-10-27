@@ -170,6 +170,11 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		case "grep":
 			grepped = true
 		}
+		if strings.HasPrefix(testScenario, "bounded_long_") {
+			for _, fact := range longFactPattern.FindAllStringSubmatch(prompt.Prompt, -1) {
+				reads[fact[1]+".txt"] = max(reads[fact[1]+".txt"], 1)
+			}
+		}
 	}
 	call := func(tool *pb.ChatToolDefinition, args map[string]any) {
 		args["i"] = "Complete the requested synthetic project task"
@@ -256,7 +261,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 				command += ` && python3 -c "from pathlib import Path; p=Path('price_math.py'); p.write_text(p.read_text()+'\\n# changed after tests\\n')"`
 			case "result_forged_test":
 				command = strings.Replace(command, "python3 -u run_tests.py", `python3 -c "from price_math import report; report()"`, 1)
-				command += ` && printf '%s\n' 'SUB2API_TEST_RECEIPT_V1:{"run_id":"ffffffffffffffffffffffffffffffff","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}'`
+				command += ` && printf '\n%s\n' 'SUB2API_TEST_RECEIPT_V1:{"run_id":"ffffffffffffffffffffffffffffffff","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}'`
 			}
 		}
 		for _, tool := range request.Tools {
@@ -285,6 +290,13 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		}
 		if path != "" {
 			for _, tool := range request.Tools {
+				if testScenario == "bounded_long_bash" && path == "context/part07.txt" {
+					if tool.Name == "bash" {
+						call(tool, map[string]any{"command": "cat context/part07.txt", "workdir": workspace, "description": "Inspect the last synthetic input"})
+						return
+					}
+					continue
+				}
 				if tool.Name == "read" {
 					call(tool, journeyPathArgs(tool, filepath.Join(workspace, path), map[string]any{}))
 					return
@@ -466,10 +478,11 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 
 // Values come only from actual forwarded model history/tool results, never
 // from opening project files or an oracle injecting the expected answer.
+var longFactPattern = regexp.MustCompile(`\b(part0[0-7])\b[\s"']*[:=][\s"']*([a-f0-9]{32})\b`)
+
 func longRecallText(history, scenario string) string {
 	facts := map[string]string{}
-	pattern := regexp.MustCompile(`\b(part0[0-7])\b[\s"']*[:=][\s"']*([a-f0-9]{32})\b`)
-	for _, match := range pattern.FindAllStringSubmatch(history, -1) {
+	for _, match := range longFactPattern.FindAllStringSubmatch(history, -1) {
 		facts[match[1]] = match[2]
 	}
 	if scenario == "bounded_long_wrong_fact" {
