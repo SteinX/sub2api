@@ -48,6 +48,19 @@ describe('Devin user configuration handoff', () => {
     wrapper.unmount()
   })
 
+  it('uses the pinned plugin option to keep Fusion history intact without replacing native agents', async () => {
+    const wrapper = modal()
+    await flushPromises()
+    await wrapper.get('button[data-client="omo"]').trigger('click')
+    const configs = () => wrapper.findAll('pre code').map(node => JSON.parse(node.text()))
+    expect(configs()[1]).not.toHaveProperty('disabled_hooks')
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('fusion-granted-pair')
+    expect(configs()[1].disabled_hooks).toEqual(['category-skill-reminder'])
+    expect(configs()[0]).not.toHaveProperty('agent')
+    expect(configs()[0]).not.toHaveProperty('permission')
+    wrapper.unmount()
+  })
+
   it('refuses the known incompatible OMP default Fusion configuration without silently switching profiles', async () => {
     const wrapper = modal()
     await flushPromises()

@@ -87,14 +87,19 @@ def cleanup_processes(path):
         return False
 
 
-def cleanup(path,container_registry=None):
+def cleanup(path,container_registry=None,diagnostics=None):
     from container_sandbox import cleanup_registry
     # Container cleanup still runs when a killed controller has left an invalid
     # process record. Docker client exit alone is never proof of termination.
     process_ok=cleanup_processes(path)
     container_ok=cleanup_registry(container_registry or os.environ.get('DEVIN_JOURNEY_CONTAINER_REGISTRY'))
+    if diagnostics is not None:
+        diagnostics.update(schema_version=1,process_cleanup_verified=process_ok,container_cleanup_verified=container_ok)
     return process_ok and container_ok
 
 
 if __name__=='__main__':
-    raise SystemExit(0 if len(sys.argv)==2 and cleanup(sys.argv[1]) else 2)
+    evidence={}
+    verified=len(sys.argv)==2 and cleanup(sys.argv[1],diagnostics=evidence)
+    print(json.dumps(evidence,sort_keys=True))  # Fixed booleans only; no IDs, paths or raw errors.
+    raise SystemExit(0 if verified else 2)

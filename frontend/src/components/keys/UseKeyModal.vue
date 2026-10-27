@@ -916,7 +916,14 @@ const currentFiles = computed((): FileConfig[] => {
           }), null, 2)
         }, ...(activeClientTab.value === 'omo' ? [{
           path: '.omo/omo.jsonc',
-          content: JSON.stringify({ model_fallback: false, runtime_fallback: false, disabled_mcps: ['websearch', 'context7', 'grep_app'] }, null, 2),
+          content: JSON.stringify({
+            model_fallback: false, runtime_fallback: false,
+            disabled_mcps: ['websearch', 'context7', 'grep_app'],
+            // This native hook inserts text into an earlier user message after
+            // three tools. Fusion requires the prior transcript to stay intact.
+            ...(devinSelectedModel.value.toLowerCase().startsWith('fusion-')
+              ? { disabled_hooks: ['category-skill-reminder'] } : {})
+          }, null, 2),
           hint: t('keys.useKeyModal.devin.mergeConfig')
         }] : [])]
       default:

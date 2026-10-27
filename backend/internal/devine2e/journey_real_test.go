@@ -304,7 +304,19 @@ func cleanupJourneyProcessesAt(processRegistry, containerRegistry string) error 
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "python3", path, processRegistry)
 	cmd.Env = append(os.Environ(), "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
-	return cmd.Run()
+	output, runErr := cmd.Output()
+	var proof struct {
+		Schema    int  `json:"schema_version"`
+		Process   bool `json:"process_cleanup_verified"`
+		Container bool `json:"container_cleanup_verified"`
+	}
+	if json.Unmarshal(output, &proof) != nil || proof.Schema != 1 {
+		return fmt.Errorf("cleanup diagnostic unavailable (exit_ok=%t)", runErr == nil)
+	}
+	if runErr != nil || !proof.Process || !proof.Container {
+		return fmt.Errorf("child cleanup unverified (process=%t containers=%t exit_ok=%t)", proof.Process, proof.Container, runErr == nil)
+	}
+	return nil
 }
 
 func journeyRegistryEnvironment(t *testing.T, app *application) (string, string) {

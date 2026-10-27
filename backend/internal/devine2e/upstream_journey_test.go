@@ -76,6 +76,12 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	// believe even a large tool history is empty. Use a stated synthetic estimate
 	// that grows with the actual forwarded context; never treat it as real usage.
 	reply.Usage.InputTokens = uint64(1 + history.Len()/4)
+	if strings.HasPrefix(testScenario, "bounded_long_") {
+		if summary, ok := boundedLongFixtureSummary(request); ok {
+			reply.DeltaText = summary
+			return
+		}
+	}
 	checkpointNonce := regexp.MustCompile(`CONTEXT_NONCE=([a-f0-9]{24})`).FindStringSubmatch(history.String())
 	if len(request.Tools) == 0 && len(checkpointNonce) == 2 {
 		reply.DeltaText = "Project checkpoint: CONTEXT_NONCE=" + checkpointNonce[1] + "; verified subtotal minus discount, tests passed, report at out/report.json."
@@ -122,6 +128,9 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	requestedCommands := map[string]int{}
 	requestedCallIDs := map[string]bool{}
 	for i, prompt := range request.ChatMessagePrompts {
+		if strings.HasPrefix(testScenario, "bounded_long_") {
+			restoreLongFixtureReads(prompt.Prompt, reads)
+		}
 		for _, call := range prompt.ToolCalls {
 			var args map[string]any
 			_ = json.Unmarshal([]byte(call.ArgumentsJson), &args)
