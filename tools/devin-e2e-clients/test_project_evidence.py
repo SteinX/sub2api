@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from project_evidence import ToolEvidence, tool_error_categories
+from project_evidence import ToolEvidence, synthetic_command_hint, tool_error_categories
 
 
 def event(name, status='completed', inputs=None, call_id='call-1'):
@@ -89,6 +89,51 @@ class ProjectToolEvidenceTests(unittest.TestCase):
         self.assertNotIn('synthetic-secret', json.dumps(self.tracker.report()))
         self.assertEqual(['unclassified'], tool_error_categories('opaque synthetic-secret'))
         self.assertEqual(['unavailable'], tool_error_categories(None))
+
+    def test_synthetic_failure_hint_is_opt_in_and_never_copies_values_or_paths(self):
+        command = "python -m pytest --token 'ghp_synthetic_private_token' /home/private/project.py"
+        value = event('bash', inputs={'command': command})
+        value['part']['state'].update(metadata={'exit': 127}, output='bash: python: command not found\nprivate output')
+        self.tracker.observe(value)
+        self.assertNotIn('failure_diagnostic', self.tracker.report()['tool_calls'][0])
+        tracker = ToolEvidence(self.workspace, 'python3 run_tests.py', synthetic_failure_diagnostics=True)
+        tracker.observe(value)
+        diagnostic = tracker.report()['tool_calls'][0]['failure_diagnostic']
+        self.assertEqual(['python', 'pytest'], diagnostic['recognized_program_tokens'])
+        self.assertEqual(['command_not_found'], diagnostic['output_categories'])
+        self.assertEqual(127, diagnostic['client_exit_code'])
+        self.assertEqual('client_combined_tool_output', diagnostic['output_source'])
+        self.assertFalse(diagnostic['raw_command_or_output_retained'])
+        encoded = json.dumps(tracker.report())
+        for private in ['ghp_synthetic_private_token', '/home/private', 'project.py', 'private output', '--token']:
+            self.assertNotIn(private, encoded)
+
+    def test_failure_preview_is_bounded_and_does_not_reveal_unknown_programs(self):
+        for command in ['private_program ' + 'private-value ' * 10000, "python 'unterminated-private-value"]:
+            hint = synthetic_command_hint(command)
+            self.assertLessEqual(len(hint['command_preview']), 240)
+            self.assertNotIn('private', json.dumps(hint))
+        hint = synthetic_command_hint('/private/path/python3 run_tests.py || python -m pytest')
+        self.assertEqual('<path>/python3 run_tests.py || python -m pytest', hint['command_preview'])
+        self.assertEqual(['python3', 'python', 'pytest'], hint['recognized_program_tokens'])
+
+    def test_successful_shell_fallback_is_not_classified_as_a_failed_tool(self):
+        tracker = ToolEvidence(self.workspace, 'python3 run_tests.py', synthetic_failure_diagnostics=True)
+        value = event('bash', inputs={'command': 'python run_tests.py || python3 run_tests.py'})
+        value['part']['state'].update(metadata={'exit': 0}, output='bash: python: command not found\nOK')
+        tracker.observe(value)
+        self.assertNotIn('failure_diagnostic', tracker.report()['tool_calls'][0])
+
+    def test_omp_start_end_join_failure_hint_and_keep_only_output_categories(self):
+        tracker = ToolEvidence(self.workspace, 'python3 run_tests.py', synthetic_failure_diagnostics=True)
+        tracker.observe({'type': 'tool_execution_start', 'toolCallId': 'omp-private', 'toolName': 'bash',
+                         'args': {'command': 'python3 -m private_module'}})
+        tracker.observe({'type': 'tool_execution_end', 'toolCallId': 'omp-private', 'toolName': 'bash', 'isError': True,
+                         'result': {'details': {'exitCode': 1}, 'content': [{'text': 'No module named private_module\n' + 'private-output' * 2000}]}})
+        diagnostic = tracker.report()['tool_calls'][0]['failure_diagnostic']
+        self.assertEqual(['python_module_missing'], diagnostic['output_categories'])
+        self.assertTrue(diagnostic['output_classification_truncated'])
+        self.assertNotIn('private', json.dumps(tracker.report()))
 
     def test_changed_or_missing_tool_identity_is_rejected(self):
         self.tracker.observe(event('edit', 'running'))

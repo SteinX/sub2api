@@ -21,7 +21,7 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 	t.Helper()
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
 	for _, scenario := range []string{"canonical", "whitespace", "after_extra", "after_forbidden", "fake_ok", "failed_tests", "forbidden_equiv", "fusion_failure",
-		"result_bash", "result_history_resume", "result_wrong_artifact", "result_forged_test", "result_stale_test", "result_fusion", "result_log_reread"} {
+		"result_bash", "result_history_resume", "result_wrong_artifact", "result_forged_test", "result_stale_test", "result_fusion", "result_log_reread", "shell_exit127", "result_shell_fallback"} {
 		t.Run("test_receipt_"+scenario, func(t *testing.T) {
 			directory := t.TempDir()
 			fixture.journey.mu.Lock()
@@ -117,6 +117,11 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 						require.Equal(t, "repeated_display", calls[1].(map[string]any)["receipt_status"])
 						require.Equal(t, false, diagnostics["conflicting_evidence"])
 					}
+					if scenario == "result_shell_fallback" {
+						for _, value := range task["tool_calls"].([]any) {
+							require.NotContains(t, value.(map[string]any), "failure_diagnostic", "a successful shell fallback is a successful tool, even if its output mentions a missing program")
+						}
+					}
 					if scenario == "result_forged_test" {
 						receipt := task["test_execution"].(map[string]any)["calls"].([]any)[0].(map[string]any)
 						require.Equal(t, "file_unavailable", receipt["receipt_status"])
@@ -170,6 +175,16 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 					require.Equal(t, true, call["execution_verified"])
 					require.Equal(t, false, call["passed"])
 					require.Equal(t, float64(1), call["exit_code"])
+				}
+				if scenario == "shell_exit127" {
+					calls := task["tool_calls"].([]any)
+					require.Len(t, calls, 1)
+					diagnostic := calls[0].(map[string]any)["failure_diagnostic"].(map[string]any)
+					require.Equal(t, float64(127), diagnostic["client_exit_code"])
+					require.Equal(t, []any{"env", "python3"}, diagnostic["recognized_program_tokens"])
+					require.Contains(t, diagnostic["output_categories"], "missing_path")
+					forwarded, _ := admission.snapshot()
+					require.Equal(t, 1, forwarded, "current first-error policy blocks the model's otherwise scripted recovery")
 				}
 			}
 		})
