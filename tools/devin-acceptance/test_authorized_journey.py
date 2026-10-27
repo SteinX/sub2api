@@ -84,12 +84,35 @@ class ApprovedRunnerBoundaryTests(unittest.TestCase):
                 self.assertEqual(2,code); self.assertFalse(result['executed'])
 
     def test_same_approval_cannot_select_a_fresh_ledger_path(self):
-        plan,approval,source,env=proposal()
+        for calls in (16,32):
+            plan,approval,source,env=proposal()
+            plan['limits']['internal_calls_per_turn']=calls
+            approval['plan_sha256']=runner.digest(plan)
+            with self.subTest(calls=calls), patch.object(sys,'argv',['runner','run','--mode','live','--ledger','/tmp/different-ledger','--validate-only']), patch.object(runner,'checked',return_value=(plan,{'approval_id':approval['approval_id']})), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(2,runner.main())
+            self.assertEqual('approval_ledger_path_mismatch',json.loads(output.getvalue())['reason'])
+
+    def test_internal_call_changes_are_validated_before_any_execution(self):
         import datetime as dt
-        approval['expires_at']=(dt.datetime.now(dt.timezone.utc)+dt.timedelta(minutes=20)).isoformat()
-        with patch.object(sys,'argv',['runner','run','--mode','live','--ledger','/tmp/different-ledger','--validate-only']), patch.object(runner,'checked',return_value=(plan,{'approval_id':approval['approval_id']})), contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(2,runner.main())
-        self.assertEqual('approval_ledger_path_mismatch',json.loads(output.getvalue())['reason'])
+        for calls,update_hash,expected in [(32,False,'approved_plan_changed'),(33,True,'invalid_internal_calls_per_turn_limit')]:
+            plan,approval,source,env=proposal()
+            approval['expires_at']=(dt.datetime.now(dt.timezone.utc)+dt.timedelta(minutes=20)).isoformat()
+            plan['limits']['internal_calls_per_turn']=calls
+            if update_hash: approval['plan_sha256']=runner.digest(plan)
+            with self.subTest(calls=calls,update_hash=update_hash):
+                code,result=self.invoke(plan,approval,source,env)
+                self.assertEqual(2,code);self.assertEqual(expected,result['reason'])
+
+    def test_explicit_32_validation_only_never_claims_or_executes(self):
+        import datetime as dt
+        plan,approval,source,env=proposal()
+        plan['limits']['internal_calls_per_turn']=32
+        approval.update(plan_sha256=runner.digest(plan),expires_at=(dt.datetime.now(dt.timezone.utc)+dt.timedelta(minutes=20)).isoformat())
+        with patch.object(sys,'argv',['runner','run','--mode','live','--plan','synthetic-plan','--approval','synthetic-approval','--validate-only']), patch.dict(os.environ,env,clear=True), patch.object(runner,'read_json',side_effect=[approval,plan]), patch.object(runner,'current_source',return_value=source), patch.object(runner,'claim') as claim, patch.object(runner,'run') as execute, patch.object(runner.subprocess,'Popen') as spawn, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(0,runner.main())
+            claim.assert_not_called();execute.assert_not_called();spawn.assert_not_called()
+        result=json.loads(output.getvalue())
+        self.assertEqual({'authorized':True,'executed':False,'plan_sha256':runner.digest(plan)},result)
 
 
 if __name__=='__main__':
