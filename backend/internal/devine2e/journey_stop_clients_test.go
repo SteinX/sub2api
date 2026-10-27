@@ -24,7 +24,8 @@ func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nat
 			fixture.journey.workspace = filepath.Join(directory, "workspace")
 			fixture.journey.testScenario = "read_error_retry"
 			fixture.journey.mu.Unlock()
-			fence := newJourneyFence(app, nil)
+			budget := newFixtureLedgerBudget(t, &authorizedJourneyBudget{db: agentDatabase(t, app), keyID: keyID})
+			fence := newJourneyFence(app, budget)
 			t.Cleanup(func() {
 				fixture.journey.mu.Lock()
 				fixture.journey.testScenario = ""
@@ -33,6 +34,7 @@ func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nat
 				app.start(t)
 			})
 			admission := newJourneyAdmission(t, app, fixtureModel, 12)
+			admission.runBudget = budget
 			ui := journeyUIServer(t, app.base, admission.server.URL)
 			script, err := filepath.Abs("../../../tools/devin-e2e-clients/journey.py")
 			require.NoError(t, err)
@@ -62,7 +64,8 @@ func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nat
 			nativeCalls := len(fixture.chats) - before
 			fixture.mu.Unlock()
 			report["public_requests"], report["observed_native_calls"] = forwarded, nativeCalls
-			writeAgentArtifact(t, "journey-first-error-"+client+".json", report)
+			defer func() { writeAgentArtifact(t, "journey-first-error-"+client+".json", report) }()
+			report["durable_stop"] = budget.verifyStopped(t)
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
 			require.Error(t, runErr)
@@ -74,6 +77,7 @@ func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nat
 			require.Equal(t, true, guard["stopped"])
 			require.Equal(t, true, guard["owned_backend_death_verified"])
 			require.Equal(t, "tool_error", guard["first_failure"].(map[string]any)["reason"])
+			require.Equal(t, true, guard["first_failure"].(map[string]any)["stop_persistence_verified"])
 		})
 	}
 }

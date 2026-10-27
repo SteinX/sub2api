@@ -104,9 +104,13 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 			var source *journeyResponseBody
 			var sourceErr error
 			if p.fence != nil {
-				// Read the original body, including errors, outside the record
-				// mutex. Never mistake an earlier truncated replay for source EOF.
-				source, sourceErr = preloadJourneyResponse(response.Body)
+				if response.StatusCode >= 400 {
+					// Error JSON is bounded separately and can never pass admission.
+					source, sourceErr = preloadJourneyResponse(response.Body)
+				} else {
+					// Observe while ReverseProxy flushes original chunks immediately.
+					source = &journeyResponseBody{ReadCloser: response.Body, guard: p.fence, stream: record.Stream}
+				}
 			}
 			p.mu.Lock()
 			record.Status = response.StatusCode
@@ -225,6 +229,7 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 			}
 		}
 		if p.fence != nil {
+			downstream := r.Context()
 			ctx, cancel, err := p.fence.acquire(r.Context())
 			if err != nil {
 				http.Error(w, "shared batch admission stopped", 402)
@@ -232,6 +237,22 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 			}
 			defer cancel()
 			r = r.WithContext(ctx)
+			finished := make(chan struct{})
+			defer close(finished)
+			go func() {
+				select {
+				case <-finished:
+				case <-downstream.Done():
+					p.mu.Lock()
+					source := record.response
+					p.mu.Unlock()
+					if source == nil || source.guard == nil {
+						p.fence.stop("transport_uncertain", time.Now().UnixNano())
+						return
+					}
+					source.downstreamClosed()
+				}
+			}()
 			defer p.fence.finishResponse(record)
 		}
 		// A request may have passed the earlier check before another request
