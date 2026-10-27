@@ -37,6 +37,7 @@ type journeyToolGate struct {
 	operations      map[string]int
 	calls           map[string]bool
 	completed       map[string]bool
+	failed          map[string]bool
 	reserved        int
 }
 
@@ -63,7 +64,7 @@ func (f *journeyFence) installToolLimits(limits journeyToolLimits) error {
 			return errors.New("invalid no-tool operation scope")
 		}
 	}
-	f.tools = &journeyToolGate{limits: limits, operations: map[string]int{}, calls: map[string]bool{}, completed: map[string]bool{}}
+	f.tools = &journeyToolGate{limits: limits, operations: map[string]int{}, calls: map[string]bool{}, completed: map[string]bool{}, failed: map[string]bool{}}
 	return nil
 }
 
@@ -206,7 +207,7 @@ func (f *journeyFence) toolSnapshotLocked() map[string]any {
 		operations[name] = count
 	}
 	return map[string]any{"installed": true, "per_operation": g.limits.PerOperation, "batch_max": g.limits.Total,
-		"reserved": g.reserved, "completed": len(g.completed), "operations": operations, "scope": "fixed trusted task/resume slots, never public session IDs",
+		"reserved": g.reserved, "completed": len(g.completed) - len(g.failed), "failed": len(g.failed), "terminal_acknowledged": len(g.completed), "operations": operations, "scope": "fixed trusted task/resume slots, never public session IDs",
 		"no_tools_operations": append([]string(nil), g.limits.NoToolsOperations...),
 		"delivery":            "complete SSE event inspected before forwarding; JSON bounded before forwarding",
 		"refunds":             false, "handoffs_direct": "not_applicable", "handoffs_fusion": "separate engine limit; not public tools"}

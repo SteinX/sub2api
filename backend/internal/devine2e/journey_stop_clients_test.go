@@ -15,14 +15,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nativeFixture, key, password string, keyID int64) {
+func verifyProjectFinalFailureClients(t *testing.T, app *application, fixture *nativeFixture, key, password string, keyID int64) {
 	t.Helper()
 	for _, client := range []string{"opencode", "omo", "omp"} {
-		t.Run("first_tool_error_"+client, func(t *testing.T) {
+		t.Run("final_failure_"+client, func(t *testing.T) {
 			directory := t.TempDir()
 			fixture.journey.mu.Lock()
 			fixture.journey.workspace = filepath.Join(directory, "workspace")
-			fixture.journey.testScenario = "read_error_retry"
+			fixture.journey.testScenario = "read_error_final_failure"
 			fixture.journey.mu.Unlock()
 			budget := newFixtureLedgerBudget(t, &authorizedJourneyBudget{db: agentDatabase(t, app), keyID: keyID})
 			fence := newJourneyFence(app, budget)
@@ -71,12 +71,16 @@ func verifyProjectFirstErrorClients(t *testing.T, app *application, fixture *nat
 			require.Error(t, runErr)
 			require.Equal(t, "failed", report["status"])
 			require.Nil(t, report["resume"])
-			require.Equal(t, 1, forwarded, "a tool-error retry or auto compact must not reach the gateway")
-			require.Equal(t, 1, nativeCalls)
+			require.Equal(t, 2, forwarded, "completed tool error reaches the model; incorrect final result stops the batch")
+			require.Equal(t, 2, nativeCalls)
+			task := report["task"].(map[string]any)
+			require.Equal(t, true, task["normal_stop"])
+			require.Equal(t, false, task["event_error"])
+			require.Equal(t, float64(1), task["recoverable_tool_errors"])
 			guard := fence.snapshot()
 			require.Equal(t, true, guard["stopped"])
 			require.Equal(t, true, guard["owned_backend_death_verified"])
-			require.Equal(t, "tool_error", guard["first_failure"].(map[string]any)["reason"])
+			require.Equal(t, "source_or_oracle_failure", guard["first_failure"].(map[string]any)["reason"])
 			require.Equal(t, true, guard["first_failure"].(map[string]any)["stop_persistence_verified"])
 		})
 	}

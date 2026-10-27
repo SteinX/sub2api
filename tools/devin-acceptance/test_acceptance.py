@@ -103,6 +103,18 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_returned_ordinary_error_does_not_veto_correct_final_result(self):
+        report,state=evidence(live=True);case=report['cases'][0];result=case['task']
+        call={'name':'read','call_sha256':'9'*64,'status':'error','states':['running','error'],
+              'source_targeted':False,'recoverable_error':True,'fatal_reason':None}
+        result['tool_calls'].append(call);result['tool_states']['read']['error']=1;result['tool_events']['read']['error']=1
+        self.assertEqual([],gate.validate(report,'user_e2e',COMMIT,TREE,state))
+        for change in [{'recoverable_error':False},{'fatal_reason':'transport_uncertain'},{'fatal_reason':'permission_rejection'}]:
+            original=dict(call);call.update(change)
+            self.assertTrue(gate.validate(report,'user_e2e',COMMIT,TREE,state));call.clear();call.update(original)
+        case['artifact_verified_before_oracle']=False
+        self.assertTrue(gate.validate(report,'user_e2e',COMMIT,TREE,state))
+
     def test_both_mock_journey_shards_remain_required_with_the_aggregate_context(self):
         for name in ['user-journeys-contracts','user-journeys-matrix','user-journeys-mock']:
             report,state=evidence(live=True)

@@ -131,6 +131,23 @@ func TestJourneyStopUnmatchedEarlyAckCannotReleaseWaitingRequest(t *testing.T) {
 	require.Equal(t, true, f.snapshot()["stopped"])
 }
 
+func TestJourneyStopErrorFeedbackCannotCertifyAnUnknownSend(t *testing.T) {
+	f := newJourneyFence(nil, nil)
+	require.True(t, f.control(controlEvent("begin")))
+	_, cancel, err := f.acquire(context.Background())
+	require.NoError(t, err)
+	defer cancel()
+	require.True(t, f.admit())
+	e := controlEvent("tool")
+	e.Call, e.Status, e.Failed = callHash("early-error"), "error", true
+	require.True(t, f.control(e))
+	f.finishResponse(&agentRequest{Status: 200, response: &journeyResponseBody{eof: false, data: []byte(`{"choices":[{"message":{"tool_calls":[{"id":"early-error"}]},"finish_reason":"tool_calls"}]}`)}})
+	_, _, err = f.acquire(context.Background())
+	require.Error(t, err)
+	require.Equal(t, "transport_uncertain", f.snapshot()["first_failure"].(map[string]any)["reason"])
+	require.Equal(t, 1, f.snapshot()["public_admitted"])
+}
+
 func TestJourneyStopCancelsExistingInflightAndDoesNotResend(t *testing.T) {
 	entered, cancelled := make(chan struct{}), make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -71,7 +71,8 @@ func verifyProjectMutationNegatives(t *testing.T, app *application, fixture *nat
 				require.Equal(t, false, report["independent_project_test_passed"])
 				require.Equal(t, true, task["final_text_matches"], "marker alone cannot prove the project was completed")
 			} else if mutation == "failed_edit" {
-				require.Equal(t, true, task["event_error"])
+				require.Equal(t, false, task["event_error"], "completed ordinary edit error is feedback; wrong final project still fails")
+				require.Equal(t, true, task["normal_stop"])
 				states := task["tool_states"].(map[string]any)
 				require.Equal(t, float64(1), states["edit"].(map[string]any)["error"])
 			} else {

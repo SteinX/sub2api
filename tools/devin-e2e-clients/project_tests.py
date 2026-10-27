@@ -258,14 +258,6 @@ class TestReceipts:
             return 'exit_unverified'
         return 'verified'
 
-    def fatal_reason(self, tool):
-        if not tool or tool['name'] != 'bash' or tool['status'] != 'completed':
-            return None
-        record=self.calls.get(tool['call_sha256'],{})
-        if record.get('client_exit_code') is not None and record['client_exit_code'] != 0:
-            return 'test_failed'
-        return None
-
     def report(self):
         calls = [{key: value for key, value in record.items() if not key.startswith('_')} for record in self.calls.values()]
         candidates = [record for record in calls if record.get('test_runner_candidate')]

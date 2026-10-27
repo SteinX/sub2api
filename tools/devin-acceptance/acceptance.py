@@ -61,35 +61,39 @@ def valid_tool_evidence(result):
             if (not isinstance(name, str) or not TOOL_NAME.fullmatch(name) or not isinstance(counts, dict) or not counts
                     or any(status not in {'pending', 'running', 'completed', 'error'} or type(count) is not int or count < 0 for status, count in counts.items())):
                 return False
-            if counts.get('error', 0):
-                return False
-    if set(states) != set(events) or set(states) != {name for name, count in tools.items() if count}:
+    if set(states) != set(events):
         return False
     calls = result.get('tool_calls')
     if (not isinstance(calls, list) or any(not isinstance(call, dict) or not HEX64.fullmatch(str(call.get('call_sha256', ''))) for call in calls)
             or len({call['call_sha256'] for call in calls}) != len(calls)):
         return False
-    completed = Counter()
+    completed, failed = Counter(), Counter()
     mutations = Counter()
     for call in calls:
         if (not HEX64.fullmatch(str(call.get('call_sha256', ''))) or call.get('name') not in tools
-                or call.get('status') != 'completed' or not isinstance(call.get('states'), list) or not call['states']
-                or call['states'][-1] != 'completed' or any(status not in {'pending', 'running', 'completed'} for status in call['states'])):
+                or call.get('status') not in {'completed','error'} or not isinstance(call.get('states'), list) or not call['states']
+                or call['states'][-1] != call['status'] or any(status not in {'pending', 'running', 'completed','error'} for status in call['states'])
+                or call.get('fatal_reason') is not None
+                or (call['status']=='error' or type(call.get('client_exit_code')) is int and call['client_exit_code'] != 0)
+                   and call.get('recoverable_error') is not True):
             return False
-        completed[call['name']] += 1
+        (failed if call['status']=='error' else completed)[call['name']] += 1
         if type(call.get('source_targeted')) is not bool:
             return False
-        if call['source_targeted']:
+        if call['source_targeted'] and call['status']=='completed':
             if call['name'] not in FILE_MUTATORS:
                 return False
             mutations[call['name']] += 1
     mutation_stats = result.get('source_mutation_tools')
-    return (all(completed[name] == count for name, count in tools.items())
+    return (set(states)=={call['name'] for call in calls}
+            and all(completed[name] == count for name, count in tools.items())
             and isinstance(mutation_stats, dict)
             and all(name in FILE_MUTATORS and type(count) is int and count > 0 for name, count in mutation_stats.items())
             and dict(mutations) == mutation_stats
-            and all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
-                    and events[name].get('completed', 0) >= tools[name] for name, counts in states.items()))
+            and all(counts.get('completed', 0) == tools[name] and counts.get('error',0)==failed[name]
+                    and not counts.get('pending', 0) and not counts.get('running', 0)
+                    and events[name].get('completed', 0) >= tools[name] and events[name].get('error',0)>=failed[name]
+                    for name, counts in states.items()))
 
 
 def valid_fusion_audit(case):

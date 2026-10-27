@@ -55,15 +55,42 @@ def tool_error_categories(detail):
     patterns = {
         'ripgrep_error': r'ripgrep',
         'missing_path': r'\benoent\b|no such file|executable (?:file )?not found',
-        'access_denied': r'\beacces\b|\beperm\b|permission denied',
+        'access_denied': r'\beacces\b|\beperm\b|permission denied|operation not permitted',
         'read_only_filesystem': r'\berofs\b|read.only file system',
         'network_error': r'\benotfound\b|network is unreachable|fetch failed|tunnel connection failed',
         'invalid_arguments': r'invalid arguments|invalid input|schema validation',
         'command_not_found': r'command not found|(?:^|\n)[^\n]{0,160}:\s*not found\b',
         'python_module_missing': r'\bmodulenotfounderror\b|no module named',
         'shell_syntax_error': r'syntax error|unexpected token',
+        'execution_uncertain': r'\betimedout\b|\beconnreset\b|timed out|timeout expired|connection reset|socket hang up|broken pipe|\baborted\b|\bcancell?ed\b|still running',
     }
     return [name for name, pattern in patterns.items() if re.search(pattern, detail, re.I)] or ['unclassified']
+
+
+def tool_failure(record, event):
+    """Return completed ordinary failures as feedback; uncertainty stays fatal.
+
+    This does not retry a command or establish arbitrary external side effects.
+    Public model sends retain their separate transport/accounting guards.
+    """
+    if record['status'] not in {'completed', 'error'}:
+        return {}
+    state = event.get('part', {}).get('state', {})
+    detail = state.get('error')
+    detail = detail if isinstance(detail, str) else output_text(event)
+    categories = tool_error_categories(detail)
+    metadata = state.get('metadata', {}) if event.get('type') == 'tool_use' else event.get('result', {}).get('details', {})
+    code, _, blocked = terminal_details(event) if record['name'] == 'bash' else (None, '', False)
+    failure = record['status'] == 'error' or code is not None and code != 0
+    reason = None
+    if record.get('error_kind') == 'client_permission_rejection' or failure and ('access_denied' in categories or code == 126):
+        reason = 'permission_rejection'
+    elif (not isinstance(metadata, dict) or metadata.get('timedOut') or metadata.get('async')
+          or record['name'] == 'bash' and blocked
+          or failure and (not detail and code is None or any(c in categories for c in ['execution_uncertain', 'network_error'])
+                          or code in {124, 130, 137, 143})):
+        reason = 'transport_uncertain'
+    return {'client_exit_code': code, 'fatal_reason': reason, 'recoverable_error': failure and reason is None}
 
 
 class ToolEvidence:
@@ -149,12 +176,13 @@ class ToolEvidence:
             denied = ('permission' in text and any(word in text for word in ['deny', 'denied', 'reject'])) or text.startswith('the user has specified a rule which prevents')
             record['error_kind'] = 'client_permission_rejection' if denied else 'client_tool_error'
             record['tool_error_categories'] = tool_error_categories(detail)
+        record.update(tool_failure(record, event))
         if not record['states'] or record['states'][-1] != status:
             record['states'].append(status)
             record['observations'].append({'status': status, 'observed_at_ns': time.time_ns()})
         self.calls[call_id] = record
         self.events.setdefault(name, Counter())[status] += 1
-        self.failed |= status == 'error'
+        self.failed |= bool(record.get('fatal_reason'))
         return record
 
     def report(self):
@@ -170,6 +198,7 @@ class ToolEvidence:
                 if record['source_targeted']:
                     mutations[name] += 1
         return {'tools': tools, 'tool_states': states, 'tool_events': self.events,
+                'recoverable_tool_errors': sum(r.get('recoverable_error') is True for r in self.calls.values()),
                 'tool_calls': list(self.calls.values()),
                 'source_mutation_tools': dict(mutations),
                 'incomplete_tool_calls': sum(r['status'] not in {'completed', 'error'} for r in self.calls.values())}

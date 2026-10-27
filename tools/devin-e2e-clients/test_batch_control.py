@@ -55,6 +55,27 @@ class BatchControlTests(unittest.TestCase):
         finally:
             control.finish(False)
 
+    def test_completed_error_acknowledges_once_without_retry_or_budget_refund(self):
+        left,right=socket.socketpair()
+        control=batch_control.Control();control.socket=left;control.reader=left.makefile('rb')
+        messages=[]
+        def parent():
+            with right.makefile('rb') as reader:
+                for line in reader:
+                    messages.append(json.loads(line));right.sendall(b'{"accepted":true}\n')
+        thread=threading.Thread(target=parent);thread.start()
+        try:
+            control.begin()
+            record={'status':'error','error_kind':'client_tool_error','recoverable_error':True,'fatal_reason':None,'call_sha256':'a'*64}
+            control.tool(record);control.tool(record)
+            self.assertFalse(control.stopped)
+            control.end(True);control.finish(True)
+            thread.join(timeout=3)
+            self.assertEqual(['begin','tool','end','finish'],[x['kind'] for x in messages])
+            self.assertEqual('error',messages[1]['status']);self.assertTrue(messages[1]['failed'])
+        finally:
+            right.close()
+
     def test_unknown_control_reply_immediately_closes_the_parent_channel(self):
         for reply in [b'null\n',None]:
             with self.subTest(reply=reply):

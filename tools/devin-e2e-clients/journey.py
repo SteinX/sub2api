@@ -366,15 +366,9 @@ def invoke(args, directory, resume=False, protected=None):
                     reads.observe(event, tool)
                 tests.observe(tool, event)
                 completion.observe(event)
-                if tool and tool['status'] == 'error':
+                if tool and tool.get('fatal_reason'):
                     result['event_error'] = True
-                    fatal('permission_rejection' if tool['error_kind'] == 'client_permission_rejection' else 'tool_error', tool['observations'][-1]['observed_at_ns'])
-                    return False
-                # Verify a real test's exit before releasing its tool barrier.
-                reason = tests.fatal_reason(tool)
-                if reason:
-                    result['event_error'] = True
-                    fatal(reason)
+                    fatal(tool['fatal_reason'], tool['observations'][-1]['observed_at_ns'])
                     return False
                 control.tool(tool)
                 control.observe_terminal(event)
@@ -386,12 +380,6 @@ def invoke(args, directory, resume=False, protected=None):
                 result['parse_errors'] += 1
                 fatal('parse_error')
                 return False
-            if kind == "tool_use":
-                part = event.get("part", {}); state = part.get("state", {})
-                if state.get("status") == "error":
-                    result["event_error"] = True
-            if kind == "tool_execution_end" and event.get("isError"):
-                result["event_error"] = True
         return True  # Only iterator EOF certifies complete event consumption.
 
     def consume():

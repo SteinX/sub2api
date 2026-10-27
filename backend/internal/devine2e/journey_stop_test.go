@@ -365,6 +365,7 @@ type journeyControlEvent struct {
 	Observed  int64  `json:"observed_at_ns"`
 	Call      string `json:"call_sha256,omitempty"`
 	Status    string `json:"status,omitempty"`
+	Failed    bool   `json:"failed,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 	Operation string `json:"operation,omitempty"`
 	epoch     int
@@ -412,9 +413,12 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 			}
 		case "tool":
 			_, hashErr := hex.DecodeString(e.Call)
-			valid = len(e.Call) == 64 && hashErr == nil && e.Status == "completed" && f.phase
+			valid = len(e.Call) == 64 && hashErr == nil && (e.Status == "completed" || e.Status == "error" && e.Failed) && f.phase
 			if valid && f.tools != nil {
 				valid = f.tools.calls[e.Call]
+				if f.tools.completed[e.Call] && f.tools.failed[e.Call] != e.Failed {
+					valid = false
+				}
 			}
 			if valid {
 				if f.pending[e.Call] {
@@ -429,6 +433,9 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 				}
 				if valid && f.tools != nil {
 					f.tools.completed[e.Call] = true
+					if e.Failed {
+						f.tools.failed[e.Call] = true
+					}
 				}
 			}
 		case "end":
@@ -444,7 +451,11 @@ func (f *journeyFence) control(e journeyControlEvent) bool {
 		}
 	}
 	if valid {
-		f.journal = append(f.journal, map[string]any{"action": e.Kind, "at_ns": time.Now().UnixNano(), "observed_at_ns": e.Observed, "call_sha256": e.Call})
+		entry := map[string]any{"action": e.Kind, "at_ns": time.Now().UnixNano(), "observed_at_ns": e.Observed, "call_sha256": e.Call}
+		if e.Kind == "tool" {
+			entry["status"], entry["failed"] = e.Status, e.Failed
+		}
+		f.journal = append(f.journal, entry)
 		f.notify()
 	} else if !f.stopped {
 		// Keep new acquire calls blocked while stop takes over this lock.

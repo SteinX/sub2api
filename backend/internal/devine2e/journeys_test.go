@@ -123,7 +123,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 			return
 		}
 		verifyProjectTestReceipts(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
-		verifyProjectFirstErrorClients(t, app, fixture, key, userPassword, keyID)
+		verifyProjectFinalFailureClients(t, app, fixture, key, userPassword, keyID)
 		if os.Getenv("DEVIN_JOURNEY_EVIDENCE_ONLY") == "true" {
 			return // Only this explicitly synthetic runner has a focused evidence mode.
 		}
