@@ -52,6 +52,10 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", "opencode", "--model", model, "--ui-url", ui.URL, "--profile", "project")
+			if scenario == "whitespace" || scenario == "after_forbidden" || scenario == "forbidden_equiv" {
+				// Deliberately stricter existing USER preferences, not product policy.
+				cmd.Args = append(cmd.Args, "--fixture-user-policy", "test-command")
+			}
 			gracefulJourneyCommand(cmd)
 			processRegistry, containerRegistry := journeyRegistryEnvironment(t, app)
 			for _, variable := range os.Environ() {
@@ -110,13 +114,13 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 						require.Less(t, event["at_ns"].(int64), stop, "no SDK retry, auto compact or continuation may be newly admitted after the first fatal observation")
 					}
 				}
-				if scenario == "whitespace" || scenario == "after_forbidden" || scenario == "fake_ok" || scenario == "forbidden_equiv" {
+				if scenario == "whitespace" || scenario == "after_forbidden" || scenario == "forbidden_equiv" {
 					denied := false
 					for _, value := range task["tool_calls"].([]any) {
 						call := value.(map[string]any)
 						denied = denied || call["name"] == "bash" && call["status"] == "error" && call["error_kind"] == "client_permission_rejection"
 					}
-					require.True(t, denied, "prove the actual CLI rejected this command under the copied product policy")
+					require.True(t, denied, "prove the product copy preserved this user's explicit native deny policy")
 				}
 				if scenario == "failed_tests" {
 					call := task["test_execution"].(map[string]any)["calls"].([]any)[0].(map[string]any)

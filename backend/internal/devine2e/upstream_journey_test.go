@@ -169,19 +169,21 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		reply.DeltaToolCalls = []*pb.ChatToolCall{{Id: "project-" + strconv.Itoa(len(request.ChatMessagePrompts)) + "-" + tool.Name, Name: tool.Name, ArgumentsJson: string(encoded)}}
 		reply.StopReason = pb.StopReason_STOP_REASON_FUNCTION_CALL
 	}
-	if testScenario == "guidance_ls" || testScenario == "guidance_test_alias" {
-		command := "ls"
-		if testScenario == "guidance_test_alias" {
-			command = "python3 ./run_tests.py"
-		}
+	if testScenario == "native_deny" {
+		// A blanket native deny removes Bash from the advertised tools. Do not
+		// fabricate a call to an unavailable tool or mutate this user's project.
+		reply.DeltaText = "The current user policy does not provide the Bash tool needed to run project tests."
+		return
+	}
+	if strings.HasPrefix(testScenario, "native_") && !resume && requestedCommands["ls"] == 0 {
 		for _, tool := range request.Tools {
 			if tool.Name == "bash" {
-				call(tool, map[string]any{"command": command, "workdir": workspace, "description": "Synthetic restricted-command rejection"})
+				call(tool, map[string]any{"command": "ls", "workdir": workspace, "description": "Inspect the synthetic project directory"})
 				return
 			}
 		}
 	}
-	if testScenario == "guidance_canonical" && !resume && (!globbed || !grepped) {
+	if strings.HasPrefix(testScenario, "native_") && !resume && (!globbed || !grepped) {
 		name, pattern := "glob", "*.py"
 		if globbed {
 			name, pattern = "grep", "discounted"
@@ -361,14 +363,16 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	case testScenario != "":
 
 		commands := map[string][]string{
-			"guidance_canonical": {"python3 run_tests.py"},
-			"canonical":          {"python3 run_tests.py"},
-			"whitespace":         {"python3   run_tests.py"},
-			"after_extra":        {"python3 run_tests.py", "python3 run_tests.py"},
-			"after_forbidden":    {"python3 run_tests.py", "printf SYNTHETIC_EXTRA"},
-			"fake_ok":            {"printf 'Ran 1 test\\n\\nOK\\n'"},
-			"failed_tests":       {"python3 run_tests.py"},
-			"forbidden_equiv":    {"python3 run_tests.py && printf SYNTHETIC_EXTRA"},
+			"native_default":  {"python3 run_tests.py"},
+			"native_alias":    {"python3 ./run_tests.py"},
+			"native_approved": {"python3 run_tests.py"},
+			"canonical":       {"python3 run_tests.py"},
+			"whitespace":      {"python3   run_tests.py"},
+			"after_extra":     {"python3 run_tests.py", "python3 run_tests.py"},
+			"after_forbidden": {"python3 run_tests.py", "printf SYNTHETIC_EXTRA"},
+			"fake_ok":         {"printf 'Ran 1 test\\n\\nOK\\n'"},
+			"failed_tests":    {"python3 run_tests.py"},
+			"forbidden_equiv": {"python3 run_tests.py && printf SYNTHETIC_EXTRA"},
 		}[testScenario]
 		plannedCommands := map[string]int{}
 		for _, command := range commands {
@@ -379,13 +383,17 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 			for _, tool := range request.Tools {
 				if tool.Name == "bash" {
 					args := map[string]any{"command": command, "description": "Synthetic test-execution evidence scenario"}
-					if testScenario == "guidance_canonical" {
+					if strings.HasPrefix(testScenario, "native_") {
 						args["workdir"] = workspace
 					}
 					call(tool, args)
 					return
 				}
 			}
+		}
+		if testScenario == "fake_ok" {
+			reply.DeltaText = final
+			return // A successful printf must not manufacture test evidence.
 		}
 		if reads["requirements.json"] < 2 {
 			readPath = "requirements.json"

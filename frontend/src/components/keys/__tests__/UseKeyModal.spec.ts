@@ -138,7 +138,7 @@ describe('UseKeyModal', () => {
     wrapper.unmount()
   })
 
-  it('provides a pinned read-only OMO connection check without model fallbacks', async () => {
+  it('provides a pinned OMO connection without replacing native approval settings', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true, text: async () => JSON.stringify({ models: [{ slug: 'fusion-test' }] })
     }))
@@ -150,19 +150,11 @@ describe('UseKeyModal', () => {
     const tab = wrapper.get('button[data-client="omo"]')
     expect(tab.text()).toContain('OpenCode')
     await tab.trigger('click')
-    expect(wrapper.findAll('pre code')).toHaveLength(0)
-    for (const path of ['/', 'C:/', '/tmp/*', '/tmp/../private']) {
-      await wrapper.get('[data-testid="devin-workspace-path"]').setValue(path)
-      expect(wrapper.findAll('pre code')).toHaveLength(0)
-    }
-    await wrapper.get('[data-testid="devin-workspace-path"]').setValue('C:\\work\\owned-project')
     const blocks = wrapper.findAll('pre code').map(node => JSON.parse(node.text()))
     expect(blocks[0].plugin).toEqual(['oh-my-opencode@5.1.44'])
-    expect(blocks[0].default_agent).toBe('devin-check')
-    expect(blocks[0].agent['devin-check'].model).toBe('devin/fusion-test')
-    expect(blocks[0].agent['devin-check'].tools).toBeUndefined()
-    expect(blocks[0].agent['devin-check'].permission).toEqual(blocks[0].permission)
-    expect(blocks[0].permission).toEqual({ '*': 'deny', read: 'allow', external_directory: { 'C:/work/owned-project/*': 'allow' } })
+    expect(blocks[0].model).toBe('devin/fusion-test')
+    expect(blocks[0]).not.toHaveProperty('agent')
+    expect(blocks[0]).not.toHaveProperty('permission')
     expect(blocks[1]).toMatchObject({ model_fallback: false, runtime_fallback: false })
     expect(wrapper.get('[data-testid="devin-instructions"]').text()).toContain('keys.useKeyModal.devin.omoInstructions')
     wrapper.unmount()

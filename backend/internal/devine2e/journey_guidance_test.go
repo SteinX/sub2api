@@ -22,7 +22,7 @@ import (
 // Observe requests received by the synthetic native server, after the copied
 // product configuration and real pinned CLI have constructed the model input.
 // Persist only fixed observations/hashes, never prompts, commands or paths.
-func projectGuidanceProof(request *pb.GetChatMessageRequest, workspace string) map[string]any {
+func nativeClientProof(request *pb.GetChatMessageRequest) map[string]any {
 	var text strings.Builder
 	text.WriteString(request.Prompt)
 	for _, prompt := range request.ChatMessagePrompts {
@@ -30,20 +30,6 @@ func projectGuidanceProof(request *pb.GetChatMessageRequest, workspace string) m
 		text.WriteString(prompt.Prompt)
 	}
 	content := text.String()
-	configured := false
-	for _, line := range strings.Split(content, "\n") {
-		const prefix = "Project configuration JSON: "
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		var data struct {
-			Workspace string `json:"workspace"`
-			Command   string `json:"test_command"`
-		}
-		if json.Unmarshal([]byte(strings.TrimPrefix(line, prefix)), &data) == nil {
-			configured = data.Workspace == workspace && data.Command == "python3 run_tests.py"
-		}
-	}
 	tools := []string{}
 	definitions := map[string]string{}
 	command, workdir, generalBash := false, false, false
@@ -71,11 +57,8 @@ func projectGuidanceProof(request *pb.GetChatMessageRequest, workspace string) m
 	sort.Strings(tools)
 	fingerprint := sha256.Sum256([]byte(content))
 	return map[string]any{
-		"configuration_json_matches":         configured,
-		"restricted_project_prompt":          strings.Contains(content, "not a general shell"),
-		"dedicated_file_tool_guidance":       strings.Contains(content, "Read (read)") && strings.Contains(content, "Glob (glob)") && strings.Contains(content, "Grep (grep)") && strings.Contains(content, "Edit (edit)"),
-		"exact_command_and_workdir_guidance": strings.Contains(content, "command exactly equal to test_command and workdir exactly equal to workspace"),
-		"no_directory_shell_guidance":        strings.Contains(content, "Do not use Bash for pwd, ls, cat"),
+		"product_agent_override_absent":      !strings.Contains(content, "Project configuration JSON:"),
+		"directory_shell_prohibition_absent": !strings.Contains(content, "Do not use Bash for pwd, ls, cat"),
 		"project_task_prompt":                strings.Contains(content, "Repair price_math.py so the project tests pass"),
 		"prompt_sha256":                      hex.EncodeToString(fingerprint[:]), "tools": tools,
 		"tool_definition_sha256": definitions,
@@ -84,15 +67,15 @@ func projectGuidanceProof(request *pb.GetChatMessageRequest, workspace string) m
 	}
 }
 
-func verifyRestrictedProjectGuidance(t *testing.T, app *application, fixture *nativeFixture, key, password string, keyID int64) {
+func verifyNativeClientWorkflow(t *testing.T, app *application, fixture *nativeFixture, key, password string, keyID int64) {
 	t.Helper()
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
-	for _, scenario := range []string{"canonical", "ls", "test_alias"} {
-		if !t.Run("restricted_project_guidance_"+scenario, func(t *testing.T) {
+	for _, scenario := range []string{"default", "alias", "approved", "ask", "deny"} {
+		if !t.Run("native_client_workflow_"+scenario, func(t *testing.T) {
 			directory := filepath.Join(t.TempDir(), "project with spaces")
 			workspace := filepath.Join(directory, "workspace")
 			fixture.journey.mu.Lock()
-			fixture.journey.workspace, fixture.journey.mutationTool, fixture.journey.testScenario = workspace, "edit", "guidance_"+scenario
+			fixture.journey.workspace, fixture.journey.mutationTool, fixture.journey.testScenario = workspace, "edit", "native_"+scenario
 			fixture.journey.mu.Unlock()
 			fixture.mu.Lock()
 			before := len(fixture.chats)
@@ -114,6 +97,9 @@ func verifyRestrictedProjectGuidance(t *testing.T, app *application, fixture *na
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", "opencode", "--model", fixtureModel, "--ui-url", ui.URL, "--profile", "project")
+			if scenario == "ask" || scenario == "deny" || scenario == "approved" {
+				cmd.Args = append(cmd.Args, "--fixture-user-policy", scenario)
+			}
 			gracefulJourneyCommand(cmd)
 			processes, containers := journeyRegistryEnvironment(t, app)
 			cmd.Env = append(fixturePolicyEnvironment(), "DEVIN_JOURNEY_GATEWAY_KEY="+key, "DEVIN_JOURNEY_UI_PASSWORD="+password, "DEVIN_JOURNEY_PROCESS_REGISTRY="+processes, "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containers, "DEVIN_JOURNEY_CAPABILITIES=false")
@@ -129,37 +115,43 @@ func verifyRestrictedProjectGuidance(t *testing.T, app *application, fixture *na
 			fixture.mu.Unlock()
 			proof := map[string]any{"available": len(captured) > 0}
 			if len(captured) > 0 {
-				proof = projectGuidanceProof(captured[0], workspace)
+				proof = nativeClientProof(captured[0])
 			}
-			report["native_request_guidance"] = proof
+			report["native_request_client_defaults"] = proof
+			report["expected_native_policy"] = scenario
 			report["batch_guard"] = fence.snapshot()
 			report["fixture_batch_billing"] = snapshotMockBilling(t, app, fixture, keyID)
 			report["client_process_cleanup_verified"] = cleanupErr == nil
-			defer func() { writeAgentArtifact(t, "journey-restricted-guidance-"+scenario+".json", report) }()
+			defer func() { writeAgentArtifact(t, "journey-native-client-"+scenario+".json", report) }()
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
 			require.NotEmpty(t, captured, "inspect actual CLI/native requests, not a separately generated prompt")
-			for _, field := range []string{"configuration_json_matches", "restricted_project_prompt", "dedicated_file_tool_guidance", "exact_command_and_workdir_guidance", "no_directory_shell_guidance", "project_task_prompt", "bash_command_parameter", "bash_workdir_parameter"} {
+			for _, field := range []string{"product_agent_override_absent", "directory_shell_prohibition_absent", "project_task_prompt"} {
 				require.Equal(t, true, proof[field], "actual model input is missing %s", field)
 			}
 			tools := proof["tools"].([]string)
-			for _, name := range []string{"read", "glob", "grep", "edit", "bash"} {
+			for _, name := range []string{"read", "glob", "grep", "edit"} {
 				require.Contains(t, tools, name)
 			}
-			for _, name := range []string{"task", "webfetch", "websearch"} {
-				require.NotContains(t, tools, name)
+			if scenario == "deny" {
+				require.NotContains(t, tools, "bash", "the copied product config must preserve the user's native tool denial")
+			} else {
+				require.Contains(t, tools, "bash")
+				require.Equal(t, true, proof["bash_command_parameter"])
+				require.Equal(t, true, proof["bash_workdir_parameter"])
 			}
 			task := report["task"].(map[string]any)
 			dependencies := report["runtime_dependencies"].(map[string]any)["rg"].(map[string]any)
 			require.Equal(t, true, dependencies["runnable"], "the isolated CLI test environment must supply its rg dependency; do not download it from the networkless client")
-			if scenario == "canonical" {
+			if scenario != "ask" && scenario != "deny" {
 				require.NoError(t, runErr)
 				require.Equal(t, "passed", report["status"])
 				require.Equal(t, true, report["source_changed_by_task"])
 				require.Equal(t, true, task["client_tests_succeeded"])
-				for _, name := range []string{"glob", "grep", "edit", "bash"} {
+				for _, name := range []string{"glob", "grep", "edit"} {
 					require.Equal(t, float64(1), task["tools"].(map[string]any)[name], "exercise the permitted %s path in the actual CLI", name)
 				}
+				require.Equal(t, float64(2), task["tools"].(map[string]any)["bash"], "ordinary ls plus the actual project test must execute")
 				require.Equal(t, true, report["same_client_session"])
 				observedWorkdir := false
 				for _, request := range captured {
@@ -168,37 +160,50 @@ func verifyRestrictedProjectGuidance(t *testing.T, app *application, fixture *na
 							if call.Name == "bash" {
 								var args map[string]any
 								require.NoError(t, json.Unmarshal([]byte(call.ArgumentsJson), &args))
-								require.Equal(t, "python3 run_tests.py", args["command"])
+								if args["command"] == "ls" {
+									continue
+								}
+								expected := "python3 run_tests.py"
+								if scenario == "alias" {
+									expected = "python3 ./run_tests.py"
+								}
+								require.Equal(t, expected, args["command"], "do not rewrite the model's command")
 								require.Equal(t, workspace, args["workdir"])
 								observedWorkdir = true
 							}
 						}
 					}
 				}
-				report["exact_test_workdir_observed"] = observedWorkdir
+				report["actual_test_workdir_observed"] = observedWorkdir
 				require.True(t, observedWorkdir)
 			} else {
 				require.Error(t, runErr)
 				require.Nil(t, report["resume"])
 				require.Equal(t, false, report["source_changed_by_task"])
-				require.Len(t, captured, 1, "the first denied tool must stop further model calls")
-				calls := task["tool_calls"].([]any)
-				require.Len(t, calls, 1)
-				call := calls[0].(map[string]any)
-				require.Equal(t, "client_permission_rejection", call["error_kind"])
-				require.Equal(t, false, call["test_command"])
-				category := "ls"
-				if scenario == "test_alias" {
-					category = "test_path_alias"
-				}
-				require.Equal(t, category, call["command_category"])
+				require.Len(t, captured, 1)
 				guard := fence.snapshot()
+				if scenario == "ask" {
+					calls := task["tool_calls"].([]any)
+					require.Len(t, calls, 1)
+					call := calls[0].(map[string]any)
+					require.Equal(t, "client_permission_rejection", call["error_kind"])
+					require.Equal(t, false, call["test_command"])
+					require.Equal(t, "ls", call["command_category"])
+					require.Equal(t, true, task["native_permission_request_seen"])
+					require.Equal(t, true, task["native_noninteractive_auto_reject_seen"], "do not bypass native approval in a noninteractive client")
+					require.Equal(t, "permission_rejection", guard["first_failure"].(map[string]any)["reason"])
+					report["expected_outcome"] = "native_user_ask_stops_noninteractive_run"
+				} else {
+					require.Empty(t, task["tool_calls"])
+					require.Equal(t, false, task["client_tests_succeeded"])
+					require.Equal(t, "source_or_oracle_failure", guard["first_failure"].(map[string]any)["reason"])
+					report["expected_outcome"] = "native_user_deny_removes_bash_and_project_remains_unmodified"
+				}
 				require.Equal(t, true, guard["stopped"])
 				require.Equal(t, true, guard["owned_backend_death_verified"])
-				require.Equal(t, "permission_rejection", guard["first_failure"].(map[string]any)["reason"])
 			}
 		}) {
-			t.Fatal("restricted project guidance mock failed; stop for diagnosis")
+			t.Fatal("native client workflow mock failed; stop for diagnosis")
 		}
 	}
 }

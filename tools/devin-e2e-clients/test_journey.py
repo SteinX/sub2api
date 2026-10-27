@@ -16,6 +16,13 @@ import journey
 
 
 class JourneyProofTests(unittest.TestCase):
+    def test_native_user_policy_fixture_cannot_change_real_client_approvals(self):
+        argv = ['journey.py', '--directory', '/tmp/synthetic', '--client', 'opencode', '--model', 'synthetic',
+                '--ui-url', 'http://127.0.0.1:1234', '--profile', 'project', '--upstream', 'real', '--fixture-user-policy', 'approved']
+        with patch.object(sys, 'argv', argv), patch.object(journey, 'identity') as identity, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit): journey.main()
+            identity.assert_not_called()
+
     def test_catalog_observer_delay_cannot_expand_real_or_unbounded_execution(self):
         for flags in [['--catalog-recovery-probe', '--upstream', 'real', '--catalog-observer-delay-ms', '16000'],
                       ['--catalog-observer-delay-ms', '16000'],
@@ -73,6 +80,7 @@ class JourneyProofTests(unittest.TestCase):
             pid = 1073741823
             returncode = 0
             stdout = io.BytesIO(wire)
+            stderr = io.BytesIO(b'')
             def poll(self):
                 return self.returncode
             def wait(self, timeout=None):
@@ -160,7 +168,7 @@ class ProtectedSnapshotTests(unittest.TestCase):
                 root=Path(temporary);workspace=root/'workspace';workspace.mkdir()
                 for name,content in {'requirements.json':'{"nonce":"synthetic"}','test_project.py':'protected','run_tests.py':'protected'}.items(): (workspace/name).write_text(content)
                 events=[{'type':'step_start','sessionID':'original'},{**terminal,'sessionID':'changed'}]
-                proc=Mock();proc.stdout=io.BytesIO(b''.join(json.dumps(event).encode()+b'\n' for event in events));proc.returncode=0
+                proc=Mock();proc.stdout=io.BytesIO(b''.join(json.dumps(event).encode()+b'\n' for event in events));proc.stderr=io.BytesIO(b'');proc.returncode=0
                 control=batch_control.Control()
                 with patch.object(journey,'start_child',return_value=proc),patch.object(journey,'kill_child'),patch.object(journey,'project_environment',return_value={}),patch.object(journey,'isolation',return_value={}), \
                      patch.object(journey.batch_control,'current',return_value=control),patch.object(control,'send',return_value=True) as send, \
@@ -201,6 +209,7 @@ class ProtectedSnapshotTests(unittest.TestCase):
                           {'type':'step_finish','part':{'reason':'stop'}}]
                 child = Child()
                 child.stdout = io.BytesIO(b''.join(json.dumps(event).encode()+b'\n' for event in events))
+                child.stderr = io.BytesIO(b'')
                 return child
             with patch.object(journey,'isolation',return_value={}), patch.object(journey,'project_environment',return_value={}), \
                  patch.object(journey,'start_child',side_effect=start), patch.object(journey,'TestReceipts',ReceiptObserver), \

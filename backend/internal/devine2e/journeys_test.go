@@ -81,8 +81,8 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		require.NoError(t, err)
 		require.Zero(t, cost)
 	})
-	verifyRestrictedProjectGuidance(t, app, fixture, key, userPassword, keyID)
-	if os.Getenv("DEVIN_JOURNEY_GUIDANCE_ONLY") == "true" {
+	verifyNativeClientWorkflow(t, app, fixture, key, userPassword, keyID)
+	if os.Getenv("DEVIN_JOURNEY_NATIVE_POLICY_ONLY") == "true" {
 		return // Focused synthetic CLI regression; never an authorized live path.
 	}
 	profile := fusion.DefaultProfile("fusion-project-journey", fixtureModel, fixtureSidekick)
