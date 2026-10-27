@@ -64,9 +64,10 @@ def stop_process(process):
 
 
 def run(args, plan):
-    if os.geteuid() != 0:
-        try: container_sandbox.require_available()
-        except (ValueError,OSError,subprocess.SubprocessError): raise Denied('rootless_container_isolation_unavailable') from None
+    if os.geteuid() == 0:
+        raise Denied('root_project_runner_unsupported')
+    try: container_sandbox.require_available()
+    except (ValueError,OSError,subprocess.SubprocessError): raise Denied('rootless_container_isolation_unavailable') from None
     if not args.ledger or not args.artifacts:
         raise Denied('private_run_ledger_and_artifacts_required')
     artifacts = Path(args.artifacts).resolve()

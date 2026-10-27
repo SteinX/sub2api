@@ -245,29 +245,31 @@ func snapshotFusionAudit(db *sql.DB, keyID int64, records []agentRequest, allowZ
 			return session, err
 		},
 		Usage: func(ctx context.Context, attempt fusion.Attempt) (fusionAuditUsage, error) {
-			var usage fusionAuditUsage
-			model := attempt.Model
-			if attempt.BillingModel != "" {
-				model = attempt.BillingModel
-			}
-			for {
-				err := db.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER (WHERE actual_cost<0 OR total_cost<0 OR input_tokens<0 OR output_tokens<0 OR cache_creation_tokens<0 OR cache_read_tokens<0),
-      count(*) FILTER (WHERE coalesce(nullif(upstream_model,''),model)=$3),
-					coalesce(sum(actual_cost),0),coalesce(sum(total_cost),0),coalesce(sum(greatest(actual_cost,total_cost)),0),
-					coalesce(sum(input_tokens),0),coalesce(sum(output_tokens),0),coalesce(sum(cache_creation_tokens),0),coalesce(sum(cache_read_tokens),0)
-					FROM usage_logs WHERE request_id=$1 AND api_key_id=$2`, "fusion:"+attempt.ID, keyID, model).Scan(&usage.Rows, &usage.NegativeRows, &usage.ModelRows, &usage.ActualUSD, &usage.TotalUSD, &usage.ChargedUSD, &usage.InputTokens, &usage.OutputTokens, &usage.CacheWriteTokens, &usage.CacheReadTokens)
-				if err != nil || usage.Rows != 0 || attempt.Status != "completed" {
-					return usage, err
-				}
-				select {
-				case <-ctx.Done():
-					return usage, ctx.Err()
-				case <-time.After(100 * time.Millisecond):
-				}
-			}
+			return readFusionAuditUsage(ctx, db, keyID, attempt)
 		},
 	}
 	return collectFusionAudit(ctx, records, readers, allowZero)
+}
+
+func readFusionAuditUsage(ctx context.Context, db *sql.DB, keyID int64, attempt fusion.Attempt) (fusionAuditUsage, error) {
+	var usage fusionAuditUsage
+	for {
+		// RecordUsage persists the requested physical UID in upstream_model;
+		// BillingModel is a separate price identity, retained in audit metadata.
+		err := db.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER (WHERE actual_cost<0 OR total_cost<0 OR input_tokens<0 OR output_tokens<0 OR cache_creation_tokens<0 OR cache_read_tokens<0),
+      count(*) FILTER (WHERE coalesce(nullif(upstream_model,''),model)=$3),
+					coalesce(sum(actual_cost),0),coalesce(sum(total_cost),0),coalesce(sum(greatest(actual_cost,total_cost)),0),
+					coalesce(sum(input_tokens),0),coalesce(sum(output_tokens),0),coalesce(sum(cache_creation_tokens),0),coalesce(sum(cache_read_tokens),0)
+					FROM usage_logs WHERE request_id=$1 AND api_key_id=$2`, "fusion:"+attempt.ID, keyID, attempt.Model).Scan(&usage.Rows, &usage.NegativeRows, &usage.ModelRows, &usage.ActualUSD, &usage.TotalUSD, &usage.ChargedUSD, &usage.InputTokens, &usage.OutputTokens, &usage.CacheWriteTokens, &usage.CacheReadTokens)
+		if err != nil || usage.Rows != 0 || attempt.Status != "completed" {
+			return usage, err
+		}
+		select {
+		case <-ctx.Done():
+			return usage, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func finiteNonnegative(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 }

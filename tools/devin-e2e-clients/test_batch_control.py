@@ -9,9 +9,37 @@ from unittest.mock import patch
 
 import batch_control
 import journey
+from project_evidence import ToolEvidence
 
 
 class BatchControlTests(unittest.TestCase):
+    def test_context_deadline_never_acknowledges_tool_or_allows_continuation(self):
+        for name, status in [('read', 'error'), ('bash', 'completed')]:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                tracker = ToolEvidence(Path(temporary), 'python3 run_tests.py')
+                state = {'status': status, 'input': {}, 'metadata': {'exit': 1} if name == 'bash' else {}}
+                state['output' if name == 'bash' else 'error'] = 'context deadline exceeded'
+                tool = tracker.observe({'type': 'tool_use', 'part': {'tool': name, 'callID': 'synthetic-deadline', 'state': state}})
+                left, right = socket.socketpair()
+                control = batch_control.Control(); control.socket = left; control.reader = left.makefile('rb')
+                messages = []
+                def parent():
+                    with right.makefile('rb') as reader:
+                        for line in reader:
+                            messages.append(json.loads(line)); right.sendall(b'{"accepted":true}\n')
+                thread = threading.Thread(target=parent); thread.start()
+                try:
+                    control.begin(); control.tool(tool)
+                    self.assertTrue(control.stopped)
+                    with self.assertRaisesRegex(ValueError, 'batch_stopped'):
+                        control.begin()
+                    control.finish(False); thread.join(timeout=3)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(['begin', 'stop'], [x['kind'] for x in messages])
+                    self.assertEqual('transport_uncertain', messages[1]['reason'])
+                finally:
+                    control.finish(False); right.close()
+
     def test_control_path_is_never_in_model_or_browser_environment(self):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {'DEVIN_JOURNEY_CONTROL_SOCKET': '/private/control.sock'}):
             env = journey.project_environment(Path(temporary))

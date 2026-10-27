@@ -96,14 +96,13 @@ class ProjectTest(unittest.TestCase):
 
 def isolation(client=None):
     if os.geteuid() == 0:
-        return {"user": 65534, "group": 65534, "extra_groups": []}
+        raise ValueError('root_project_runner_unsupported')
     container_sandbox.require_available()
     return {}
 
 
 def isolation_evidence():
-    if os.geteuid()==0:
-        return {'mode':'separate_uid','parent_uid':0,'child_uid':65534}
+    isolation()
     return container_sandbox.evidence()
 
 
@@ -123,22 +122,13 @@ def project_environment(directory):
 
 
 def run_project_python(directory, arguments, input_data=None):
-    if os.geteuid()!=0:
-        return container_sandbox.run(['python3',*arguments],directory,project_environment(directory),input_data=input_data,timeout=15)
-    command=['python3',*arguments]
-    proc=start_child(command,directory,project_environment(directory),stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-    try:
-        return container_sandbox.collect_output(proc,command,input_data=input_data,timeout=15)
-    finally:
-        ACTIVE.discard(proc)
+    isolation()
+    return container_sandbox.run(['python3',*arguments],directory,project_environment(directory),input_data=input_data,timeout=15)
 
 
 def start_child(command,directory,env,*,gateway=None,client=None,**kwargs):
-    if os.geteuid()!=0:
-        return container_sandbox.popen(command,directory,env,gateway=gateway,on_start=track,**kwargs)
-    proc=subprocess.Popen(command,cwd=directory/'workspace',env=env,start_new_session=True,**isolation(client),**kwargs)
-    track(proc)
-    return proc
+    isolation(client)
+    return container_sandbox.popen(command,directory,env,gateway=gateway,on_start=track,**kwargs)
 
 
 def project_bytes(workspace, relative):
@@ -484,8 +474,11 @@ def main():
     if args.fixture_user_policy != 'none' and (args.upstream != 'synthetic' or args.client != 'opencode'):
         parser.error('user approval fixtures are synthetic OpenCode cases only')
     tier = 'client_mock' if args.upstream == 'synthetic' else 'product_live_partial'
+    if os.geteuid() == 0:
+        print(json.dumps({'status':'failed','stage':'root-project-runner-unsupported','tier':tier}))
+        return 2
+    isolation(args.client)
     client_identity = identity(args.client)
-    isolation(args.client)  # reject writable personal OMO state before setup
     isolated=isolation_evidence()
     directory = Path(args.directory).resolve()
     workspace, expected, protected = prepare(directory, 'long') if args.project_kind=='long' else prepare(directory)
@@ -603,7 +596,7 @@ def main():
         final['client_restarted_verified'] = bool(restarted) if resumed is not None else None
         passed &= restarted
     report = {"tier": tier, "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
-              "execution_isolation": "separate_uid" if os.geteuid()==0 else "networkless_container_fixed_unix_relay",
+              "execution_isolation": "networkless_container_fixed_unix_relay",
               "isolation":isolated,
               "client_identity": client_identity,
               "client": args.client, "profile": args.profile, "handoff": handoff, "task": first, "resume": resumed,

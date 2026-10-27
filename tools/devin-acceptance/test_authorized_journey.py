@@ -15,6 +15,12 @@ from test_journey_policy import proposal
 
 
 class ApprovedRunnerBoundaryTests(unittest.TestCase):
+    def test_root_execution_rejects_before_claim_credentials_preview_or_client(self):
+        with patch.object(runner.os, 'geteuid', return_value=0), patch.object(runner, 'claim') as claim, patch.object(runner.subprocess, 'Popen') as spawn, patch.object(runner.container_sandbox, 'require_available') as container:
+            with self.assertRaisesRegex(runner.Denied, '^root_project_runner_unsupported$'):
+                runner.run(SimpleNamespace(), {})
+            claim.assert_not_called(); spawn.assert_not_called(); container.assert_not_called()
+
     def test_settlement_scope_never_reads_a_concurrently_truncated_ledger(self):
         import fcntl
         plan,approval,*_=proposal()

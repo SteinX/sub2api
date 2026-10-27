@@ -111,18 +111,28 @@ class JourneyProofTests(unittest.TestCase):
             (directory/'workspace/context').symlink_to(outside,target_is_directory=True)
             with self.assertRaises(OSError): journey.prepare_pressure(directory,'synthetic')
             self.assertEqual([],list(outside.iterdir()))
-    def test_project_code_always_uses_unprivileged_identity_and_clean_environment(self):
-        with tempfile.TemporaryDirectory() as temp, patch.object(journey.os, 'geteuid', return_value=0), patch.object(journey.subprocess, 'Popen') as run, patch.object(journey, 'track'), patch.object(journey.container_sandbox,'collect_output'):
+    def test_project_code_uses_existing_container_and_clean_environment(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(journey.os, 'geteuid', return_value=1000), patch.object(journey.container_sandbox, 'require_available'), patch.object(journey.container_sandbox, 'run') as run:
             with patch.dict(os.environ, {'DEVIN_E2E_PAT': 'synthetic-secret', 'DEVIN_E2E_DB_PASSWORD': 'synthetic-password', 'DEVIN_E2E_REDIS_PASSWORD':'synthetic-cache-secret', 'SUB2API_API_KEY': 'synthetic-key','UNRELATED_SERVICE_TOKEN':'synthetic-other-token',
                                          'DEVIN_JOURNEY_GATEWAY_KEY': 'synthetic-gateway', 'CODEX_PROXY_GUARD_TEST': 'keep-guard'}):
                 journey.run_project_python(Path(temp), ['-c', 'import price_math'])
-            kwargs = run.call_args.kwargs
-            self.assertEqual((kwargs['user'], kwargs['group'], kwargs['extra_groups']), (65534, 65534, []))
-            self.assertTrue(journey.SENSITIVE_ENV.isdisjoint(kwargs['env']))
-            self.assertNotIn('SUB2API_API_KEY', kwargs['env'])
-            self.assertNotIn('UNRELATED_SERVICE_TOKEN',kwargs['env'])
-            self.assertEqual(kwargs['env']['CODEX_PROXY_GUARD_TEST'], 'keep-guard')
-            self.assertEqual(kwargs['env'].get('HOME'), os.environ.get('HOME'))
+            env = run.call_args.args[2]
+            self.assertTrue(journey.SENSITIVE_ENV.isdisjoint(env))
+            self.assertNotIn('SUB2API_API_KEY', env)
+            self.assertNotIn('UNRELATED_SERVICE_TOKEN', env)
+            self.assertEqual(env['CODEX_PROXY_GUARD_TEST'], 'keep-guard')
+            self.assertEqual(env.get('HOME'), os.environ.get('HOME'))
+
+    def test_root_project_runner_fails_before_client_or_project_launch(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(journey.os, 'geteuid', return_value=0), patch.object(journey, 'identity') as identity, patch.object(journey.subprocess, 'Popen') as process, patch.object(journey.container_sandbox, 'popen') as container, patch.object(journey.container_sandbox, 'run') as oracle, patch.object(sys, 'argv', ['journey.py', '--directory', temp, '--client', 'opencode', '--model', 'synthetic', '--ui-url', 'http://127.0.0.1', '--profile', 'project']), patch('sys.stdout', new_callable=io.StringIO) as out:
+            self.assertEqual(2, journey.main())
+            self.assertEqual('root-project-runner-unsupported', json.loads(out.getvalue())['stage'])
+            for action in [lambda: journey.isolation(), lambda: journey.isolation_evidence(),
+                           lambda: journey.start_child(['synthetic'], Path(temp), {}),
+                           lambda: journey.run_project_python(Path(temp), ['-c', 'pass'])]:
+                with self.assertRaisesRegex(ValueError, '^root_project_runner_unsupported$'):
+                    action()
+            identity.assert_not_called(); process.assert_not_called(); container.assert_not_called(); oracle.assert_not_called()
 
     def test_nonroot_refuses_missing_container_isolation_even_in_ci(self):
         with patch.object(journey.os, 'geteuid', return_value=1000), patch.object(journey.container_sandbox,'require_available',side_effect=ValueError('isolation_unavailable')), patch.dict(os.environ, {'GITHUB_ACTIONS': 'true'}):
