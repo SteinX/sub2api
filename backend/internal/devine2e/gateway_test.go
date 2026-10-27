@@ -55,7 +55,7 @@ func newApplication(t *testing.T, fixture *nativeFixture) *application {
 	t.Helper()
 	binary := os.Getenv("DEVIN_E2E_BINARY")
 	require.NotEmpty(t, binary, "run bash deploy/devin-e2e.sh")
-	for _, name := range []string{"DEVIN_E2E_PG_PORT", "DEVIN_E2E_REDIS_PORT", "DEVIN_E2E_DB_PASSWORD"} {
+	for _, name := range []string{"DEVIN_E2E_PG_PORT", "DEVIN_E2E_REDIS_PORT", "DEVIN_E2E_DB_PASSWORD", "DEVIN_E2E_REDIS_PASSWORD"} {
 		require.NotEmpty(t, os.Getenv(name), "missing %s; use the isolated runner", name)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -131,13 +131,13 @@ func (a *application) start(t *testing.T) {
 		"DATABASE_HOST=127.0.0.1", "DATABASE_PORT="+os.Getenv("DEVIN_E2E_PG_PORT"),
 		"DATABASE_USER=devin_e2e", "DATABASE_DBNAME="+a.database, "DATABASE_SSLMODE=disable",
 		"DATABASE_PASSWORD="+os.Getenv("DEVIN_E2E_DB_PASSWORD"),
-		"REDIS_HOST=127.0.0.1", "REDIS_PORT="+os.Getenv("DEVIN_E2E_REDIS_PORT"), "REDIS_PASSWORD=", "REDIS_DB=0",
+		"REDIS_HOST=127.0.0.1", "REDIS_PORT="+os.Getenv("DEVIN_E2E_REDIS_PORT"), "REDIS_PASSWORD="+os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), "REDIS_DB=0",
 		"ADMIN_EMAIL=admin@devin-e2e.invalid", "ADMIN_PASSWORD="+a.password,
 		"SECURITY_URL_ALLOWLIST_ENABLED=false", "SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=true",
 		"SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true", "BATCH_IMAGE_ENABLED=false",
 		"GATEWAY_OPENAI_WS_MODE_ROUTER_V2_ENABLED=true",
 	)
-	if os.Getenv("DEVIN_E2E_MODE") == "live" {
+	if os.Getenv("DEVIN_E2E_MODE") == "live" || os.Getenv("DEVIN_JOURNEY_REAL") == "true" {
 		// The approved batch sends native credentials only to this hostname,
 		// including when GetUserJwt supplies an account-specific API URL.
 		a.command.Env = append(a.command.Env,
@@ -159,7 +159,7 @@ func (a *application) start(t *testing.T) {
 		a.redactor.destination = a.log
 		a.redactor.mu.Unlock()
 	}
-	for _, secret := range []string{a.password, os.Getenv("DEVIN_E2E_DB_PASSWORD"), os.Getenv("DEVIN_E2E_PAT"), os.Getenv("DEVIN_E2E_CREDENTIAL")} {
+	for _, secret := range []string{a.password, os.Getenv("DEVIN_E2E_DB_PASSWORD"), os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), os.Getenv("DEVIN_E2E_PAT"), os.Getenv("DEVIN_E2E_CREDENTIAL")} {
 		a.redactor.addSecret(secret)
 	}
 	a.command.Stdout, a.command.Stderr = a.redactor, a.redactor
@@ -299,9 +299,14 @@ func runDevinCloudGateway(t *testing.T, mode string, fixture *nativeFixture) {
 
 func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture, suite string) {
 	t.Helper()
-	require.Contains(t, []string{"protocol", "agents", "long"}, suite)
-	agents, longTask := suite == "agents", suite == "long"
+	require.Contains(t, []string{"protocol", "agents", "long", "journeys"}, suite)
+	agents, longTask, journeys := suite == "agents", suite == "long", suite == "journeys"
 	require.Contains(t, []string{"mock", "plan", "live"}, mode, "select mock, plan or live explicitly")
+	var journeyPlan approvedJourneyPlan
+	if journeys && fixture == nil {
+		journeyPlan = approvedPlan(t)
+		require.Equal(t, journeyPlan.ReferencePricingSHA, os.Getenv("DEVIN_E2E_PRICING_SHA256"), "reviewed reference prices changed; stop before native credential transmission")
+	}
 	pat := "cog_e2e_fixture"
 	if fixture != nil && fixture.credentialReference != "" {
 		pat = fixture.credentialReference
@@ -345,6 +350,10 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 			"input_price": 0.000001, "output_price": 0.000002,
 			"cache_write_price": 0.000001, "cache_read_price": 0.0000001,
 		}}
+	} else if journeys {
+		if prices := approvedGroupPricing(t, journeyPlan); prices != nil {
+			groupInput["model_pricing"] = prices
+		}
 	}
 	group := api(t, a, "POST", "/admin/groups", admin, groupInput)
 	groupID := group.Get("id").Int()
@@ -397,7 +406,7 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	require.NoError(t, err)
 	selection.PaidAllowed = mode == "live"
 	selection.Mode = mode
-	if !agents && !longTask {
+	if !agents && !longTask && !journeys {
 		saveSmokePlan(t, selection)
 	}
 	model := selection.Model
@@ -409,21 +418,25 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	})
 	user := login(t, a, "user@devin-e2e.invalid", userPassword)
 	keyInput := map[string]any{"name": "e2e-key", "group_id": groupID}
-	if agents || longTask {
+	if agents || longTask || journeys {
 		batch := os.Getenv("DEVIN_E2E_AGENT_BATCH")
-		if longTask {
+		if longTask || journeys {
 			batch = "matrix"
 		}
-		quota, err := agentKeyQuota(mode, batch, os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
-		require.NoError(t, err)
-		keyInput["quota"] = quota
+		if journeys && fixture == nil {
+			keyInput["quota"] = journeyPlan.Limits.LocalUSD
+		} else {
+			quota, err := agentKeyQuota(mode, batch, os.Getenv("DEVIN_E2E_AGENT_KEY_QUOTA"))
+			require.NoError(t, err)
+			keyInput["quota"] = quota
+		}
 	}
 	keyData := api(t, a, "POST", "/keys", user, keyInput)
 	key := keyData.Get("key").String()
 	require.NotEmpty(t, key, "public API key creation")
 	a.redactor.addSecret(key)
 	keyID := keyData.Get("id").Int()
-	if mode == "mock" && !agents && !longTask {
+	if mode == "mock" && !agents && !longTask && !journeys {
 		t.Run("administrator_probe", func(t *testing.T) {
 			body := request(t, a, "POST", fmt.Sprintf("/api/v1/admin/accounts/%d/test", accountID), admin,
 				map[string]string{"model_id": model, "prompt": "Reply with E2E_OK only."}, 200)
@@ -446,6 +459,14 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 	}
 	if agents {
 		runAgentCases(t, a, fixture, mode, admin, user, key, keyID, accountID, catalog.Models)
+		return
+	}
+	if journeys {
+		if fixture == nil {
+			runAuthorizedUserJourneys(t, a, mode, admin, key, userPassword, keyID, accountID, catalog)
+		} else {
+			runUserJourneys(t, a, fixture, admin, key, userPassword, keyID, accountID)
+		}
 		return
 	}
 	if longTask {
@@ -520,6 +541,10 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 		})
 		t.Run("configured_and_inferred_fusion_routing", func(t *testing.T) {
 			profile := fusion.DefaultProfile("fusion-e2e-configured", model, model)
+			var resumeOldWriter func() map[string]any
+			if fixture != nil {
+				resumeOldWriter = delayedDevinCachePublication(t, a, key, accountID, model, profile.PublicModel)
+			}
 			current := api(t, a, "GET", fmt.Sprintf("/admin/accounts/%d", accountID), admin, nil)
 			var extra map[string]any
 			require.NoError(t, json.Unmarshal([]byte(current.Get("extra").Raw), &extra))
@@ -538,11 +563,24 @@ func runDevinCloudGatewaySuite(t *testing.T, mode string, fixture *nativeFixture
 						"input_price": 0.000001, "output_price": 0.000002,
 					}},
 				})
+				publication := map[string]any{}
+				if resumeOldWriter != nil {
+					publication = resumeOldWriter()
+				}
+				defer func() { writeAgentArtifact(t, "fusion-delayed-publication.json", publication) }()
 				fixture.mu.Lock()
 				before := len(fixture.chats)
 				fixture.mu.Unlock()
 				body := request(t, a, "POST", "/v1/responses", key, map[string]any{"model": profile.PublicModel, "input": "Reply with E2E_OK only."}, 400)
+				publication["public_error_code"] = gjson.GetBytes(body, "error.code").String()
+				fixture.mu.Lock()
+				publication["native_calls_added"] = len(fixture.chats) - before
+				fixture.mu.Unlock()
 				require.Equal(t, "devin_fusion_pricing_unavailable", gjson.GetBytes(body, "error.code").String())
+				if resumeOldWriter != nil {
+					require.Equal(t, true, publication["stale_write_rejected"], "late row publication must be fenced")
+					require.Equal(t, true, publication["configured_route_preserved"], "cached model grant must retain the committed profile")
+				}
 				require.True(t, strings.Contains(gjson.GetBytes(body, "error.message").String(), model), "missing physical UID must be reported; body withheld")
 				fixture.mu.Lock()
 				defer fixture.mu.Unlock()

@@ -123,7 +123,9 @@ describe('UseKeyModal', () => {
       global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
     })
     await flushPromises()
-    await wrapper.get('nav[aria-label="Client"]').findAll('button').find(tab => tab.text() === 'OMO')!.trigger('click')
+    const tab = wrapper.get('button[data-client="omo"]')
+    expect(tab.text()).toContain('OpenCode')
+    await tab.trigger('click')
     expect(wrapper.findAll('pre code')).toHaveLength(0)
     for (const path of ['/', 'C:/', '/tmp/*', '/tmp/../private']) {
       await wrapper.get('[data-testid="devin-workspace-path"]').setValue(path)

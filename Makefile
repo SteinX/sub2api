@@ -24,6 +24,8 @@ FRONTEND_CRITICAL_VITEST := \
 	src/components/account/__tests__/credentialsBuilder.spec.ts \
 	src/components/account/__tests__/OpenCodeGoProtocolRulesEditor.spec.ts \
 	src/components/keys/__tests__/BulkEditKeysModal.spec.ts \
+	src/components/keys/__tests__/UseKeyModal.spec.ts \
+	src/components/keys/__tests__/DevinHandoffConfig.spec.ts \
 	src/components/admin/user/__tests__/UserPlatformQuotaModal.spec.ts \
 	src/views/user/__tests__/KeysView.spec.ts \
 	src/api/__tests__/channelMonitorV2.spec.ts \
@@ -67,9 +69,13 @@ test-frontend:
 test-frontend-critical:
 	@pnpm --dir frontend exec vitest run $(FRONTEND_CRITICAL_VITEST)
 
-# Full production binary, disposable PostgreSQL/Redis, native protocol fixture.
-test-devin-e2e:
+# Protocol contracts: production binary and synthetic native RPCs; no client journey.
+.PHONY: test-devin-contracts-mock test-devin-client-contracts-mock test-devin-fusion-contracts-mock test-devin-user-journeys-mock test-devin-acceptance
+test-devin-contracts-mock:
 	@bash deploy/devin-e2e.sh mock
+
+test-devin-e2e: test-devin-contracts-mock
+	@echo "Deprecated name: protocol contracts are not user E2E."
 
 # Validate PAT onboarding and public model grants without inference.
 test-devin-plan:
@@ -80,8 +86,11 @@ test-devin-live:
 	@bash deploy/devin-e2e.sh live
 
 .PHONY: test-devin-agent-e2e test-devin-agent-plan test-devin-agent-live
-test-devin-agent-e2e:
+test-devin-client-contracts-mock:
 	@bash deploy/devin-agent-e2e.sh mock
+
+test-devin-agent-e2e: test-devin-client-contracts-mock
+	@echo "Deprecated name: hand-authored client contracts are not product E2E."
 
 test-devin-agent-plan:
 	@bash deploy/devin-agent-e2e.sh plan
@@ -90,11 +99,22 @@ test-devin-agent-live:
 	@bash deploy/devin-agent-e2e.sh live
 
 .PHONY: test-devin-long-e2e test-devin-long-plan test-devin-long-live
-test-devin-long-e2e:
+test-devin-fusion-contracts-mock:
 	@bash deploy/devin-long-e2e.sh mock
+
+test-devin-long-e2e: test-devin-fusion-contracts-mock
+	@echo "Deprecated name: internal Fusion orchestration contracts are not client E2E."
 
 test-devin-long-plan:
 	@bash deploy/devin-long-e2e.sh plan
 
 test-devin-long-live:
 	@bash deploy/devin-long-e2e.sh live
+
+# Actual product modal copy -> pinned CLI -> public Key -> project artifacts.
+# Synthetic model decisions; this target cannot certify real-upstream E2E.
+test-devin-user-journeys-mock:
+	@bash deploy/devin-user-journeys.sh mock
+
+test-devin-acceptance:
+	@python3 -m unittest discover -s tools/devin-acceptance -p 'test_*.py'

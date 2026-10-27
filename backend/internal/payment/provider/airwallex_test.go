@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -327,6 +328,8 @@ func TestAirwallexQueryOrderMapsSucceeded(t *testing.T) {
 	require.Equal(t, "SUCCEEDED", resp.Metadata["status"])
 }
 
+var airwallexTestIdentity atomic.Uint64
+
 func mustTestAirwallexProvider(t *testing.T, server *httptest.Server) *Airwallex {
 	t.Helper()
 	prov, err := NewAirwallex("1", map[string]string{
@@ -334,10 +337,15 @@ func mustTestAirwallexProvider(t *testing.T, server *httptest.Server) *Airwallex
 		"apiKey":        "key",
 		"webhookSecret": "whsec",
 		"apiBase":       airwallexDemoAPIBase,
+		// Ephemeral ports can be reused after a server closes. Give each fixture
+		// a distinct credential identity so the process-wide token cache cannot
+		// make a later authentication-negative test skip its login request.
+		"accountId": t.Name() + ":" + strconv.FormatUint(airwallexTestIdentity.Add(1), 10),
 	})
 	require.NoError(t, err)
 	prov.config["apiBase"] = server.URL + "/api/v1"
 	prov.httpClient = server.Client()
+	t.Cleanup(func() { airwallexAccessTokens.Delete(prov.tokenCacheKey()) })
 	return prov
 }
 

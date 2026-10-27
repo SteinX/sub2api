@@ -187,17 +187,25 @@ class ReleaseMatrixTest(unittest.TestCase):
         docker = fake_bin / 'docker'
         docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\n')
         docker.chmod(0o755)
+        self.fixture_acceptance_guard()
         for simple in (False, True):
             with self.subTest(simple=simple):
                 log_path = Path(f'docker-{simple}.log').resolve()
                 env = {**os.environ, 'PATH': str(fake_bin.resolve()) + os.pathsep + os.environ['PATH'],
                        'DOCKER_LOG': str(log_path), 'RUNNER_TEMP': self.temp.name,
-                       'RELEASE_VERSION': '9.8.7', 'RELEASE_SHA': 'a' * 40, 'GITHUB_REPOSITORY': 'ExampleOwner/sub2api',
+                       'RELEASE_VERSION': '9.8.7', 'RELEASE_TAG': 'v9.8.7', 'RELEASE_SHA': 'a' * 40, 'GITHUB_REPOSITORY': 'ExampleOwner/sub2api',
                        'DRY_RUN': 'false', 'SIMPLE_RELEASE': str(simple).lower(), 'DOCKERHUB_USERNAME': 'fixturehub'}
                 subprocess.run(['bash', str(ROOT / '.github/release-tools/release-images.sh')], env=env, check=True)
                 log = log_path.read_text()
-                self.assertIn('--push', log)
+                self.assertNotIn('--push', log)
+                self.assertIn('type=docker', log)
+                self.assertIn('push ghcr.io/exampleowner/sub2api:9.8.7', log)
                 self.assertEqual(log.count('buildx build'), 1 if simple else 2)
+                lines = log.splitlines()
+                self.assertLess(max(i for i, line in enumerate(lines) if line.startswith('buildx build')), min(i for i, line in enumerate(lines) if line.startswith('push ')))
+                for i, line in enumerate(lines):
+                    if line.startswith('push ') or line.startswith('buildx imagetools create'):
+                        self.assertEqual('acceptance-guard', lines[i - 1])
                 if simple:
                     self.assertNotIn('fixturehub', log)
                     self.assertNotIn('imagetools', log)
@@ -206,6 +214,28 @@ class ReleaseMatrixTest(unittest.TestCase):
                     self.assertEqual(log.count('imagetools create'), 2)
                     self.assertIn('fixturehub/sub2api:9.8', log)
                     self.assertIn('ghcr.io/exampleowner/sub2api:9', log)
+
+    def fixture_acceptance_guard(self):
+        guard = Path('release-tools/devin-acceptance/release_guard.py')
+        guard.parent.mkdir(parents=True)
+        guard.write_text('import os,sys\nfrom pathlib import Path\nwith open(os.environ["DOCKER_LOG"],"a") as out: out.write("acceptance-guard\\n")\nsys.exit(1 if Path("block-after-build").exists() else 0)\n')
+
+    def test_status_change_during_build_prevents_every_external_image_write(self):
+        fake_bin = Path('bin'); fake_bin.mkdir()
+        docker = fake_bin / 'docker'
+        docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_LOG"\nif [ "$1 $2" = "buildx build" ]; then touch block-after-build; fi\n')
+        docker.chmod(0o755)
+        self.fixture_acceptance_guard()
+        env = {**os.environ, 'PATH': str(fake_bin.resolve()) + os.pathsep + os.environ['PATH'],
+               'DOCKER_LOG': str(Path('docker.log').resolve()), 'RUNNER_TEMP': self.temp.name,
+               'RELEASE_VERSION': '9.8.7', 'RELEASE_TAG': 'v9.8.7', 'RELEASE_SHA': 'a' * 40, 'GITHUB_REPOSITORY': 'ExampleOwner/sub2api',
+               'DRY_RUN': 'false', 'SIMPLE_RELEASE': 'false', 'DOCKERHUB_USERNAME': 'skip'}
+        result = subprocess.run(['bash', str(ROOT / '.github/release-tools/release-images.sh')], env=env)
+        self.assertNotEqual(result.returncode, 0)
+        log = Path('docker.log').read_text()
+        self.assertEqual(log.count('buildx build'), 2)
+        self.assertNotIn('push ', log)
+        self.assertNotIn('imagetools', log)
 
 
 

@@ -1,0 +1,146 @@
+{
+  "cases": [
+    {
+      "artifact_sha256": "a79b8e734ea221f017b9ccf33fb9dbb67d0e0b7c3a478a63910af8581a30754d",
+      "artifact_verified_after_resume": true,
+      "artifact_verified_before_oracle": true,
+      "client": "omp",
+      "client_identity": {
+        "engine": "bun",
+        "engine_version": "1.4.4",
+        "executable_sha256": "4475566bfd0a89b045d4b41c7efe905360aac9662d84746a3e8ad5e735542078",
+        "omo_senpi_equivalent": null,
+        "package": "@oh-my-pi/pi-coding-agent",
+        "platform": "linux-x64",
+        "version": "18.12.6"
+      },
+      "compact": "not_run",
+      "context_pressure": "not_run",
+      "eligible_for_real_e2e": false,
+      "error_codes": {
+        "devin_fusion_history_conflict": 1
+      },
+      "expectation": "known default-profile failure observed; not a pass",
+      "fork": "not_run",
+      "handoff": {
+        "browser": "154.0.8037.57",
+        "client": "omp",
+        "files": [
+          {
+            "name": "models.yml",
+            "sha256": "c7b5e71b8ce3c2db2cf3dd713b73b90e6dac0a133113e999be15293716fcae1d"
+          },
+          {
+            "name": "config.yml",
+            "sha256": "10c70d8b88a7ad8b838431d1e80f301f41314c039047d9965748f5f5a840b9a6"
+          }
+        ],
+        "instructions_sha256": "1e423b18476a2865814fcb697ddb394218ddd9712536090ee0ce1d93b59e3ce5",
+        "passed": true,
+        "profile": "default",
+        "selected_model": "fusion-project-journey",
+        "source": "UseKeyModal browser copy buttons",
+        "ui_scope": "isolated product modal; signup/login not covered"
+      },
+      "http_attempts": 8,
+      "id": "omp/fusion/default",
+      "independent_project_test_passed": true,
+      "initial_project_test_failed": true,
+      "model_kind": "fusion",
+      "native_context_hashes": {
+        "lead": {
+          "ec1b2c0a07f64b99adb21b1b76dc7dcfbb220c426435658862b20dbb841930dc": true
+        },
+        "sidekick": {
+          "1f591ba191112c2ac85e19912919794611d5f495300c9d32cce19476ae34205a": true
+        }
+      },
+      "observed_physical_models": {
+        "e2e-sidekick": 7,
+        "swe-2-max": 2
+      },
+      "observed_role_calls": {
+        "lead": 2,
+        "sidekick": 7
+      },
+      "physical_lead_uid": "swe-2-max",
+      "physical_sidekick_uid": "e2e-sidekick",
+      "profile": "default",
+      "protected_project_files_intact": true,
+      "public_requests": 8,
+      "reasoning_scope": {
+        "client_thinking": "off",
+        "model_uid_effort": "fixture UID swe-2-max"
+      },
+      "resume": {
+        "bash_exit_code": null,
+        "client_session_sha256": "9d20b9c8ca936fbf2fcaab35ca837c7bc290abe745b8b87257946c4ab8fa28ad",
+        "client_tests_succeeded": false,
+        "event_error": true,
+        "exit_code": 1,
+        "final_text_matches": false,
+        "frames": 10,
+        "normal_stop": false,
+        "parse_errors": 0,
+        "passed": false,
+        "session_changed": false,
+        "session_seen": true,
+        "test_command_verified": false,
+        "timed_out": false,
+        "tools": {
+          "bash": 0,
+          "read": 0,
+          "write": 0
+        }
+      },
+      "same_client_session": true,
+      "source_unchanged_after_resume": true,
+      "status": "failed",
+      "task": {
+        "bash_exit_code": 0,
+        "bash_exit_source": "protected project test runner receipt",
+        "client_session_sha256": "9d20b9c8ca936fbf2fcaab35ca837c7bc290abe745b8b87257946c4ab8fa28ad",
+        "client_tests_succeeded": true,
+        "event_error": false,
+        "exit_code": 0,
+        "final_text_matches": true,
+        "frames": 88,
+        "normal_stop": true,
+        "parse_errors": 0,
+        "passed": true,
+        "session_changed": false,
+        "session_seen": true,
+        "test_command_verified": true,
+        "timed_out": false,
+        "tools": {
+          "bash": 1,
+          "read": 4,
+          "write": 1
+        }
+      },
+      "tier": "client_mock",
+      "worker": "not_run"
+    }
+  ],
+  "eligible_for_real_e2e": false,
+  "real_upstream": false,
+  "schema_version": 1,
+  "source": {
+    "backend_sha256": "13dce502c293202001ae47ee09618f1b6d68ff241f44e1d69b23f906996c56c8",
+    "client_lock_sha256": "8ab9c7ba3e672b570cad124877852c4c3d2656678168a853e56f86ca23ad96d1",
+    "commit": "d44d08fd7ed794262638cb71de8e0b24edc45506",
+    "dirty": false,
+    "tree": "0b7e2d6825bd265aed395b79a7bb7e5a8a9a1651",
+    "ui_bundle_sha256": "269d074ce3f739afa283b47acffe2a185720c37bec894955bb243ecaaf2c9063"
+  },
+  "tier": "client_mock",
+  "unverified": [
+    "real upstream",
+    "deployed existing group/channel rules",
+    "OMO Senpi identity",
+    "unexpected disconnect",
+    "client compact",
+    "client fork",
+    "client workers"
+  ]
+}

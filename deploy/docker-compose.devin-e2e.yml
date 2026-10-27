@@ -17,9 +17,12 @@ services:
       retries: 60
   redis:
     image: redis:8-alpine
+    user: redis
+    environment:
+      REDISCLI_AUTH: ${DEVIN_E2E_REDIS_PASSWORD:?run deploy/devin-e2e.sh}
     ports:
       - "127.0.0.1::6379"
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["sh", "-c", "exec redis-server --save '' --appendonly no --requirepass \"$$REDISCLI_AUTH\""]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s

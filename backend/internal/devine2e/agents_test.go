@@ -50,27 +50,49 @@ type agentRequest struct {
 	HasReadResult                     bool
 	Status                            int
 	Stream, Forwarded                 bool
+	receipt                           int
+	response                          *journeyResponseBody
 }
 
 // This is an observable loopback admission boundary, not a credential proxy.
 // It preserves the client's protocol and session headers, limits model calls,
 // and clamps requested output before the production gateway receives a request.
 type agentAdmission struct {
-	server        *httptest.Server
-	mu            sync.Mutex
-	model         string
-	forwarded     int
-	maxForwarded  int
-	requests      []*agentRequest
-	interruptFile string
-	active        chan struct{}
+	server          *httptest.Server
+	mu              sync.Mutex
+	model           string
+	forwarded       int
+	maxForwarded    int
+	maxAttempts     int
+	queueConcurrent bool
+	requests        []*agentRequest
+	interruptFile   string
+	active          chan struct{}
+	runBudget       journeyBudget
+	outputLimit     int
+	turnTimeout     time.Duration
 }
 
 type agentRequestContext struct{}
 
-func newAgentAdmission(t *testing.T, app *application, model string, maxForwarded int) *agentAdmission {
+func newAgentAdmission(t *testing.T, app *application, model string, maxForwarded int, attemptLimits ...int) *agentAdmission {
 	t.Helper()
-	p := &agentAdmission{model: model, maxForwarded: maxForwarded, active: make(chan struct{}, 1)}
+	maxAttempts := 12
+	if len(attemptLimits) > 0 {
+		require.Len(t, attemptLimits, 1)
+		maxAttempts = attemptLimits[0]
+		require.Positive(t, maxAttempts)
+	}
+	return newAgentAdmissionPolicy(t, app, model, maxForwarded, maxAttempts, false)
+}
+
+func newJourneyAdmission(t *testing.T, app *application, model string, maxForwarded int) *agentAdmission {
+	return newAgentAdmissionPolicy(t, app, model, maxForwarded, maxForwarded, true)
+}
+
+func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxForwarded, maxAttempts int, queue bool) *agentAdmission {
+	t.Helper()
+	p := &agentAdmission{model: model, maxForwarded: maxForwarded, maxAttempts: maxAttempts, queueConcurrent: queue, active: make(chan struct{}, 1), outputLimit: 1024}
 	target, err := url.Parse(app.base)
 	require.NoError(t, err)
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -101,6 +123,10 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 				}
 			}
 			p.mu.Unlock()
+			if p.runBudget != nil {
+				record.response = &journeyResponseBody{ReadCloser: response.Body}
+				response.Body = record.response
+			}
 		}
 		return nil
 	}
@@ -112,6 +138,11 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 		if r.Method != "POST" || r.URL.Path != "/v1/chat/completions" {
 			http.Error(w, "unsupported E2E route", 404)
 			return
+		}
+		if p.turnTimeout > 0 {
+			ctx, cancel := context.WithTimeout(r.Context(), p.turnTimeout)
+			defer cancel()
+			r = r.WithContext(ctx)
 		}
 		var body map[string]any
 		if json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body) != nil || body["model"] != p.model {
@@ -143,18 +174,27 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 			}
 		}
 		p.requests = append(p.requests, record)
-		if len(p.requests) > 12 || p.forwarded >= p.maxForwarded {
+		if len(p.requests) > p.maxAttempts || p.forwarded >= p.maxForwarded {
 			p.mu.Unlock()
 			http.Error(w, "E2E request budget exhausted", 402)
 			return
 		}
 		p.mu.Unlock()
-		select {
-		case p.active <- struct{}{}:
-			defer func() { <-p.active }()
-		default:
-			http.Error(w, "E2E permits one active request", 409)
-			return
+		if p.queueConcurrent {
+			select {
+			case p.active <- struct{}{}:
+				defer func() { <-p.active }()
+			case <-r.Context().Done():
+				return
+			}
+		} else {
+			select {
+			case p.active <- struct{}{}:
+				defer func() { <-p.active }()
+			default:
+				http.Error(w, "E2E permits one active request", 409)
+				return
+			}
 		}
 		// A request may have passed the earlier check before another request
 		// took and released active. Recheck and reserve under the same lock.
@@ -173,11 +213,32 @@ func newAgentAdmission(t *testing.T, app *application, model string, maxForwarde
 			return
 		}
 		// SDK retries also pass this gate. No runner retry after an uncertain send.
+		if p.runBudget != nil {
+			var err error
+			record.receipt, err = p.runBudget.Admit()
+			if err != nil {
+				p.mu.Unlock()
+				http.Error(w, "approved run admission stopped", 402)
+				return
+			}
+			defer func() {
+				outcome := "uncertain"
+				if record.Status >= 400 {
+					outcome = "failed"
+				} else if record.response != nil && record.response.eof {
+					outcome = "failed"
+					if validJourneyCompletion(record.response.data, record.Stream) {
+						outcome = "success"
+					}
+				}
+				_ = p.runBudget.Complete(record.receipt, outcome)
+			}()
+		}
 		p.forwarded++
 		record.Forwarded = true
 		p.mu.Unlock()
-		if requested, ok := body["max_tokens"].(float64); !ok || requested <= 0 || requested > 1024 {
-			body["max_tokens"] = 1024
+		if requested, ok := body["max_tokens"].(float64); !ok || requested <= 0 || requested > float64(p.outputLimit) {
+			body["max_tokens"] = p.outputLimit
 		}
 		delete(body, "max_completion_tokens")
 		encoded, _ := json.Marshal(body)
@@ -658,14 +719,15 @@ func savePrivateAgentUsage(t *testing.T, app *application, keyID int64, client, 
 	writeAgentArtifact(t, "private-usage-"+client+"-"+kind+".json", evidence)
 }
 
-func verifyAgentFusion(t *testing.T, app *application, keyID int64, records []agentRequest, client string) {
+func verifyAgentFusion(t *testing.T, app *application, keyID int64, records []agentRequest, client string, identifiedZero ...bool) {
 	t.Helper()
 	db := agentDatabase(t, app)
 	var userID int64
 	require.NoError(t, db.QueryRow("SELECT user_id FROM api_keys WHERE id=$1", keyID).Scan(&userID))
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT")})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD")})
 	t.Cleanup(func() { _ = rdb.Close() })
 	seen := map[string]bool{}
+	allowZero := len(identifiedZero) == 1 && identifiedZero[0]
 	for _, record := range records {
 		if !record.Forwarded || record.Status != 200 || seen[record.Session] {
 			continue
@@ -689,14 +751,18 @@ func verifyAgentFusion(t *testing.T, app *application, keyID int64, records []ag
 			roles[attempt.Role]++
 			require.Equal(t, "completed", attempt.Status)
 			require.True(t, attempt.Settled && attempt.Applied, "role usage not durably settled")
-			require.Positive(t, attempt.CostUSD)
+			if allowZero {
+				require.GreaterOrEqual(t, attempt.CostUSD, 0.0)
+			} else {
+				require.Positive(t, attempt.CostUSD)
+			}
 			id := "fusion:" + attempt.ID
 			require.Eventually(t, func() bool {
 				var count int
 				var cost float64
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
-				return db.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(actual_cost),0) FROM usage_logs WHERE request_id=$1 AND api_key_id=$2 AND actual_cost>0", id, keyID).Scan(&count, &cost) == nil && count == 1 && math.Abs(cost-attempt.CostUSD) <= 1e-9
+				return db.QueryRowContext(ctx, "SELECT count(*),coalesce(sum(greatest(actual_cost,total_cost)),0) FROM usage_logs WHERE request_id=$1 AND api_key_id=$2 AND (actual_cost>0 OR $3) AND actual_cost>=0 AND total_cost>=0", id, keyID, allowZero).Scan(&count, &cost) == nil && count == 1 && math.Abs(cost-attempt.CostUSD) <= 1e-9
 			}, 10*time.Second, 200*time.Millisecond, "role-level usage missing or duplicated")
 		}
 		require.GreaterOrEqual(t, roles[fusion.Lead], 2)

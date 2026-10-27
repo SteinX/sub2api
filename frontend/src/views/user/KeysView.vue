@@ -394,6 +394,8 @@
             <div class="flex items-center gap-1">
               <!-- Use Key Button -->
               <button
+                data-testid="key-use"
+                :data-key-name="row.name"
                 @click="openUseKeyModal(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-green-50 hover:text-green-600 dark:hover:bg-green-900/20 dark:hover:text-green-400"
               >

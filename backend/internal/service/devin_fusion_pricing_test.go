@@ -11,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -42,6 +43,105 @@ func TestDevinFusionIdentifiedClaude55FallbackTiers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDevinExplicitFreeSidekickIsDistinctFromMissingPricing(t *testing.T) {
+	// User-confirmed SWE-2 zero prices are an explicit temporary group rule,
+	// never an official/global card or an implicit "unknown means free" policy.
+	const sidekick = "swe-2-high"
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Default.RateMultiplier = 1
+	billing := NewBillingService(cfg, nil)
+	group := &Group{ID: 1, Platform: PlatformDevin, RateMultiplier: 1}
+	bills := &fusionBillingRepo{}
+	svc := &OpenAIGatewayService{cfg: cfg, billingService: billing, resolver: NewModelPricingResolver(nil, billing), usageBillingRepo: bills}
+	key := &APIKey{ID: 2, GroupID: &group.ID, Group: group, User: &User{ID: 3, Balance: 10}}
+	missing := svc.InspectDevinContextPrice(context.Background(), key, sidekick, 32768, 1024)
+	require.False(t, missing.Identified)
+	require.False(t, missing.Calculable)
+	require.Nil(t, missing.ContextCostUpperUSD)
+	zero := 0.0
+	group.ModelPricing = []ChannelModelPricing{{Platform: PlatformDevin, Models: []string{sidekick}, BillingMode: BillingModeToken, InputPrice: &zero, OutputPrice: &zero, CacheWritePrice: &zero, CacheReadPrice: &zero}}
+	free := svc.InspectDevinContextPrice(context.Background(), key, sidekick, 32768, 1024)
+	require.True(t, free.Identified)
+	require.True(t, free.Calculable)
+	require.True(t, free.ZeroEffectiveCharge)
+	require.Equal(t, PricingSourceGroup, free.Source)
+	require.NotNil(t, free.ContextCostUpperUSD)
+	require.Zero(t, *free.ContextCostUpperUSD)
+	require.False(t, billing.HasIdentifiedTokenPricing(sidekick), "explicit group fact must not install a global fallback")
+	x := &devinFusionExecutor{service: svc, key: key}
+	lead, err := x.cost(context.Background(), "claude-opus-5-5-medium", UsageTokens{InputTokens: 1000, OutputTokens: 100}, time.Now())
+	require.NoError(t, err)
+	require.Positive(t, lead.TotalCost)
+	freeCost, err := x.cost(context.Background(), sidekick, UsageTokens{InputTokens: 1000, OutputTokens: 100}, time.Now())
+	require.NoError(t, err)
+	require.Zero(t, freeCost.TotalCost)
+	for _, uid := range []string{"swe-2-unknown", "swe-2-max", "fusion-claude-opus-5-5-medium-sidekick-swe-2-high"} {
+		require.False(t, svc.InspectDevinPricing(context.Background(), key, uid).Identified)
+	}
+	group.ModelPricing = nil
+	require.False(t, svc.InspectDevinPricing(context.Background(), key, sidekick).Identified, "removing a zero-price rule restores fail-closed missing-price semantics")
+	require.Empty(t, bills.commands, "price inspection must never reserve or charge")
+}
+
+func TestDevinContextQuoteRejectsNonMonotonicPriceIntervals(t *testing.T) {
+	const model = "e2e-tiered-price"
+	for _, mode := range []BillingMode{BillingModePerRequest, BillingModeToken} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := &config.Config{RunMode: config.RunModeSimple}
+			cfg.Default.RateMultiplier = 1
+			billing := NewBillingService(cfg, nil)
+			maxShort := 1000
+			card := ChannelModelPricing{Platform: PlatformDevin, Models: []string{model}, BillingMode: mode, InputPrice: testPtrFloat64(.001), OutputPrice: testPtrFloat64(.001), PerRequestPrice: testPtrFloat64(.5), Intervals: []PricingInterval{
+				{MinTokens: 0, MaxTokens: &maxShort, PerRequestPrice: testPtrFloat64(.5), InputPrice: testPtrFloat64(.001)},
+				{MinTokens: 1001, PerRequestPrice: testPtrFloat64(.01), InputPrice: testPtrFloat64(.000000001)},
+			}}
+			group := &Group{ID: 1, Platform: PlatformDevin, RateMultiplier: 1, LongContextPricingEnabled: true}
+			channel := &ChannelService{}
+			if mode == BillingModePerRequest {
+				group.ModelPricing = []ChannelModelPricing{card}
+			} else {
+				channel.cache.Store(populateChannelCache([]Channel{{ID: 7, Status: StatusActive, GroupIDs: []int64{group.ID}, ModelPricing: []ChannelModelPricing{card}}}, map[int64]string{group.ID: PlatformDevin}))
+			}
+			bills := &fusionBillingRepo{}
+			svc := &OpenAIGatewayService{cfg: cfg, billingService: billing, resolver: NewModelPricingResolver(channel, billing), usageBillingRepo: bills}
+			key := &APIKey{ID: 2, GroupID: &group.ID, Group: group, User: &User{ID: 3, Balance: 10}}
+			price := svc.InspectDevinContextPrice(context.Background(), key, model, 32768, 1024)
+			require.True(t, price.Identified)
+			require.True(t, price.Calculable)
+			require.Nil(t, price.ContextCostUpperUSD, "a low long-context tier must not authorize a more expensive short request")
+			require.Equal(t, "non_flat_token_pricing", price.CostBoundUnavailable)
+			if mode == BillingModePerRequest {
+				x := &devinFusionExecutor{service: svc, key: key}
+				short, err := x.cost(context.Background(), model, UsageTokens{InputTokens: 1, OutputTokens: 1}, time.Now())
+				require.NoError(t, err)
+				long, err := x.cost(context.Background(), model, UsageTokens{InputTokens: 32768, OutputTokens: 1024}, time.Now())
+				require.NoError(t, err)
+				require.Greater(t, short.TotalCost, long.TotalCost, "prove the non-monotonic configuration is actually active before testing its refusal")
+			}
+			require.Empty(t, bills.commands)
+		})
+	}
+}
+
+func TestDevinContextQuoteRejectsGroupPeakBoundaries(t *testing.T) {
+	const model = "e2e-peak-price"
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	cfg.Default.RateMultiplier = 1
+	billing := NewBillingService(cfg, nil)
+	group := &Group{ID: 1, Platform: PlatformDevin, RateMultiplier: 1, SubscriptionType: SubscriptionTypeSubscription, PeakRateEnabled: true, PeakStart: "01:00", PeakEnd: "02:00", PeakRateMultiplier: 2,
+		ModelPricing: []ChannelModelPricing{{Models: []string{model}, Platform: PlatformDevin, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(.000001), OutputPrice: testPtrFloat64(.000002)}},
+	}
+	require.NoError(t, ValidatePeakRateConfig(group.SubscriptionType, true, group.PeakStart, group.PeakEnd, group.PeakRateMultiplier))
+	require.Equal(t, 2.0, group.PeakMultiplierAt(time.Date(2026, 10, 25, 1, 30, 0, 0, timezone.Location())), "prove the subscribed caller has a valid higher-price period")
+	svc := &OpenAIGatewayService{cfg: cfg, billingService: billing, resolver: NewModelPricingResolver(nil, billing)}
+	key := &APIKey{ID: 2, GroupID: &group.ID, Group: group, User: &User{ID: 3, Balance: 10}}
+	price := svc.InspectDevinContextPrice(context.Background(), key, model, 32768, 1024)
+	require.True(t, price.Identified)
+	require.True(t, price.Calculable)
+	require.Nil(t, price.ContextCostUpperUSD)
+	require.Equal(t, "time_varying_pricing", price.CostBoundUnavailable)
 }
 
 func TestDevinFusionMemberPricingUsesPhysicalUIDAndGroupScope(t *testing.T) {
@@ -102,6 +202,16 @@ func TestDevinFusionMemberPricingUsesPhysicalUIDAndGroupScope(t *testing.T) {
 			call := fusion.Call{Request: &apicompat.ResponsesRequest{Model: lead, MaxOutputTokens: &out}, PricingAt: time.Now()}
 			identified, _ := svc.hasIdentifiedOpenAIResponsePricing(context.Background(), lead, key)
 			require.True(t, identified, "known Lead effort alias must use its built-in card")
+			admission := svc.InspectDevinPricing(context.Background(), key, sidekick)
+			require.Equal(t, tc.wantSource != "", admission.Identified)
+			require.Equal(t, tc.wantSource != "", admission.Calculable)
+			if tc.wantSource != "" {
+				require.Equal(t, tc.wantSource, admission.Source)
+				quoted := svc.InspectDevinContextPrice(context.Background(), key, sidekick, 32768, 1024)
+				require.NotNil(t, quoted.ContextCostUpperUSD)
+				require.GreaterOrEqual(t, *quoted.ContextCostUpperUSD, 32768*2e-6+1024*4e-6, "quote must include a full context and maximum output at the actual scoped price")
+			}
+			require.False(t, svc.InspectDevinPricing(context.Background(), key, public).Identified)
 			estimate, err := x.estimate(context.Background(), call, false)
 			if tc.wantSource == "" {
 				var pricingErr *fusion.Error

@@ -51,7 +51,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - name: Preserve tooling for releases of older tags
-        run: cp -R .github/release-tools "$RUNNER_TEMP/release-tools"
+        run: |
+          cp -R .github/release-tools "$RUNNER_TEMP/release-tools"
+          cp -R tools/devin-acceptance "$RUNNER_TEMP/release-tools/devin-acceptance"
       - name: Checkout selected application source
         uses: actions/checkout@v6
         with:
@@ -70,6 +72,15 @@ jobs:
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" plan "${args[@]}"
+      - name: Require actual user journey acceptance and current review/security state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_REF: ${{ inputs.tag || github.ref_name }}
+          ACCEPTANCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          args=(--ref "$ACCEPTANCE_REF" --repository "$ACCEPTANCE_REPOSITORY")
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          python "$RUNNER_TEMP/release-tools/devin-acceptance/release_guard.py" "${args[@]}"
       - uses: actions/upload-artifact@v7
         with:
           name: release-tooling
@@ -251,14 +262,22 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Recheck user acceptance and exact-SHA review/security before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--ref "$RELEASE_TAG" --repository "${{ github.repository }}")
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          python "$RUNNER_TEMP/release-tools/devin-acceptance/release_guard.py" "${args[@]}"
       - name: Build images and publish manifests
         env:
+          GH_TOKEN: ${{ github.token }}
           DOCKERHUB_USERNAME: ${{ env.PUBLISH_DOCKERHUB == 'true' && secrets.DOCKERHUB_USERNAME || 'skip' }}
         run: bash "$RUNNER_TEMP/release-tools/release-images.sh"
       - name: Get annotated tag notes
         id: tag_message
         run: |
-          TAG_MESSAGE=$(git tag -l --format='%(contents:body)' "$RELEASE_TAG")
+          TAG_MESSAGE=$(git tag -l --format='%(contents:body)' "$RELEASE_TAG" | sed '/^Sub2API-Devin-Acceptance-v1: /d')
           DELIMITER="TAG_MESSAGE_$(openssl rand -hex 16)"
           {
             echo "message<<$DELIMITER"
@@ -270,6 +289,13 @@ jobs:
           args=(publish --output "$RUNNER_TEMP/goreleaser.publisher.yaml")
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" config "${args[@]}"
+      - name: Recheck user acceptance and exact-SHA review/security before publishing archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--ref "$RELEASE_TAG" --repository "${{ github.repository }}")
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          python "$RUNNER_TEMP/release-tools/devin-acceptance/release_guard.py" "${args[@]}"
       - name: Publish existing archives and release notes
         uses: goreleaser/goreleaser-action@v7
         with:

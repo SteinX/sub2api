@@ -82,7 +82,11 @@ func isSchedulerCacheHandshakeCommand(cmd redis.Cmder) bool {
 func (r *schedulerCacheCommandRecorder) record(cmd redis.Cmder) string {
 	entry := strings.ToLower(cmd.Name())
 	if args := cmd.Args(); len(args) > 1 {
-		entry += " " + fmt.Sprint(args[1])
+		if entry == "eval" && len(args) > 3 {
+			entry += " " + fmt.Sprint(args[3])
+		} else {
+			entry += " " + fmt.Sprint(args[1])
+		}
 	}
 	r.mu.Lock()
 	r.commands = append(r.commands, entry)
@@ -536,7 +540,7 @@ func TestSchedulerCacheSnapshotMemoWriteAccountIDsAdvancesRevision(t *testing.T)
 	ctx := context.Background()
 	geminiRevisionKey := schedulerAccountMetaRevisionKeyForPlatform(service.PlatformGemini)
 
-	t.Run("revisions share the last chunk", func(t *testing.T) {
+	t.Run("atomic account writes retain one round trip per chunk", func(t *testing.T) {
 		cache, _, recorder := newSchedulerCacheMemoUnit(t, 2)
 		accounts := []service.Account{
 			memoTestAccount(131, "a"),
@@ -551,13 +555,12 @@ func TestSchedulerCacheSnapshotMemoWriteAccountIDsAdvancesRevision(t *testing.T)
 		batches := recorder.pipelineBatches()
 		require.Len(t, batches, 2, "one execution per chunk")
 		require.Equal(t, []string{
-			"set " + schedulerAccountKey("133"),
-			"set " + schedulerAccountMetaKey("133"),
+			"eval " + schedulerAccountKey("133"),
 			"set " + memoAnthropicRevisionKey,
 			"set " + geminiRevisionKey,
 		}, batches[1])
 		require.NotContains(t, strings.Join(batches[0], "\n"), schedulerAccountMetaRevisionKey)
-		require.Equal(t, 2, recorder.countPrefix("set "+schedulerAccountMetaRevisionKey), "no revision write outside the last chunk")
+		require.Equal(t, 2, recorder.countPrefix("set "+schedulerAccountMetaRevisionKey), "no extra revision round trip")
 		require.Empty(t, memoRevision(t, cache, schedulerAccountMetaRevisionKey))
 		first := memoRevision(t, cache, memoAnthropicRevisionKey)
 		require.Len(t, first, schedulerAccountMetaRevisionBytes*2)
@@ -581,13 +584,11 @@ func TestSchedulerCacheSnapshotMemoWriteAccountIDsAdvancesRevision(t *testing.T)
 		batches := recorder.pipelineBatches()
 		require.Len(t, batches, 2, "no extra execution for the revision")
 		require.Equal(t, []string{
-			"set " + schedulerAccountKey("143"),
-			"set " + schedulerAccountMetaKey("143"),
-			"set " + schedulerAccountKey("144"),
-			"set " + schedulerAccountMetaKey("144"),
+			"eval " + schedulerAccountKey("143"),
+			"eval " + schedulerAccountKey("144"),
 			"set " + memoAnthropicRevisionKey,
 		}, batches[1])
-		require.Len(t, recorder.recorded(), 9, "every command travels inside the two pipelines")
+		require.Len(t, recorder.recorded(), 5, "every command travels inside the two pipelines")
 	})
 
 	t.Run("failure in a later chunk advances the global revision", func(t *testing.T) {
@@ -608,7 +609,7 @@ func TestSchedulerCacheSnapshotMemoWriteAccountIDsAdvancesRevision(t *testing.T)
 		require.Eventually(t, func() bool {
 			return memoRevisionValue(cache, schedulerAccountMetaRevisionKey) != globalBefore
 		}, 2*time.Second, 5*time.Millisecond, "the global revision is advanced in the background")
-		require.Equal(t, platformBefore, memoRevision(t, cache, memoAnthropicRevisionKey))
+		require.NotEqual(t, platformBefore, memoRevision(t, cache, memoAnthropicRevisionKey), "the successful first chunk invalidates L1 atomically")
 
 		recorder.reset()
 		got := memoRead(t, cache, bucket)

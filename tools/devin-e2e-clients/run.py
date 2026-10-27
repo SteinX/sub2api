@@ -16,8 +16,9 @@ from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parent
-PINS = {"opencode-ai": "1.19.4", "oh-my-opencode": "5.1.44", "@oh-my-pi/pi-coding-agent": "18.12.6", "@oven/bun-linux-x64": "1.4.4"}
-SENSITIVE_ENV = {"DEVIN_E2E_PAT", "DEVIN_E2E_CREDENTIAL", "DEVIN_PAT", "DEVIN_API_KEY", "SUB2API_API_KEY", "SUB2API_USER_TOKEN"}
+PINS = {"opencode-ai": "1.19.4", "@opencode-ai/plugin": "1.19.4", "oh-my-opencode": "5.1.44", "@oh-my-pi/pi-coding-agent": "18.12.6", "@oven/bun-linux-x64": "1.4.4"}
+SENSITIVE_ENV = {"DEVIN_E2E_PAT", "DEVIN_E2E_CREDENTIAL", "DEVIN_PAT", "DEVIN_API_KEY", "SUB2API_API_KEY", "SUB2API_USER_TOKEN",
+                 "DEVIN_E2E_DB_PASSWORD", "DEVIN_E2E_REDIS_PASSWORD", "DEVIN_E2E_PG_PORT", "DEVIN_E2E_REDIS_PORT", "DEVIN_JOURNEY_GATEWAY_KEY"}
 
 
 def write_json(path, value):
@@ -97,11 +98,12 @@ def execute(args):
         raise ValueError("OMO requires a disposable CI user or a read-only user directory; its startup migration is not isolated by XDG")
     prompt = "Reply with E2E_OK only. Do not call tools."
     if args.action == "tool":
-        prompt = "Read the local probe.txt with the read tool, verify it contains E2E_TOOL_RESULT, then reply E2E_OK only."
+        prompt = "Read the local probe.txt with the read tool, then reply E2E_OK only after the read has completed."
     if args.model == "fusion-e2e-agents":
         prompt = prompt.replace("Do not call tools.", "Do not call client-side tools for this text-only check.")
         prompt = "Use gateway-internal Lead/Sidekick delegation: have the Sidekick independently verify this task, then have the Lead review the report before the final answer. " + prompt
     result = {"client": args.client, "action": args.action, "saw_expected_text": False, "tool_completed": 0, "frames": 0, "parse_errors": 0, "timed_out": False, "interrupted_before_forward": False, "event_types": {}, "tool_statuses": {}}
+    result.update(tier="client_smoke", eligible_for_real_e2e=False, configuration_source="legacy_runner_template", normal_stop=False, terminal_error=False)
     proc = subprocess.Popen(command(args.client, args.model, args.action, prompt), cwd=directory / "workspace", env=child_environment(directory),
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
     byte_count = 0
@@ -109,7 +111,7 @@ def execute(args):
 
     def consume():
         nonlocal byte_count, assistant_tail
-        for raw in proc.stdout:
+        for raw in iter(lambda: proc.stdout.readline(2 * 1024 * 1024 + 1), b''):
             byte_count += len(raw)
             if byte_count > 8 * 1024 * 1024 or len(raw) > 2 * 1024 * 1024:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -121,6 +123,12 @@ def execute(args):
                 continue
             result["frames"] += 1
             kind = event.get("type")
+            if kind == "step_start":
+                assistant_tail = ""
+            if kind == "error":
+                result["terminal_error"] = True
+            if kind == "step_finish":
+                result["normal_stop"] = event.get("part", {}).get("reason") in {"stop", "end_turn"}
             kind = kind if kind in {"text", "tool_use", "step_start", "step_finish", "error", "tool_execution_start", "tool_execution_end", "message_start", "message_update", "message_end", "agent_start", "agent_end", "turn_start", "turn_end", "session"} else "other"
             result["event_types"][kind] = result["event_types"].get(kind, 0) + 1
             # Inspect in memory, retain only booleans and counts. No text/thinking/tool arguments.
@@ -128,14 +136,15 @@ def execute(args):
             if event.get("type") == "text":
                 assistant_text = event.get("part", {}).get("text", "")
             message = event.get("message", {})
-            if message.get("role") == "assistant":
+            if message.get("role") == "assistant" and event.get("type") == "message_end":
+                assistant_tail = ""
                 assistant_text += "".join(part.get("text", "") for part in message.get("content", []) if isinstance(part, dict) and part.get("type") == "text")
+                result["normal_stop"] = message.get("stopReason") in {"stop", "end_turn"}
+                result["terminal_error"] |= message.get("stopReason") in {"error", "aborted"}
             delta = event.get("assistantMessageEvent", {})
             if delta.get("type") == "text_delta":
                 assistant_text += delta.get("delta", "")
             assistant_tail = (assistant_tail + assistant_text)[-256:]
-            if "E2E_OK" in assistant_tail:
-                result["saw_expected_text"] = True
             part = event.get("part", {})
             if kind == "tool_use":
                 status = part.get("state", {}).get("status", "other")
@@ -183,7 +192,9 @@ def execute(args):
         proc.stdout.close()
         signal.signal(signal.SIGTERM, old_term)
     result["exit_code"] = proc.returncode
-    result["success"] = bool(result["interrupted_before_forward"] or (proc.returncode == 0 and result["saw_expected_text"] and not result["timed_out"]))
+    result["saw_expected_text"] = assistant_tail.strip() == "E2E_OK"
+    result["task_completed"] = bool(proc.returncode == 0 and result["saw_expected_text"] and result["normal_stop"] and not result["terminal_error"] and not result["parse_errors"] and not result["timed_out"] and (args.action != "tool" or result["tool_completed"] > 0))
+    result["success"] = bool(result["interrupted_before_forward"] or result["task_completed"])
     print(json.dumps(result, sort_keys=True))
     return 0 if result["success"] else 1
 

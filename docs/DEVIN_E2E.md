@@ -1,4 +1,7 @@
-# Devin 云端 E2E
+# Devin 协议合同测试
+
+此文的旧 e2e 名称仅作兼容；`mock`/`live` 协议请求都不是产品用户 E2E。 分层定义、用户旅程与发布门槛见 [Devin 验收流程](DEVIN_ACCEPTANCE.md)。
+
 
 测试环境在云端从当前 checkout 编译生产后端，使用独立 PostgreSQL、Redis 和临时应用配置。只需安全配置一个 Devin PAT：测试通过正式授权 API 验证 PAT、发现账号模型并提交本地 Devin 账号，自动创建分组、普通用户及公开 API Key，再访问 `/v1/*`。不要求手工提供模型 UID、组织 ID 或用户邮箱。不会连接已有 Sub2API 实例，也不使用 `SUB2API_API_KEY` / `SUB2API_USER_TOKEN`。
 

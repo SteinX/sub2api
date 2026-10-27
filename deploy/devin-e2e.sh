@@ -43,8 +43,9 @@ docker_cli=(docker --host=unix:///var/run/docker.sock)
 "${docker_cli[@]}" info >/dev/null
 project="devin-e2e-$$"
 compose=("${docker_cli[@]}" compose -p "$project" -f "$repo_dir/deploy/docker-compose.devin-e2e.yml")
-export DEVIN_E2E_DB_PASSWORD
+export DEVIN_E2E_DB_PASSWORD DEVIN_E2E_REDIS_PASSWORD
 DEVIN_E2E_DB_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+DEVIN_E2E_REDIS_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
 cleanup() {
   if [ -f "$DEVIN_E2E_ARTIFACTS/server.pid" ]; then
     read -r backend_pid < "$DEVIN_E2E_ARTIFACTS/server.pid" || true
@@ -70,8 +71,11 @@ timeout --kill-after=10s 5m go build -mod=readonly -o "$DEVIN_E2E_BINARY" ./cmd/
   printf 'test_run=%s\n' "${DEVIN_E2E_RUN:-.}"
   printf 'test_skip=%s\n' "${DEVIN_E2E_SKIP:-^$}"
   printf 'reference_pricing_sha256=%s\n' "${DEVIN_E2E_PRICING_SHA256:-synthetic-group-prices}"
+  printf 'acceptance_tier=protocol_or_client_contract\nreal_user_e2e=false\n'
   go version
   sha256sum "$DEVIN_E2E_BINARY"
 } > "$DEVIN_E2E_ARTIFACTS/provenance.txt"
-echo "Running Devin $mode E2E; private artifacts: $DEVIN_E2E_ARTIFACTS"
-timeout --kill-after=15s 15m go test -mod=readonly -count=1 -tags=devine2e -run "${DEVIN_E2E_RUN:-.}" -skip "${DEVIN_E2E_SKIP:-^$}" -json -timeout=10m ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"
+echo "Running Devin $mode contracts (not product user E2E); private artifacts: $DEVIN_E2E_ARTIFACTS"
+test_seconds="${DEVIN_E2E_TIMEOUT_SECONDS:-600}"
+[[ "$test_seconds" =~ ^[0-9]+$ ]] && (( test_seconds > 0 && test_seconds <= 3600 )) || { echo 'Invalid test wall time' >&2; exit 2; }
+timeout --kill-after=15s "$((test_seconds+30))s" go test -mod=readonly -count=1 -tags=devine2e -run "${DEVIN_E2E_RUN:-.}" -skip "${DEVIN_E2E_SKIP:-^$}" -json -timeout="${test_seconds}s" ./internal/devine2e | tee "$DEVIN_E2E_ARTIFACTS/results.jsonl"

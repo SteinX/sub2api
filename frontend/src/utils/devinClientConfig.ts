@@ -9,7 +9,49 @@ export function normalizeDevinWorkspacePath(raw: string): string | null {
   return value
 }
 
-export function devinOmpConfig(baseUrl: string, apiKey: string, model: string, advertisedContext?: unknown) {
+export function normalizeDevinTestCommand(raw: string): string | null {
+  const value = raw.trim()
+  return value && value.length <= 256 && /^[a-zA-Z0-9_./:\\ -]+$/.test(value) ? value : null
+}
+
+export function devinOpenCodeConfig(baseURL: string, apiKey: string, model: string, models: string[], options: {
+  omo: boolean; workspace: string | null; project: boolean; testCommand: string | null
+}) {
+  const ref = `devin/${model}`
+  const scoped = options.omo || options.project
+  if (scoped && (!options.workspace || normalizeDevinWorkspacePath(options.workspace) !== options.workspace)) throw new Error('Select a workspace')
+  if (options.project && (!options.testCommand || normalizeDevinTestCommand(options.testCommand) !== options.testCommand)) throw new Error('Select an exact test command')
+  const agent = options.project ? 'devin-project' : 'devin-check'
+  const allowed = options.project ? ['read', 'write', 'edit', 'bash', 'glob', 'grep'] : ['read']
+  return {
+    $schema: 'https://opencode.ai/config.json', model: ref, small_model: ref,
+    ...(options.omo ? { plugin: ['oh-my-opencode@5.1.44'] } : {}),
+    ...(scoped ? {
+      default_agent: agent,
+      permission: {
+        '*': 'deny', read: 'allow',
+        ...(options.project ? { edit: 'allow', glob: 'allow', grep: 'allow', bash: { '*': 'deny', [options.testCommand!]: 'allow' } } : {}),
+        external_directory: { [`${options.workspace}/*`]: 'allow' }
+      },
+      agent: { [agent]: {
+        mode: 'primary', model: ref,
+        prompt: options.project
+          ? 'Complete the requested project task within the selected workspace. Run only the configured test command. Do not spawn client-side workers. Gateway-internal Fusion Lead/Sidekick delegation remains allowed.'
+          : 'Read probe.txt when asked. Use only read; do not spawn client-side workers or modify files. Gateway-internal Fusion Lead/Sidekick delegation remains allowed.',
+        tools: Object.fromEntries(
+          ['read', 'write', 'bash', 'edit', 'task', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'question']
+            .map(name => [name, allowed.includes(name)])
+        )
+      } }
+    } : {}),
+    provider: { devin: {
+      npm: '@ai-sdk/openai-compatible', name: 'Devin via Sub2API', options: { baseURL, apiKey },
+      models: Object.fromEntries(models.map(id => [id, { name: id }]))
+    } }
+  }
+}
+
+export function devinOmpConfig(baseUrl: string, apiKey: string, model: string, advertisedContext?: unknown, profile: 'compatibility' | 'default' = 'compatibility') {
   const ref = `devin/${model}`
   const contextWindow = typeof advertisedContext === 'number' && Number.isFinite(advertisedContext) && advertisedContext > 0
     ? Math.min(32768, Math.floor(advertisedContext))
@@ -32,9 +74,11 @@ export function devinOmpConfig(baseUrl: string, apiKey: string, model: string, a
         ['default', 'smol', 'slow', 'vision', 'plan', 'commit', 'tiny', 'memory', 'task', 'advisor', 'widget']
           .map(role => [role, ref])
       ),
-      memory: { backend: 'off' },
-      compaction: { enabled: false, supersedeReads: false, dropUseless: false },
-      retry: { enabled: false }
+      ...(profile === 'compatibility' ? {
+        memory: { backend: 'off' },
+        compaction: { enabled: false, supersedeReads: false, dropUseless: false },
+        retry: { enabled: false }
+      } : {})
     }
   }
 }
