@@ -177,6 +177,16 @@ class ProjectTestReceiptTests(unittest.TestCase):
         (self.root / 'price_math.py').write_text('changed = True')
         self.assertFalse(self.receipts.report()['client_tests_succeeded'])
 
+    def test_omp_omitted_exit_cannot_inherit_a_failed_receipt_exit(self):
+        (self.root/'price_math.py').write_text('value = 999\n')
+        result=self.run_tests()
+        self.assertEqual(1,result.returncode)
+        self.event(result,client='omp',code=None)
+        call=self.receipts.report()['test_execution']['calls'][0]
+        self.assertEqual(1,call['exit_code'],'untrusted receipt remains diagnostic')
+        self.assertIsNone(call['client_exit_code'],'the actual success event omitted an exit code')
+        self.assertIsNone(self.receipts.fatal_reason(self.tracker.calls['synthetic-call']))
+
     def test_stale_wrong_nonce_changed_protected_source_and_zero_tests_are_rejected(self):
         result = self.run_tests()
         reference = json.loads(next(line[len(PREFIX):] for line in result.stdout.decode().splitlines() if line.startswith(PREFIX)))

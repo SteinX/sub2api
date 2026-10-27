@@ -169,6 +169,7 @@ class TestReceipts:
         record['_terminal'] = terminal_hash
         self.sequence += 1
         record['completion_sequence'] = self.sequence
+        record['client_exit_code'] = code
         record['exit_code'], record['exit_source'] = code, exit_source
         lines = [line[len(PREFIX):] for line in text.splitlines() if line.startswith(PREFIX)]
         # A genuine runner receipt can come from an alias, wrapper or compound
@@ -261,7 +262,7 @@ class TestReceipts:
         if not tool or tool['name'] != 'bash' or tool['status'] != 'completed':
             return None
         record=self.calls.get(tool['call_sha256'],{})
-        if record.get('exit_code') is not None and record['exit_code'] != 0:
+        if record.get('client_exit_code') is not None and record['client_exit_code'] != 0:
             return 'test_failed'
         return None
 
