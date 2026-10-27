@@ -20,7 +20,7 @@ import (
 func verifyProjectMutationNegatives(t *testing.T, app *application, fixture *nativeFixture, key, password string) {
 	t.Helper()
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
-	for _, mutation := range []string{"noop", "failed_edit"} {
+	for _, mutation := range []string{"noop", "failed_edit", "early_marker_error"} {
 		t.Run("mutation_negative_"+mutation, func(t *testing.T) {
 			directory := t.TempDir()
 			fixture.journey.mu.Lock()
@@ -52,7 +52,7 @@ func verifyProjectMutationNegatives(t *testing.T, app *application, fixture *nat
 			require.NoError(t, cleanupErr)
 			require.Error(t, runErr, "a false final answer must not certify a broken project")
 			require.Equal(t, "failed", report["status"])
-			require.Equal(t, false, report["source_changed_by_task"])
+			require.Equal(t, mutation == "early_marker_error", report["source_changed_by_task"])
 			require.Equal(t, true, report["protected_project_files_intact"])
 			require.Nil(t, report["resume"])
 			require.Nil(t, report["artifact_verified_after_resume"], "no resume was attempted")
@@ -60,10 +60,16 @@ func verifyProjectMutationNegatives(t *testing.T, app *application, fixture *nat
 			if mutation == "noop" {
 				require.Equal(t, true, task["passed"], "fixture must produce a normal, superficially successful CLI terminal")
 				require.Equal(t, false, report["independent_project_test_passed"])
-			} else {
+				require.Equal(t, true, task["final_text_matches"], "marker alone cannot prove the project was completed")
+			} else if mutation == "failed_edit" {
 				require.Equal(t, true, task["event_error"])
 				states := task["tool_states"].(map[string]any)
 				require.Equal(t, float64(1), states["edit"].(map[string]any)["error"])
+			} else {
+				require.Equal(t, true, task["marker_seen_anywhere"], "prove an early marker really reached the client")
+				require.Equal(t, true, report["independent_project_test_executed"])
+				require.Equal(t, true, report["independent_project_test_passed"], "successful project proof cannot replace a failed CLI terminal")
+				require.Equal(t, false, task["passed"])
 			}
 		})
 	}

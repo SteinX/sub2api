@@ -113,6 +113,11 @@ def validate(report, mode, commit, tree, state=None):
                     'source_unchanged_after_resume', 'independent_project_test_passed', 'same_client_session']:
             if case.get(key) is not True:
                 errors.append(ident + ':' + key)
+        if case.get('independent_project_test_executed') is not True:
+            errors.append(ident + ':independent_oracle_not_executed')
+        nonce = case.get('project_nonce_sha256')
+        if not HEX64.fullmatch(str(nonce or '')):
+            errors.append(ident + ':project_nonce_unverified')
         if not HEX64.fullmatch(str(case.get('artifact_sha256', ''))):
             errors.append(ident + ':artifact_not_bound')
         handoff = case.get('handoff', {})
@@ -142,12 +147,18 @@ def validate(report, mode, commit, tree, state=None):
                 errors.append(ident + ':fusion_roles_unverified')
         for phase in ['task', 'resume']:
             result = case.get(phase) or {}
+            if (result.get('completion_contract') != 'project_artifacts_v2' or result.get('terminal_event_seen') is not True
+                    or result.get('reader_completed') is not True or result.get('reader_error') is not False
+                    or type(result.get('final_text_bytes')) is not int or result['final_text_bytes'] <= 0
+                    or not HEX64.fullmatch(str(result.get('final_text_sha256', '')))
+                    or result.get('project_nonce_sha256') != nonce):
+                errors.append(ident + ':' + phase + '_completion_unverified')
             if not valid_tool_evidence(result):
                 errors.append(ident + ':' + phase + '_tool_evidence_invalid')
             if client=='omo' and result.get('plugin_runtime_started') is not True:
                 errors.append(ident+':'+phase+'_omo_plugin_not_observed')
             if (result.get('exit_code') != 0 or result.get('normal_stop') is not True or result.get('event_error') is not False
-                    or result.get('timed_out') is not False or result.get('final_text_matches') is not True
+                    or result.get('timed_out') is not False
                     or result.get('parse_errors') != 0 or result.get('session_changed') is not False
                     or result.get('session_seen') is not True or not HEX64.fullmatch(str(result.get('client_session_sha256', '')))):
                 errors.append(ident + ':' + phase + '_terminal_failure')

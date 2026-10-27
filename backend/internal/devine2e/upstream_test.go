@@ -201,6 +201,15 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		} else if f.agentMode.Load() {
 			f.agentReply(&request, reply)
 		}
+		// Real clients must tolerate natural-language completion split across
+		// multiple native frames. Usage and terminal status appear only once.
+		if f.journey != nil && len([]rune(reply.DeltaText)) > 1 {
+			text := []rune(reply.DeltaText)
+			fragment := &pb.GetChatMessageResponse{MessageId: reply.MessageId, DeltaText: string(text[:len(text)/2])}
+			b, _ := proto.Marshal(fragment)
+			writeFrame(w, 0, b)
+			reply.DeltaText = string(text[len(text)/2:])
+		}
 		b, _ := proto.Marshal(reply)
 		writeFrame(w, 0, b)
 		writeFrame(w, 2, []byte(`{}`))

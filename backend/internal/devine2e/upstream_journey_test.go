@@ -82,10 +82,22 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		}
 		return
 	}
-	final := "PROJECT_COMPLETE"
+	final := "The project is repaired. Tests passed and the JSON report was verified."
 	if resume {
-		final = "PROJECT_REVIEWED"
+		final = "The existing project report remains correct; the completed work is verified."
 	}
+	if mutationTool == "noop" {
+		final = "PROJECT_COMPLETE" // deliberately false marker, without a valid artifact
+	}
+	defer func() {
+		if mutationTool == "early_marker_error" {
+			if len(reply.DeltaToolCalls) > 0 {
+				reply.DeltaText = "PROJECT_COMPLETE"
+			} else if reply.DeltaText == final {
+				reply.StopReason = pb.StopReason_STOP_REASON_MAX_TOKENS
+			}
+		}
+	}()
 	type priorCall struct{ name, path string }
 	calls := map[string]priorCall{}
 	reads := map[string]int{}
@@ -168,7 +180,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		return
 	case !wrote:
 		name := mutationTool
-		if mutationTool == "noop" {
+		if mutationTool == "noop" || mutationTool == "early_marker_error" {
 			name = "write"
 		} else if mutationTool == "failed_edit" {
 			name = "edit"

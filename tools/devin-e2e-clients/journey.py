@@ -22,6 +22,7 @@ from run import ROOT, PINS, SENSITIVE_ENV, child_environment, write_json
 import process_cleanup
 import container_sandbox
 from project_evidence import ToolEvidence
+from project_completion import CompletionEvidence
 
 TEST_COMMAND = "python3 run_tests.py"
 ACTIVE = set()
@@ -272,9 +273,9 @@ def command(client, model, resume):
                "--model", "devin/" + model, "--tools", "read,write,bash", "--no-lsp", "--no-pty", "--no-extensions", "--no-skills", "--no-rules", "--no-title", "--thinking", "off", "--max-time", "120", "--mode", "json", "-p"]
     if resume:
         cmd.append("--continue")
-    prompt = ("Resume this project session. Read out/report.json and confirm the completed project using the existing session history. Reply with exactly PROJECT_REVIEWED."
+    prompt = ("Resume this project session. Read out/report.json and confirm the completed project using the existing session history. Summarize what you verified."
               if resume else
-              "Repair price_math.py so the project tests pass. Read requirements.json and price_math.py, fix the calculation, run python3 run_tests.py, then re-read requirements.json and out/report.json to verify the result. Do not change the requirements, tests or test runner. Reply with exactly PROJECT_COMPLETE after verification.")
+              "Repair price_math.py so the project tests pass. Read requirements.json and price_math.py, fix the calculation, run python3 run_tests.py, then re-read requirements.json and out/report.json to verify the result. Do not change the requirements, tests or test runner. Summarize the verified result.")
     if model.startswith('fusion-') and not resume:
         prompt = "Lead: delegate the project implementation to Sidekick, then review its returned work and verify the result. " + prompt
     return cmd + [prompt]
@@ -301,26 +302,32 @@ def invoke(args, directory, resume=False):
               "normal_stop": False, "tools": {"read": 0, "write": 0, "bash": 0}, "client_tests_succeeded": False,
               "frames": 0, "parse_errors": 0, "session_seen": False, "client_session_sha256": None, "session_changed": False,
               "bash_exit_code": None, "test_command_verified": False}
-    final_text = ""
+    result.update(reader_completed=False, reader_error=False, project_nonce_sha256=digest(nonce.encode()))
     size = 0
     tool_evidence = ToolEvidence(directory / 'workspace', TEST_COMMAND)
+    completion = CompletionEvidence()
 
-    def consume():
-        nonlocal size, final_text
+    def consume_lines():
+        nonlocal size
         for raw in iter(lambda: proc.stdout.readline(4 * 1024 * 1024 + 1), b''):
             size += len(raw)
             if size > 16 * 1024 * 1024 or len(raw) > 4 * 1024 * 1024:
+                result['reader_error'] = True
                 os.killpg(proc.pid, signal.SIGKILL)
-                return
+                return False
             try:
                 event = json.loads(raw)
             except (ValueError, UnicodeDecodeError):
                 result["parse_errors"] += 1
                 continue
+            if not isinstance(event, dict):
+                result['parse_errors'] += 1
+                continue
             result["frames"] += 1
             kind = event.get("type")
             try:
                 tool = tool_evidence.observe(event)
+                completion.observe(event)
             except ValueError:
                 result['parse_errors'] += 1
                 continue
@@ -332,12 +339,6 @@ def invoke(args, directory, resume=False):
                 result["client_session_sha256"] = fingerprint
             if kind == "error":
                 result["event_error"] = True
-            if kind == "text":
-                final_text += event.get("part", {}).get("text", "")
-            if kind == "step_start":
-                final_text = ""
-            if kind == "step_finish":
-                result["normal_stop"] = event.get("part", {}).get("reason") in {"stop", "end_turn"}
             if kind == "tool_use":
                 part = event.get("part", {}); state = part.get("state", {})
                 if state.get("status") == "error":
@@ -362,12 +363,13 @@ def invoke(args, directory, resume=False):
                         result['bash_exit_code'] = 0 if success else None
                         result['bash_exit_source'] = 'protected project test runner receipt' if success else 'unverified'
                         result['client_tests_succeeded'] |= success
-            if kind == "message_end" and event.get("message", {}).get("role") == "assistant":
-                message = event["message"]
-                final_text = "".join(p.get("text", "") for p in message.get("content", []) if p.get("type") == "text")
-                reason = message.get("stopReason")
-                result["normal_stop"] = reason in {"stop", "end_turn"}
-                result["event_error"] |= reason in {"error", "aborted"}
+        return True  # Only iterator EOF certifies complete event consumption.
+
+    def consume():
+        try:
+            result['reader_completed'] = consume_lines()
+        except (OSError, ValueError, TypeError, AttributeError):
+            result['reader_error'] = True
 
     thread = threading.Thread(target=consume, daemon=True)
     thread.start()
@@ -379,16 +381,22 @@ def invoke(args, directory, resume=False):
         proc.wait(timeout=5)
     finally:
         thread.join(timeout=5)
+        if thread.is_alive():
+            result['reader_error'] = True
         proc.stdout.close()
         ACTIVE.discard(proc)
     result["exit_code"] = proc.returncode
     result.update(tool_evidence.report())
-    result['event_error'] |= tool_evidence.failed
+    result.update(completion.report('PROJECT_REVIEWED' if resume else 'PROJECT_COMPLETE'))
+    result['event_error'] |= tool_evidence.failed or completion.failed
     if args.client=='omo':
         result['plugin_runtime_started']=plugin_startups()>plugin_before
         result['plugin_runtime_witness']='fresh oh-my-openagent server plugin startup log'
-    result["final_text_matches"] = final_text.strip() == ("PROJECT_REVIEWED" if resume else "PROJECT_COMPLETE")
-    result["passed"] = proc.returncode == 0 and result["normal_stop"] and result["final_text_matches"] and not result["event_error"] and not result["timed_out"] and result["parse_errors"] == 0 and result['incomplete_tool_calls'] == 0 and not result["session_changed"] and (args.client!='omo' or result['plugin_runtime_started'])
+    result["passed"] = (proc.returncode == 0 and result['reader_completed'] and not result['reader_error']
+                        and result['terminal_event_seen'] and result['normal_stop'] and result['final_text_bytes'] > 0
+                        and not result['event_error'] and not result['timed_out'] and result['parse_errors'] == 0
+                        and result['incomplete_tool_calls'] == 0 and result['session_seen'] and result['client_session_sha256'] is not None
+                        and not result['session_changed'] and (args.client != 'omo' or result['plugin_runtime_started']))
     return result
 
 
@@ -414,6 +422,7 @@ def main():
     isolated=isolation_evidence()
     directory = Path(args.directory).resolve()
     workspace, expected, protected = prepare(directory)
+    project_nonce_hash = digest(expected['nonce'].encode())
     ui_input = {"directory": str(directory), "workspace": str(workspace), "client": args.client, "model": args.model, "ui_url": args.ui_url, "profile": args.profile, "test_command": TEST_COMMAND}
     if args.catalog_recovery_probe:
         ui_input['catalog_recovery_probe'] = True
@@ -458,25 +467,27 @@ def main():
     # the client running tests and cannot repair or generate the final artifact.
     oracle_samples = [[100 + int.from_bytes(os.urandom(2), "big"), byte] for byte in os.urandom(16)]
     after = run_project_python(directory, ['-c', "import json,sys; from price_math import discounted; assert all(discounted(a,b)==a-b for a,b in json.load(sys.stdin))"],
-                               json.dumps(oracle_samples).encode()) if first["passed"] else None
+                               json.dumps(oracle_samples).encode()) if intact and first['exit_code'] is not None and not first['timed_out'] and first['incomplete_tool_calls'] == 0 else None
     task_checks = {'terminal': first['passed'], 'artifact': valid, 'protected_files': intact,
+                   'project_nonce': first['project_nonce_sha256'] == project_nonce_hash,
                    'reads': first['tools']['read'] >= 3,
                    'source_mutation_tool': sum(first['source_mutation_tools'].values()) >= 1,
                    'source_changed': source_before_task != source_after_task,
-                   'client_tests': first['client_tests_succeeded'], 'oracle': after is not None and after.returncode == 0}
+                   'client_tests': first['client_tests_succeeded'], 'oracle': after.returncode == 0 if after is not None else None}
     task_passed = all(task_checks.values())
     source_before_resume = source_after_task
     resumed = invoke(args, directory, True) if task_passed else None
     same_session = resumed is not None and first["client_session_sha256"] is not None and first["client_session_sha256"] == resumed["client_session_sha256"]
+    resume_nonce_valid = resumed is not None and resumed['project_nonce_sha256'] == project_nonce_hash
     extended = {}
-    if (os.environ.get('DEVIN_JOURNEY_CAPABILITIES') in {'true', 'independent'} and same_session and resumed['passed']
+    if (os.environ.get('DEVIN_JOURNEY_CAPABILITIES') in {'true', 'independent'} and same_session and resume_nonce_valid and resumed['passed']
             and args.client == 'omp' and args.profile == 'compatibility' and not args.model.startswith('fusion-')):
         import capabilities
         extended = capabilities.run(args, directory, first['client_session_sha256'], expected['nonce'], sys.modules[__name__])
     final = final_project_snapshot(workspace, expected, protected, source_before_resume)
     if resumed is None:
         final['artifact_verified_after_resume'] = final['source_unchanged_after_resume'] = None
-    passed = task_passed and resumed is not None and resumed["passed"] and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
+    passed = task_passed and resumed is not None and resumed["passed"] and resume_nonce_valid and resumed["tools"]["read"] >= 1 and same_session and all(final[key] for key in ['artifact_verified_after_resume', 'protected_project_files_intact', 'source_unchanged_after_resume'])
     report = {"tier": tier, "status": "passed" if passed else "failed", "eligible_for_real_e2e": False,
               "execution_isolation": "separate_uid" if os.geteuid()==0 else "networkless_container_fixed_unix_relay",
               "isolation":isolated,
@@ -484,8 +495,10 @@ def main():
               "client": args.client, "profile": args.profile, "handoff": handoff, "task": first, "resume": resumed,
               'task_checks': task_checks, 'source_before_task_sha256': source_before_task,
               'source_after_task_sha256': source_after_task, 'source_changed_by_task': task_checks['source_changed'],
+              'project_nonce_sha256': project_nonce_hash,
               "initial_project_test_failed": True, "artifact_verified_before_oracle": valid, **final,
-              "independent_project_test_passed": after is not None and after.returncode == 0,
+              "independent_project_test_executed": after is not None,
+              "independent_project_test_passed": after.returncode == 0 if after is not None else None,
               "same_client_session": same_session,
               "context_pressure": extended.get('context_pressure', 'not_run'), "compact": extended.get('compact', 'not_run'),
               "fork": extended.get('fork', 'not_run'), "disconnect_recovery": 'not_run', "worker": "not_run",
