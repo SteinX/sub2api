@@ -9,6 +9,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from capabilities import Rpc
+import batch_control
+from project_evidence import ToolEvidence
 
 
 def rpc_with(events):
@@ -20,6 +22,9 @@ def rpc_with(events):
         rpc.events.put(event)
     rpc.frames = rpc.parse_errors = rpc.reads = 0
     rpc.failed = False
+    rpc.closing=False
+    rpc.control = batch_control.Control()
+    rpc.h = SimpleNamespace(kill_child=Mock())
     rpc.error_categories = set()
     rpc.error_http_status = None
     rpc.error_vocabulary = set()
@@ -31,6 +36,18 @@ def rpc_with(events):
 
 
 class RpcProofTests(unittest.TestCase):
+    def test_malformed_or_lost_rpc_reader_stops_even_when_control_stop_fails(self):
+        for wire in [b'null\n',b'{"type":"tool_use","part":null}\n',None]:
+            with self.subTest(wire=wire):
+                rpc=rpc_with([])
+                rpc.tools=ToolEvidence('/synthetic','python3 run_tests.py')
+                rpc.proc.stdout=io.BytesIO(wire) if wire is not None else Mock()
+                if wire is None: rpc.proc.stdout.readline.side_effect=OSError('synthetic read failure')
+                with patch.object(rpc.control,'stop',side_effect=ValueError('synthetic lost control')) as stop:
+                    rpc.consume()
+                self.assertTrue(rpc.failed);self.assertEqual(1,rpc.parse_errors)
+                stop.assert_called_once();rpc.h.kill_child.assert_called_once_with(rpc.proc)
+
     def test_invalid_or_unreadable_diagnostics_do_not_prevent_cleanup(self):
         for bad in [b'{"truncated":', OSError('synthetic read failure')]:
             rpc = rpc_with([])

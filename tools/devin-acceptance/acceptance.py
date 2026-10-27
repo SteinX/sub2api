@@ -221,6 +221,16 @@ def validate(report, mode, commit, tree, state=None):
         if case.get('status') != 'passed':
             errors.append(ident + ':task_not_passed')
             continue
+        guard=case.get('batch_guard') or {}
+        if (guard.get('installed') is not True or guard.get('stopped') is not False
+                or guard.get('response_observation') not in {'bounded_response_buffer','original_stream_with_source_proof'}
+                or type(guard.get('buffered_transport')) is not bool
+                or guard.get('buffered_transport') != (guard.get('response_observation') == 'bounded_response_buffer')
+                or guard.get('phase_active') is not False or guard.get('public_inflight') is not False
+                or guard.get('pending_tools') != 0 or guard.get('first_failure') is not None):
+            errors.append(ident + ':first_error_guard_unverified')
+        if mode=='user_e2e' and guard.get('buffered_transport') is True:
+            errors.append(ident + ':unbuffered_transport_not_verified')
         for key in ['initial_project_test_failed', 'protected_project_files_intact', 'artifact_verified_before_oracle', 'artifact_verified_after_resume',
                     'source_unchanged_after_resume', 'independent_project_test_passed', 'same_client_session']:
             if case.get(key) is not True:

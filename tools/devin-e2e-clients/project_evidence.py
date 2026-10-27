@@ -3,6 +3,7 @@ from collections import Counter
 import os
 from pathlib import Path
 import re
+import time
 from project_tests import command_class, digest
 
 FILE_MUTATORS = frozenset({'write', 'edit', 'apply_patch'})
@@ -54,7 +55,7 @@ class ToolEvidence:
         if previous and previous['status'] in {'completed', 'error'} and status != previous['status']:
             raise ValueError('tool_terminal_changed')
         record = previous or {'name': name, 'call_sha256': digest(call_id.encode()), 'source_targeted': False,
-                              'test_command': False, 'states': [], 'error_kind': None}
+                              'test_command': False, 'states': [], 'error_kind': None, 'first_observed_at_ns': time.time_ns(), 'observations': []}
         if inputs is not None:
             record['source_targeted'] |= self.source_targeted(name, inputs)
             if name == 'bash' and isinstance(inputs, dict) and isinstance(inputs.get('command'), str):
@@ -73,6 +74,7 @@ class ToolEvidence:
             record['error_kind'] = 'client_permission_rejection' if denied else 'client_tool_error'
         if not record['states'] or record['states'][-1] != status:
             record['states'].append(status)
+            record['observations'].append({'status': status, 'observed_at_ns': time.time_ns()})
         self.calls[call_id] = record
         self.events.setdefault(name, Counter())[status] += 1
         self.failed |= status == 'error'

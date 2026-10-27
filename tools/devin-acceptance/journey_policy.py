@@ -19,6 +19,9 @@ import time
 
 HEX = re.compile(r'^[a-f0-9]{40}$')
 UID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
+STOP_REASONS = frozenset({'tool_error', 'permission_rejection', 'test_failed', 'reader_error', 'parse_error',
+    'client_exit', 'protocol_error', 'transport_uncertain', 'control_lost', 'supervisor_failure', 'deadline',
+    'missing_terminal', 'source_or_oracle_failure'})
 
 
 class Denied(ValueError):
@@ -145,7 +148,7 @@ def claim(path, plan, mode):
     return state
 
 
-def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated_cost=None):
+def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated_cost=None, reason=None, observed_ns=None, expected_scope=None):
     try:
         fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
     except OSError:
@@ -155,6 +158,10 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated
             raise Denied('run_ledger_not_private_regular_file')
         fcntl.flock(file, fcntl.LOCK_EX)
         state = json.load(file)
+        if expected_scope is not None and any(state.get(key)!=value for key,value in expected_scope.items()):
+            raise Denied('run_ledger_scope_or_state_mismatch')
+        instant = time.time_ns()
+        journal = state.setdefault('journal', [])
         if action == 'admit':
             if state['mode'] != 'live' or state['closed'] or state['stopped'] or state['inflight'] is not None:
                 raise Denied('run_stopped_or_previous_send_uncertain')
@@ -173,9 +180,15 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated
             state['request_start_cost_usd']=state['local_cost_usd']
             state['requests'] += 1
             state['inflight'] = state['requests']
+            journal.append({'action': 'admit', 'at_ns': instant, 'receipt': state['inflight'], 'local_cost_usd': state['local_cost_usd']})
         elif action == 'complete':
             if receipt != state['inflight'] or type(receipt) is not int:
                 raise Denied('request_receipt_mismatch')
+            completed = state.setdefault('completed_receipts', [])
+            if receipt in completed:
+                raise Denied('request_already_completed')
+            if outcome not in {'success', 'failed', 'uncertain'}:
+                raise Denied('invalid_request_outcome')
             if type(cost) not in {float, int} or not math.isfinite(cost) or cost < state['local_cost_usd']:
                 outcome = 'uncertain'
             else:
@@ -184,6 +197,18 @@ def ledger_action(path, action, receipt=None, outcome=None, cost=None, estimated
                 state['local_cost_usd'] = cost
             state['stopped'] = state['stopped'] or outcome != 'success'
             state['inflight'] = None if outcome == 'success' else receipt
+            completed.append(receipt)
+            journal.append({'action': 'complete', 'at_ns': instant, 'receipt': receipt, 'outcome': outcome,
+                            'local_cost_usd': state['local_cost_usd']})
+        elif action == 'stop':
+            if reason not in STOP_REASONS or type(observed_ns) is not int or not 0 < observed_ns <= instant:
+                raise Denied('invalid_stop_observation')
+            state['stopped'] = True
+            if 'first_failure' not in state:
+                state['first_failure'] = {'reason': reason, 'observed_at_ns': observed_ns, 'persisted_at_ns': instant,
+                    'requests_at_stop': state['requests'], 'local_cost_recorded_at_stop_usd': state['local_cost_usd'],
+                    'inflight_receipt_at_stop': state['inflight']}
+                journal.append({'action': 'stop', 'at_ns': instant, 'reason': reason, 'receipt': state['inflight']})
         elif action == 'close':
             state['closed'] = True
             state['stopped'] = state['stopped'] or state['inflight'] is not None

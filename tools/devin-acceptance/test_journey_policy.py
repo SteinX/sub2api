@@ -2,6 +2,7 @@ import copy
 import datetime as dt
 from pathlib import Path
 import tempfile
+import time
 import unittest
 import unittest.mock
 
@@ -23,6 +24,25 @@ def proposal():
 
 
 class RealJourneyPolicyTests(unittest.TestCase):
+    def test_fatal_stop_is_durable_and_inflight_can_only_settle_once(self):
+        plan, *_ = proposal()
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = Path(temporary) / 'ledger.json'; policy.claim(ledger, plan, 'live')
+            policy.ledger_action(ledger, 'admit')
+            observed = time.time_ns()
+            stopped = policy.ledger_action(ledger, 'stop', reason='permission_rejection', observed_ns=observed)
+            self.assertEqual(1, stopped['inflight'])
+            self.assertEqual(observed, stopped['first_failure']['observed_at_ns'])
+            with self.assertRaises(policy.Denied): policy.ledger_action(ledger, 'admit')
+            settled = policy.ledger_action(ledger, 'complete', 1, 'success', .01)
+            self.assertTrue(settled['stopped']); self.assertIsNone(settled['inflight'])
+            self.assertEqual(.01, settled['local_cost_usd'])
+            with self.assertRaises(policy.Denied): policy.ledger_action(ledger, 'admit')
+            with self.assertRaises(policy.Denied): policy.ledger_action(ledger, 'complete', 1, 'success', .01)
+            policy.ledger_action(ledger, 'close')
+            self.assertTrue(policy.read_json(ledger)['stopped'])
+            self.assertEqual(['admit', 'stop', 'complete'], [entry['action'] for entry in settled['journal']])
+
     def test_approval_and_credentials_fail_before_execution(self):
         plan, approval, source, env = proposal()
         with self.assertRaisesRegex(policy.Denied, 'explicit_approval_missing'):

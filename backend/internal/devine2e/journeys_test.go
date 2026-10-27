@@ -96,12 +96,32 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	extra["devin_fusion_profiles"] = []fusion.Profile{profile}
 	api(t, app, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra})
 	verifyProjectTestReceipts(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
+	verifyProjectFirstErrorClients(t, app, fixture, key, userPassword, keyID)
 	if os.Getenv("DEVIN_JOURNEY_EVIDENCE_ONLY") == "true" {
 		return // Only this explicitly synthetic runner has a focused evidence mode.
 	}
-	verifyProjectMutationNegatives(t, app, fixture, key, userPassword)
+	verifyProjectMutationNegatives(t, app, fixture, key, userPassword, keyID)
+	preMatrixBilling := snapshotMockBilling(t, app, fixture, keyID)
+	require.Equal(t, true, preMatrixBilling["available"], "retain unresolved fixture settlement, but a missing audit query cannot pass")
+	// A fresh synthetic key isolates the healthy matrix from deliberately
+	// interrupted fixture writers. Only mock mode may do this; approved live
+	// batches never rotate their key or reset the durable budget.
+	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
+	user := login(t, app, "user@devin-e2e.invalid", userPassword)
+	prior := api(t, app, "GET", fmt.Sprintf("/keys/%d", keyID), user, nil)
+	remaining := prior.Get("quota").Float() - prior.Get("quota_used").Float()
+	require.Positive(t, remaining, "mock key rotation cannot add quota")
+	api(t, app, "PUT", fmt.Sprintf("/keys/%d", keyID), user, map[string]any{"name": "interrupted-fixtures", "status": "inactive"})
+	positiveKey := api(t, app, "POST", "/keys", user, map[string]any{"name": "e2e-key", "group_id": prior.Get("group_id").Int(), "quota": remaining})
+	key, keyID = positiveKey.Get("key").String(), positiveKey.Get("id").Int()
+	require.NotEmpty(t, key)
+	app.redactor.addSecret(key)
+	fixture.mu.Lock()
+	positiveNativeStart := len(fixture.chats)
+	fixture.mu.Unlock()
+	fence := newJourneyFence(app, nil)
 	reports := []map[string]any{}
-	billing := map[string]any{"verified": false, "tier": "synthetic billing; not a provider invoice"}
+	billing := map[string]any{"verified": false, "verification_scope": "supported-case batch on a separate synthetic key", "tier": "synthetic billing; not a provider invoice", "pre_matrix_fixture_batches": preMatrixBilling, "all_batches_fully_settled": false}
 	defer func() {
 		writeAgentArtifact(t, "client-journeys.json", map[string]any{
 			"schema_version": 1, "tier": "client_mock", "real_upstream": false, "eligible_for_real_e2e": false,
@@ -159,13 +179,14 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_GATEWAY_KEY="+key)
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_UI_PASSWORD="+userPassword)
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_PROCESS_REGISTRY="+processRegistry, "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
-					output, runErr := cmd.Output()
+					output, runErr := runGuardedJourney(t, cmd, app, admission, fence)
 					cleanupErr := cleanupJourneyProcessesAt(processRegistry, containerRegistry)
 					report := map[string]any{"status": "failed", "stage": "runner_output"}
 					parseErr := json.Unmarshal(output, &report)
 					if report == nil {
 						report = map[string]any{"status": "failed", "stage": "runner_output"}
 					}
+					report["batch_guard"] = fence.snapshot()
 					forwarded, requests := admission.snapshot()
 					if kind == "fusion" && forwarded > 0 {
 						report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, requests, false)
@@ -265,7 +286,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	}
 	require.NotEmpty(t, reports, "case filter did not select any journey")
 	fixture.mu.Lock()
-	nativeTotal := len(fixture.chats)
+	nativeTotal := len(fixture.chats) - positiveNativeStart
 	fixture.mu.Unlock()
 	db := agentDatabase(t, app)
 	require.Eventually(t, func() bool {
@@ -275,8 +296,9 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		err := db.QueryRowContext(ctx, `SELECT count(*),count(DISTINCT request_id),count(*) FILTER (WHERE actual_cost>0)
 			FROM usage_logs WHERE api_key_id=$1`, keyID).Scan(&rows, &unique, &charged)
 		return err == nil && rows == nativeTotal && unique == rows && charged == rows
-	}, 15*time.Second, 200*time.Millisecond, "every actual native inference needs exactly one charged synthetic usage row")
+	}, 15*time.Second, 200*time.Millisecond, "every supported-case native inference needs exactly one charged row on its isolated synthetic key")
 	billing["verified"], billing["native_calls"], billing["unique_charged_rows"] = true, nativeTotal, nativeTotal
+	billing["all_batches_fully_settled"] = preMatrixBilling["settlement_complete"] == true
 }
 
 func journeyUIServer(t *testing.T, backend, endpoint string) *httptest.Server {

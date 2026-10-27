@@ -69,6 +69,7 @@ type agentAdmission struct {
 	interruptFile   string
 	active          chan struct{}
 	runBudget       journeyBudget
+	fence           *journeyFence
 	outputLimit     int
 	turnTimeout     time.Duration
 }
@@ -100,17 +101,38 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 	proxy.ModifyResponse = func(response *http.Response) error {
 		record, _ := response.Request.Context().Value(agentRequestContext{}).(*agentRequest)
 		if record != nil {
+			var source *journeyResponseBody
+			var sourceErr error
+			if p.fence != nil {
+				// Read the original body, including errors, outside the record
+				// mutex. Never mistake an earlier truncated replay for source EOF.
+				source, sourceErr = preloadJourneyResponse(response.Body)
+			}
 			p.mu.Lock()
 			record.Status = response.StatusCode
 			record.Session = response.Header.Get(fusion.HeaderSession)
+			if source != nil {
+				record.response = source
+				response.Body = source
+			}
+			if sourceErr != nil {
+				p.mu.Unlock()
+				return sourceErr
+			}
 			if response.StatusCode >= 400 {
-				body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-				if err != nil {
-					p.mu.Unlock()
-					return err
+				var body []byte
+				if source != nil {
+					body = source.data
+				} else {
+					var err error
+					body, err = io.ReadAll(io.LimitReader(response.Body, 1<<20))
+					if err != nil {
+						p.mu.Unlock()
+						return err
+					}
+					_ = response.Body.Close()
+					response.Body = io.NopCloser(bytes.NewReader(body))
 				}
-				_ = response.Body.Close()
-				response.Body = io.NopCloser(bytes.NewReader(body))
 				var envelope struct {
 					Error struct {
 						Code string `json:"code"`
@@ -123,7 +145,7 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 				}
 			}
 			p.mu.Unlock()
-			if p.runBudget != nil {
+			if p.fence == nil && p.runBudget != nil {
 				record.response = &journeyResponseBody{ReadCloser: response.Body}
 				response.Body = record.response
 			}
@@ -146,6 +168,9 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 		}
 		var body map[string]any
 		if json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body) != nil || body["model"] != p.model {
+			if p.fence != nil {
+				p.fence.stop("protocol_error", time.Now().UnixNano())
+			}
 			http.Error(w, "unexpected E2E model or body", 400)
 			return
 		}
@@ -176,6 +201,9 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 		p.requests = append(p.requests, record)
 		if len(p.requests) > p.maxAttempts || p.forwarded >= p.maxForwarded {
 			p.mu.Unlock()
+			if p.fence != nil {
+				p.fence.stop("protocol_error", time.Now().UnixNano())
+			}
 			http.Error(w, "E2E request budget exhausted", 402)
 			return
 		}
@@ -196,11 +224,24 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 				return
 			}
 		}
+		if p.fence != nil {
+			ctx, cancel, err := p.fence.acquire(r.Context())
+			if err != nil {
+				http.Error(w, "shared batch admission stopped", 402)
+				return
+			}
+			defer cancel()
+			r = r.WithContext(ctx)
+			defer p.fence.finishResponse(record)
+		}
 		// A request may have passed the earlier check before another request
 		// took and released active. Recheck and reserve under the same lock.
 		p.mu.Lock()
 		if p.forwarded >= p.maxForwarded {
 			p.mu.Unlock()
+			if p.fence != nil {
+				p.fence.stop("protocol_error", time.Now().UnixNano())
+			}
 			http.Error(w, "E2E request budget exhausted", 402)
 			return
 		}
@@ -233,6 +274,11 @@ func newAgentAdmissionPolicy(t *testing.T, app *application, model string, maxFo
 				}
 				_ = p.runBudget.Complete(record.receipt, outcome)
 			}()
+		}
+		if p.fence != nil && !p.fence.admit() {
+			p.mu.Unlock()
+			http.Error(w, "shared batch admission stopped", 402)
+			return
 		}
 		p.forwarded++
 		record.Forwarded = true

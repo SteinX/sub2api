@@ -137,12 +137,22 @@ class FixedRelay:
         if parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or not parsed.port or parsed.username or parsed.query or parsed.fragment or parsed.path not in {'','/'}:
             raise ValueError('sandbox_requires_exact_loopback_ui')
         port=parsed.port
+        self.lock=threading.Lock()
+        self.connections=set()
+        self.closed=False
+        relay=self
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
                 try:
                     with socket.create_connection(('127.0.0.1',port),timeout=5) as remote:
                         remote.settimeout(None)
-                        copy_streams(self.request,remote)
+                        with relay.lock:
+                            if relay.closed: return
+                            relay.connections.update((self.request,remote))
+                        try: copy_streams(self.request,remote)
+                        finally:
+                            with relay.lock:
+                                relay.connections.discard(self.request);relay.connections.discard(remote)
                 except OSError:
                     return
         class Server(socketserver.ThreadingUnixStreamServer):
@@ -154,6 +164,13 @@ class FixedRelay:
         self.port=port
 
     def close(self):
+        with self.lock:
+            if self.closed: return
+            self.closed=True
+            for connection in self.connections:
+                try: connection.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+                connection.close()
         self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=2)
 
 
@@ -184,6 +201,7 @@ class ContainerProcess:
         self.process,self.cid,self.scope,self.registry=process,cid,scope,registry
         self.control,self.relay=control,relay
         self.cleaned=False
+        self.cleanup_lock=threading.RLock()
         self.exitcode=None
 
     def __getattr__(self,name):
@@ -194,6 +212,22 @@ class ContainerProcess:
         return self.exitcode if self.exitcode is not None else self.process.returncode
 
     def cleanup(self):
+        with self.cleanup_lock:
+            self._cleanup()
+
+    def kill_owned(self):
+        with self.cleanup_lock:
+            if self.cleaned:
+                return
+            # Close egress first. Popen.kill checks the owned attach process;
+            # never signal its stale process group after wait/reap or cleanup.
+            if self.relay:
+                self.relay.close()
+            if self.process.poll() is None:
+                self.process.kill()
+            self._cleanup()
+
+    def _cleanup(self):
         if self.cleaned:
             return
         try:
@@ -253,7 +287,7 @@ def popen(command,directory,env,*,gateway=None,on_start=None,**kwargs):
         args+=['--mount','type=bind,src='+str(directory)+',dst='+str(directory)]
         if relay:
             args+=['--mount','type=bind,src='+str(private/'relay.sock')+',dst=/run/devin-fixed-relay.sock,readonly']
-        child_env={k:v for k,v in env.items() if not k.startswith('DOCKER_') and k not in {'DEVIN_JOURNEY_CONTAINER_REGISTRY','DEVIN_JOURNEY_PROCESS_REGISTRY','DEVIN_JOURNEY_UI_PASSWORD'}}
+        child_env={k:v for k,v in env.items() if not k.startswith('DOCKER_') and k not in {'DEVIN_JOURNEY_CONTAINER_REGISTRY','DEVIN_JOURNEY_PROCESS_REGISTRY','DEVIN_JOURNEY_UI_PASSWORD','DEVIN_JOURNEY_CONTROL_SOCKET'}}
         for name in sorted(child_env): args+=['--env',name]
         args += [IMAGE,str(ROOT/'container_entry.py'),str(relay.port if relay else 0),*command]
         # Only the explicitly supplied child environment reaches the container.

@@ -36,7 +36,7 @@ import (
 type application struct {
 	binary, base, dir, password string
 	command                     *exec.Cmd
-	done                        chan error
+	done                        chan struct{}
 	log                         *os.File
 	redactor                    *redactedLog
 	trustFile                   string
@@ -167,8 +167,9 @@ func (a *application) start(t *testing.T) {
 		a.command = nil
 		t.Fatal("could not start the test backend")
 	}
-	a.done = make(chan error, 1)
-	go func() { a.done <- a.command.Wait() }()
+	a.done = make(chan struct{})
+	command, done := a.command, a.done
+	go func() { _ = command.Wait(); close(done) }()
 	// The runner can also stop this exact binary if go test is interrupted.
 	require.NoError(t, os.WriteFile(filepath.Join(logDir, "server.pid"), []byte(strconv.Itoa(a.command.Process.Pid)), 0600))
 	client := &http.Client{Timeout: 2 * time.Second}

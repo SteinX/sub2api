@@ -170,11 +170,14 @@ jobs:
           make test-devin-acceptance
           python3 -m unittest discover -s tools/devin-e2e-clients -p 'test_*.py'
           cd backend
-          go test -mod=readonly -tags=devine2e ./internal/devine2e -run '^Test(ApprovedJourney|ClientContractAndProject|ProjectAdmission|FusionAudit)' -count=1
+          go test -mod=readonly -race -tags=devine2e ./internal/devine2e -run '^Test(JourneyStop|ApprovedJourney|ClientContractAndProject|ProjectAdmission|FusionAudit)' -count=1
       - name: Product copy buttons to actual CLI project journeys with synthetic models
         env:
           DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-user-journeys
           DEVIN_JOURNEY_CAPABILITIES: 'true'
+          # Negative cases hard-stop and restart their own isolated preview.
+          # This mock-only suite bound does not change an approved live plan.
+          DEVIN_E2E_TIMEOUT_SECONDS: '1100'
         run: make test-devin-user-journeys-mock
       - name: Validate source-bound mock evidence (never release-eligible)
         env:

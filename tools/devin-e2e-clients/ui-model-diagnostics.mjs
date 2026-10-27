@@ -1,4 +1,32 @@
 // Structural observations only: never retain URLs, headers, bodies or keys.
+export function createCatalogProgress(observer, emit) {
+  const ordinals = new WeakMap()
+  const statuses = new WeakMap()
+  return {
+    request(request) {
+      const before = observer.diagnostics.catalog_requests
+      observer.request(request)
+      if (observer.diagnostics.catalog_requests !== before) {
+        const ordinal = observer.diagnostics.catalog_requests
+        ordinals.set(request, ordinal); emit('request', ordinal, null)
+      }
+    },
+    responseHeaders(response) {
+      const request = response.request(), ordinal = ordinals.get(request)
+      if (ordinal) { statuses.set(request, response.status()); emit('headers', ordinal, response.status()) }
+    },
+    requestFailed(request) {
+      observer.requestFailed(request)
+      const ordinal = ordinals.get(request)
+      if (ordinal) emit('request-failed', ordinal, statuses.get(request) ?? null)
+    },
+    requestFinished(request) {
+      const ordinal = ordinals.get(request)
+      if (ordinal) emit('body-finished', ordinal, statuses.get(request) ?? null)
+    }
+  }
+}
+
 export function createModelDiagnostics(origin, selectedModel) {
   const diagnostics = {
     model_http_statuses: [], model_count: 0, selected_model_available: false,

@@ -102,6 +102,15 @@ class ProjectTestReceiptTests(unittest.TestCase):
         self.assertEqual('exit_unverified', self.receipts.report()['test_execution']['calls'][1]['receipt_status'])
         self.assertFalse(self.receipts.report()['client_tests_succeeded'])
 
+    def test_failed_or_uncertain_test_must_stop_before_any_tool_ack(self):
+        for code,output,reason in [(1,'truncated before receipt','test_failed'),(0,'OK','transport_uncertain')]:
+            with self.subTest(code=code):
+                self.event(self.run_tests(),call_id='no-proof-'+str(code),output=output,code=code)
+                tool=self.tracker.calls['no-proof-'+str(code)]
+                self.assertEqual(reason,self.receipts.fatal_reason(tool))
+        self.event(self.run_tests(),call_id='actual-valid')
+        self.assertIsNone(self.receipts.fatal_reason(self.tracker.calls['actual-valid']))
+
     def test_omp_success_requires_actual_output_receipt_and_matching_file(self):
         result = self.run_tests()
         self.event(result, client='omp', code=None)

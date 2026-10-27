@@ -17,7 +17,7 @@ import (
 
 // Only synthetic model replies are controlled here. Login, configuration copy,
 // the CLI, its file tools, tests and the runner's independent oracle are real.
-func verifyProjectMutationNegatives(t *testing.T, app *application, fixture *nativeFixture, key, password string) {
+func verifyProjectMutationNegatives(t *testing.T, app *application, fixture *nativeFixture, key, password string, keyID int64) {
 	t.Helper()
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"))
 	for _, mutation := range []string{"noop", "failed_edit", "early_marker_error"} {
@@ -28,6 +28,13 @@ func verifyProjectMutationNegatives(t *testing.T, app *application, fixture *nat
 			fixture.journey.mutationTool = mutation
 			fixture.journey.mu.Unlock()
 			admission := newJourneyAdmission(t, app, fixtureModel, 12)
+			fence := newJourneyFence(app, nil)
+			t.Cleanup(func() {
+				if fence.snapshot()["stopped"] == true {
+					app.stop(t)
+					app.start(t)
+				}
+			})
 			ui := journeyUIServer(t, app.base, admission.server.URL)
 			script, err := filepath.Abs("../../../tools/devin-e2e-clients/journey.py")
 			require.NoError(t, err)
@@ -44,10 +51,12 @@ func verifyProjectMutationNegatives(t *testing.T, app *application, fixture *nat
 			}
 			cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_GATEWAY_KEY="+key, "DEVIN_JOURNEY_UI_PASSWORD="+password,
 				"DEVIN_JOURNEY_PROCESS_REGISTRY="+processRegistry, "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
-			output, runErr := cmd.Output()
+			output, runErr := runGuardedJourney(t, cmd, app, admission, fence)
 			cleanupErr := cleanupJourneyProcessesAt(processRegistry, containerRegistry)
 			var report map[string]any
 			require.NoError(t, json.Unmarshal(output, &report))
+			report["batch_guard"] = fence.snapshot()
+			report["fixture_batch_billing"] = snapshotMockBilling(t, app, fixture, keyID)
 			writeAgentArtifact(t, "journey-mutation-negative-"+mutation+".json", report)
 			require.NoError(t, cleanupErr)
 			require.Error(t, runErr, "a false final answer must not certify a broken project")
