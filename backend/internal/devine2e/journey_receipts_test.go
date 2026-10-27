@@ -88,7 +88,8 @@ func verifyProjectTestReceipts(t *testing.T, app *application, fixture *nativeFi
 			writeAgentArtifact(t, "journey-test-receipt-"+scenario+".json", report)
 			require.NoError(t, parseErr)
 			require.NoError(t, cleanupErr)
-			task := report["task"].(map[string]any)
+			task, taskPresent := report["task"].(map[string]any)
+			require.True(t, taskPresent, "runner returned no task report (stage=%v)", report["stage"])
 			if scenario == "canonical" || scenario == "after_extra" || scenario == "shell_exit127" || scenario == "read_error_recover" || strings.HasPrefix(scenario, "result_") && scenario != "result_wrong_artifact" {
 				require.NoError(t, runErr, "permitted actual test executions must be recognized")
 				require.Equal(t, "passed", report["status"])
