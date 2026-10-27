@@ -122,7 +122,8 @@ def valid_client_test_receipt(case):
             or selected.get('project_nonce_sha256') != case.get('project_nonce_sha256')
             or selected.get('source_before_sha256') != case.get('source_after_task_sha256')
             or selected.get('source_after_sha256') != case.get('source_after_task_sha256')
-            or not isinstance(protected, dict) or set(protected) != {'requirements.json', 'test_project.py', 'run_tests.py'}
+            or not isinstance(protected, dict) or set(protected) != ({'requirements.json', 'test_project.py', 'run_tests.py'} |
+                ({f'context/part{index:02d}.txt' for index in range(8)} if case.get('project_kind')=='long' else set()))
             or any(not HEX64.fullmatch(str(value)) for value in protected.values()) or selected.get('protected_sha256') != protected
             or type(selected.get('tests_run')) is not int or selected['tests_run'] <= 0
             or any(type(selected.get(key)) is not int or selected[key] != 0 for key in ['failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'])):

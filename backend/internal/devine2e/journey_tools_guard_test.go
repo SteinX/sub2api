@@ -313,3 +313,24 @@ func TestJourneyToolLimitStopWinsDuringReservationAndUncertainNeverRetries(t *te
 		})
 	}
 }
+
+func TestJourneyToolLimitNoToolResumeWithholdsFirstCall(t *testing.T) {
+	f := newJourneyFence(nil, nil)
+	id := "opencode/fusion/long"
+	require.NoError(t, f.installToolLimits(journeyToolLimits{Operations: []string{id + "/task", id + "/resume"}, PerOperation: 12, Total: 60, NoToolsOperations: []string{id + "/resume"}}))
+	require.True(t, f.selectToolCase(id))
+	e := controlEvent("begin")
+	e.Operation = "task"
+	require.True(t, f.control(e))
+	_, err := deliverToolResponse(t, f, `{"choices":[{"finish_reason":"stop"}]}`, false)
+	require.NoError(t, err)
+	require.True(t, f.control(controlEvent("end")))
+	e = controlEvent("begin")
+	e.Operation = "resume"
+	require.True(t, f.control(e))
+	data, err := deliverToolResponse(t, f, toolStream("forbidden-memory-read"), true)
+	require.Error(t, err)
+	require.Empty(t, data)
+	require.Equal(t, 0, f.snapshot()["tool_admission"].(map[string]any)["reserved"])
+	require.Equal(t, "tool_budget_exhausted", f.snapshot()["first_failure"].(map[string]any)["reason"])
+}

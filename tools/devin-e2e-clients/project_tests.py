@@ -10,6 +10,7 @@ SCHEMA = 'devin_project_test_v1'
 HEX = re.compile(r'^[a-f0-9]{64}$')
 RUN_ID = re.compile(r'^[a-f0-9]{32}$')
 PROTECTED = ('requirements.json', 'test_project.py', 'run_tests.py')
+LONG_PARTS = tuple(f'context/part{index:02d}.txt' for index in range(8))
 
 # The real project runner produces this receipt; the observer never creates it.
 TEST_RUNNER = '''import hashlib
@@ -23,7 +24,11 @@ import uuid
 
 started = time.time_ns()
 sha = lambda data: hashlib.sha256(data).hexdigest()
-protected = {name: sha(Path(name).read_bytes()) for name in ("requirements.json", "test_project.py", "run_tests.py")}
+data = json.loads(Path("requirements.json").read_text())
+parts = data.get("parts", [])
+if parts and parts != [f"context/part{index:02d}.txt" for index in range(8)]:
+    raise ValueError("unexpected protected dataset")
+protected = {name: sha(Path(name).read_bytes()) for name in ("requirements.json", "test_project.py", "run_tests.py", *parts)}
 source_before = sha(Path("price_math.py").read_bytes())
 nonce = json.loads(Path("requirements.json").read_text())["nonce"]
 result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.discover("."))
@@ -201,7 +206,7 @@ class TestReceipts:
             return 'stale_or_invalid_time'
         if proof['project_nonce_sha256'] != self.nonce_hash or proof['protected_sha256'] != self.protected:
             return 'wrong_project_or_tests'
-        if set(self.protected) != set(PROTECTED) or any(digest(self.read(name)) != fingerprint for name, fingerprint in self.protected.items()):
+        if set(self.protected) not in (set(PROTECTED), set(PROTECTED)|set(LONG_PARTS)) or any(digest(self.read(name)) != fingerprint for name, fingerprint in self.protected.items()):
             return 'protected_files_changed'
         source = digest(self.read('price_math.py'))
         if proof['source_before_sha256'] != source or proof['source_after_sha256'] != source:
