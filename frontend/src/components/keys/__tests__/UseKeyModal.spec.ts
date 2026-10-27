@@ -155,7 +155,7 @@ describe('UseKeyModal', () => {
     expect(blocks[0].model).toBe('devin/fusion-test')
     expect(blocks[0]).not.toHaveProperty('agent')
     expect(blocks[0]).not.toHaveProperty('permission')
-    expect(blocks[1]).toMatchObject({ model_fallback: false, runtime_fallback: false })
+    expect(blocks[1]).toMatchObject({ '[opencode]': { model_fallback: false, runtime_fallback: false } })
     expect(wrapper.get('[data-testid="devin-instructions"]').text()).toContain('keys.useKeyModal.devin.omoInstructions')
     wrapper.unmount()
   })

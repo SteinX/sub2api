@@ -150,6 +150,7 @@ async function main() {
       if (input.client !== 'omp' && ['permission', 'agent', 'default_agent', 'tools', 'shell'].some(key => key in config)) throw new Error('Connection configuration must preserve native client approval settings')
       const advertised = await node.getAttribute('data-config-path')
       const name = advertised.replaceAll('\\', '/').split('/').at(-1)
+      if (name === 'omo.jsonc' && (!config['[opencode]'] || 'model_fallback' in config || 'disabled_hooks' in config)) throw new Error('Pinned OMO requires its plugin settings in the opencode harness block')
       const targets = {
         'opencode.json': path.join(input.workspace, 'opencode.json'),
         'omo.jsonc': path.join(input.workspace, '.omo/omo.jsonc'),
