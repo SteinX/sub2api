@@ -163,6 +163,19 @@ class ProjectToolEvidenceTests(unittest.TestCase):
                 self.assertEqual(reason,tool['fatal_reason'])
                 self.assertFalse(tool['recoverable_error']);self.assertTrue(tracker.failed)
 
+    def test_context_deadline_errors_stop_read_and_nonzero_bash(self):
+        for name, status in [('read', 'error'), ('bash', 'completed')]:
+            with self.subTest(name=name):
+                tracker = ToolEvidence(self.workspace, 'python3 run_tests.py')
+                value = event(name, status)
+                value['part']['state'].update(
+                    metadata={'exit': 1} if name == 'bash' else {},
+                    **({'output': 'context deadline exceeded'} if name == 'bash' else {'error': 'context deadline exceeded'}))
+                tool = tracker.observe(value)
+                self.assertEqual('transport_uncertain', tool['fatal_reason'])
+                self.assertFalse(tool['recoverable_error'])
+                self.assertTrue(tracker.failed)
+
     def test_changed_or_missing_tool_identity_is_rejected(self):
         self.tracker.observe(event('edit', 'running'))
         for value in [event('write'), event('edit', call_id=None), event('edit', status='unknown')]:

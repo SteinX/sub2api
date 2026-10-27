@@ -18,7 +18,7 @@ make test-devin-user-journeys-mock
 make test-devin-acceptance
 ```
 
-需要 Linux x64、Node 24、Python 3、Go、Docker Compose、pnpm 9 和已安装的 Chromium/Chrome。Playwright 只驱动已有浏览器；可显式设置 `CHROMIUM_EXECUTABLE_PATH`，不下载或放宽浏览器安全设置。工作区及配置均为临时目录。root 运行时项目代码、客户端和浏览器使用低权限用户；普通用户使用下述受限容器，个人 HOME 不挂载且不可写。保留环境代理、CA 和网络限制。
+需要 Linux x64、Node 24、Python 3、Go、Docker Compose、pnpm 9 和已安装的 Chromium/Chrome。Playwright 只驱动已有浏览器；可显式设置 `CHROMIUM_EXECUTABLE_PATH`，不下载或放宽浏览器安全设置。工作区及配置均为临时目录。工程验收以具有本地 Docker 权限的普通用户运行，使用下述受限容器，个人 HOME 不挂载且不可写。root 直启工程 runner 已禁用，会在启动客户端或工程前失败；旧降权路径不能可靠清理已退出进程组 leader 的残留工具。此限制属于验收 runner，不限制生产网关的运行用户。保留环境代理、CA 和网络限制。
 
 完整合成 CI 分为 `contracts` 和 `matrix` 两个独立作业：前者运行原生审批、目录恢复、额度、回执诊断、首错、修改负例及有限长任务，后者运行全部八种正常／不支持配置和 OMP 兼容能力。每个作业仍限 25 分钟，测试套件仍限 1100 秒，不通过延长上限掩盖未完成。默认本地入口仍运行全部用例；`DEVIN_JOURNEY_CI_SHARD` 只在 mock 中选择这两个固定部分。保留 `user-journeys-mock` 聚合检查，只有两个分片都成功才通过；发布门槛另明确要求两个分片，取消或缺少任一项仍拒绝。各分片独立保存同树来源、用量、逐工具结果和退出后的资源检查；matrix 的账务汇总只覆盖本次分片，不代表兄弟分片的中断批次已结清。
 
@@ -173,7 +173,7 @@ UID 0 的既有路径通过把浏览器、CLI、工程代码降为 UID 65534 来
 
 明确取得批准后，维护者记录批准文件：`schema_version:1`、`approved:true`、唯一 `approval_id`、`mode`、24 小时内的 `expires_at`、规范化计划 `plan_sha256`，以及 `native_auth`、`temporary_credential_storage`、`local_preview_accounts` scopes；`live` 另需 `model_generation`。这是维护者可审计的操作联锁，不是授权签名。每个批准 ID 固定使用 `.cache/devin-approved-runs/<ID>.json`，独占创建，不能更换产物目录重置。新 ID 需要新的批准，不能用于重试不明请求。
 
-批准后才可安全注入原生凭据引用，设置 `DEVIN_JOURNEY_PLAN_FILE`、`DEVIN_JOURNEY_APPROVAL_FILE` 和 `DEVIN_E2E_ARTIFACTS`（新的私有目录）；有批准快照时再设置 `DEVIN_JOURNEY_GROUP_PRICING_FILE`。真实值不放到命令行或配置文件。启动器保护原生凭据和账本；root 路径降为低权限用户，普通用户路径使用受限容器，保留平台代理和 CA。`--validate-only` 不会启动服务或生成验收证据。
+批准后才可安全注入原生凭据引用，设置 `DEVIN_JOURNEY_PLAN_FILE`、`DEVIN_JOURNEY_APPROVAL_FILE` 和 `DEVIN_E2E_ARTIFACTS`（新的私有目录）；有批准快照时再设置 `DEVIN_JOURNEY_GROUP_PRICING_FILE`。真实值不放到命令行或配置文件。启动器保护原生凭据和账本；工程 runner 仅支持普通用户的现有受限容器路径，保留平台代理和 CA。`--validate-only` 不会启动服务或生成验收证据。
 
 所有用例共用同一持久账本，以及一个临时公共 Key 的真实本地配额预留。HTTP/SSE 错误、缺正常终态、发送不明、客户端失败、用量读取失败或预算耗尽均停止，不自动重试；SDK 后续请求也无法越过已停止账本。主摘要和短摘要意图排队，但合计计数，实际转发并发仍为一。退出清理客户端、后端及临时 SQL/Redis；结构化记录仅留私有目录。本地用量不是供应商扣费硬上限。
 

@@ -10,10 +10,27 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"github.com/stretchr/testify/require"
 )
+
+func TestFusionAuditUsageMatchesPhysicalUIDInsteadOfBillingAlias(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	attempt := fusion.Attempt{ID: "synthetic-alias-attempt", Model: "claude-opus-5-5-medium", BillingModel: "claude-opus-5-5", Status: "completed"}
+	mock.ExpectQuery(`FROM usage_logs WHERE request_id=\$1 AND api_key_id=\$2`).
+		WithArgs("fusion:"+attempt.ID, int64(7), attempt.Model).
+		WillReturnRows(sqlmock.NewRows([]string{"rows", "negative", "models", "actual", "total", "charged", "input", "output", "write", "read"}).
+			AddRow(1, 0, 1, .001, .001, .001, 10, 2, 0, 0))
+	usage, err := readFusionAuditUsage(context.Background(), db, 7, attempt)
+	require.NoError(t, err)
+	require.Equal(t, 1, usage.Rows)
+	require.Equal(t, 1, usage.ModelRows)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
 
 func fusionAuditFixture() fusion.Session {
 	h := fusion.Handoff{ID: "synthetic-private-handoff", CallID: "synthetic-private-call", Turn: 1, Brief: "synthetic-private-brief", Report: "synthetic-private-report"}

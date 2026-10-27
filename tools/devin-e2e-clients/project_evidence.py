@@ -62,7 +62,7 @@ def tool_error_categories(detail):
         'command_not_found': r'command not found|(?:^|\n)[^\n]{0,160}:\s*not found\b',
         'python_module_missing': r'\bmodulenotfounderror\b|no module named',
         'shell_syntax_error': r'syntax error|unexpected token',
-        'execution_uncertain': r'\betimedout\b|\beconnreset\b|timed out|timeout expired|connection reset|socket hang up|broken pipe|\baborted\b|\bcancell?ed\b|still running',
+        'execution_uncertain': r'\betimedout\b|\beconnreset\b|timed out|timeout expired|deadline exceeded|connection reset|socket hang up|broken pipe|\baborted\b|\bcancell?ed\b|still running',
     }
     return [name for name, pattern in patterns.items() if re.search(pattern, detail, re.I)] or ['unclassified']
 
