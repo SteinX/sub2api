@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import UseKeyModal from '../UseKeyModal.vue'
-import { devinOpenCodeConfig, normalizeDevinTestCommand } from '@/utils/devinClientConfig'
 
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 vi.mock('@/composables/useClipboard', () => ({ useClipboard: () => ({ copyToClipboard: vi.fn().mockResolvedValue(true) }) }))
@@ -17,54 +16,20 @@ function modal() {
 }
 
 describe('Devin user configuration handoff', () => {
-  it.each(['opencode', 'omo'])('requires an explicit workspace and exact test command for %s project permissions', async client => {
+  it.each(['opencode', 'omo'])('connects %s without replacing native agents or approval settings', async client => {
     const wrapper = modal()
     await flushPromises()
     await wrapper.get(`button[data-client="${client}"]`).trigger('click')
-    await wrapper.get('[data-testid="devin-project-mode"]').setValue(true)
-    expect(wrapper.findAll('[data-testid="client-config-file"]')).toHaveLength(0)
-    await wrapper.get('[data-testid="devin-workspace-path"]').setValue('/tmp/owned-project')
-    await wrapper.get('[data-testid="devin-test-command"]').setValue('python3 -m unittest; echo bypass')
-    expect(wrapper.findAll('[data-testid="client-config-file"]')).toHaveLength(0)
-    await wrapper.get('[data-testid="devin-test-command"]').setValue('python3 -m unittest -v')
+    expect(wrapper.find('[data-testid="devin-project-mode"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="devin-workspace-path"]').exists()).toBe(false)
     await wrapper.get('[data-testid="devin-key-from-env"]').setValue(true)
     const text = wrapper.get('pre code').text()
     const config = JSON.parse(text)
-    expect(config.default_agent).toBe('devin-project')
-    expect(config.permission.bash).toEqual({ '*': 'deny', 'python3 -m unittest -v': 'allow' })
-    expect(config.permission).toEqual({
-      '*': 'deny', read: 'allow', edit: 'allow', glob: 'allow', grep: 'allow',
-      bash: { '*': 'deny', 'python3 -m unittest -v': 'allow' },
-      external_directory: { '/tmp/owned-project/*': 'allow' }
-    })
-    expect(config.permission.external_directory).toEqual({ '/tmp/owned-project/*': 'allow' })
-    expect(config.agent['devin-project'].tools).toBeUndefined()
-    expect(config.agent['devin-project'].permission).toEqual(config.permission)
-    expect(config.agent['devin-project'].permission.edit).toBe('allow')
+    for (const key of ['permission', 'agent', 'default_agent', 'tools', 'shell']) expect(config).not.toHaveProperty(key)
+    expect(config.model).toBe('devin/granted-uid')
     expect(config.provider.devin.options.apiKey).toBe('{env:SUB2API_API_KEY}')
     expect(text).not.toContain('synthetic-key-must-not-enter-files')
     wrapper.unmount()
-  })
-
-  it('serializes project values as JSON data in the restricted agent prompt', () => {
-    const workspace = '/tmp/project "quoted" `data` \u2028end'
-    const command = 'python3 C:\\work\\run_tests.py'
-    const config = devinOpenCodeConfig('http://127.0.0.1:8000/v1', '{env:SUB2API_API_KEY}', 'granted', ['granted'], {
-      omo: false, project: true, workspace, testCommand: command
-    })
-    const prompt = config.agent!['devin-project'].prompt
-    const prefix = 'Project configuration JSON: '
-    const line = prompt.split('\n').find(value => value.startsWith(prefix))!
-    expect(JSON.parse(line.slice(prefix.length))).toEqual({ workspace, test_command: command })
-    expect(line).toContain('\\u2028')
-    expect(prompt).toContain('Read (read)')
-    expect(prompt).toContain('Glob (glob)')
-    expect(prompt).toContain('Grep (grep)')
-    expect(prompt).toContain('Edit (edit)')
-    expect(prompt).toContain('command exactly equal to test_command and workdir exactly equal to workspace')
-    expect(prompt).toContain('Do not use Bash for pwd, ls, cat')
-    expect(config.permission!.bash).toEqual({ '*': 'deny', [command]: 'allow' })
-    expect(config.agent!['devin-project']).not.toHaveProperty('tools')
   })
 
   it('keeps OMP default and compatibility profiles separate without inserting a fabricated cost card', async () => {
@@ -83,11 +48,19 @@ describe('Devin user configuration handoff', () => {
     wrapper.unmount()
   })
 
-  it('does not interpret shell control syntax as an exact allowed command', () => {
-    for (const raw of ['echo *', 'echo $(whoami)', 'echo x | cat', 'echo x\ncat a', 'python -c "pass"', 'echo `id`']) {
-      expect(normalizeDevinTestCommand(raw)).toBeNull()
-    }
-    expect(normalizeDevinTestCommand('python3 -m unittest -v')).toBe('python3 -m unittest -v')
+  it('uses the pinned plugin option to keep Fusion history intact without replacing native agents', async () => {
+    const wrapper = modal()
+    await flushPromises()
+    await wrapper.get('button[data-client="omo"]').trigger('click')
+    const configs = () => wrapper.findAll('pre code').map(node => JSON.parse(node.text()))
+    expect(configs()[1]['[opencode]']).toMatchObject({ model_fallback: false, runtime_fallback: false })
+    expect(configs()[1]['[opencode]']).not.toHaveProperty('disabled_hooks')
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('fusion-granted-pair')
+    expect(configs()[1]['[opencode]'].disabled_hooks).toEqual(['category-skill-reminder'])
+    expect(configs()[1]).not.toHaveProperty('model_fallback')
+    expect(configs()[0]).not.toHaveProperty('agent')
+    expect(configs()[0]).not.toHaveProperty('permission')
+    wrapper.unmount()
   })
 
   it('refuses the known incompatible OMP default Fusion configuration without silently switching profiles', async () => {

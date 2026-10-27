@@ -167,29 +167,6 @@
           <p v-else-if="codexModelManifestState === 'ready' && !codexCatalogModelSlugs.length" role="status" class="text-xs">
             {{ t('keys.useKeyModal.devin.noModels') }}
           </p>
-          <label v-if="activeClientTab === 'opencode' || activeClientTab === 'omo'" class="flex items-center gap-2 text-sm">
-            <input v-model="devinProjectMode" type="checkbox" data-testid="devin-project-mode" />
-            {{ t('keys.useKeyModal.devin.projectMode') }}
-          </label>
-          <template v-if="activeClientTab === 'omo' || (activeClientTab === 'opencode' && devinProjectMode)">
-            <label class="input-label" for="devin-workspace-path">{{ t('keys.useKeyModal.devin.workspace') }}</label>
-            <input
-              id="devin-workspace-path"
-              v-model="devinWorkspaceInput"
-              data-testid="devin-workspace-path"
-              class="input"
-              :placeholder="t('keys.useKeyModal.devin.workspacePlaceholder')"
-            />
-            <p v-if="devinWorkspaceInput && !devinWorkspacePath" role="alert" class="text-xs text-amber-700 dark:text-amber-300">
-              {{ t('keys.useKeyModal.devin.workspaceInvalid') }}
-            </p>
-          </template>
-          <template v-if="devinProjectMode && (activeClientTab === 'opencode' || activeClientTab === 'omo')">
-            <label class="input-label" for="devin-test-command">{{ t('keys.useKeyModal.devin.testCommand') }}</label>
-            <input id="devin-test-command" v-model="devinTestCommandInput" data-testid="devin-test-command" class="input" />
-            <p class="text-xs">{{ t('keys.useKeyModal.devin.projectScope') }}</p>
-            <p v-if="devinTestCommandInput && !devinTestCommand" role="alert" class="text-xs text-amber-700">{{ t('keys.useKeyModal.devin.testCommandInvalid') }}</p>
-          </template>
           <label v-if="activeClientTab === 'omp'" class="input-label">
             {{ t('keys.useKeyModal.devin.ompProfile') }}
             <select v-model="devinOmpProfile" data-testid="devin-omp-profile" class="input">
@@ -365,7 +342,7 @@ import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildCodexModelCatalogUrl, fetchCodexModelsManifest } from '@/api/codex'
-import { devinOmpConfig, devinOpenCodeConfig, normalizeDevinWorkspacePath, normalizeDevinTestCommand } from '@/utils/devinClientConfig'
+import { devinOmpConfig, devinOpenCodeConfig } from '@/utils/devinClientConfig'
 import type { GroupPlatform } from '@/types'
 import {
   findCodexCatalogModel,
@@ -415,11 +392,6 @@ const codexAuthMode = ref<CodexAuthMode>('legacy')
 type CodexModelManifestState = 'idle' | 'loading' | 'ready' | 'error'
 const codexModelManifestState = ref<CodexModelManifestState>('idle')
 const devinSelectedModel = ref('')
-const devinWorkspaceInput = ref('')
-const devinWorkspacePath = computed(() => normalizeDevinWorkspacePath(devinWorkspaceInput.value))
-const devinProjectMode = ref(false)
-const devinTestCommandInput = ref('')
-const devinTestCommand = computed(() => normalizeDevinTestCommand(devinTestCommandInput.value))
 const devinOmpProfile = ref<'compatibility' | 'default'>('compatibility')
 const devinOmpDefaultBlocked = computed(() => props.platform === 'devin' && activeClientTab.value === 'omp'
   && devinOmpProfile.value === 'default' && devinSelectedModel.value.toLowerCase().startsWith('fusion-'))
@@ -649,7 +621,6 @@ const openaiTabs: TabConfig[] = [
 const showShellTabs = computed(() => !['opencode', 'omo'].includes(activeClientTab.value))
 
 const devinClientInstructions = computed(() => {
-  if (devinProjectMode.value && ['opencode', 'omo'].includes(activeClientTab.value)) return t('keys.useKeyModal.devin.projectInstructions')
   switch (activeClientTab.value) {
     case 'omp': return t(`keys.useKeyModal.devin.${devinOmpProfile.value === 'default' ? 'ompDefaultInstructions' : 'ompInstructions'}`)
     case 'omo': return t('keys.useKeyModal.devin.omoInstructions')
@@ -901,8 +872,6 @@ const currentFiles = computed((): FileConfig[] => {
   const apiBase = ensureV1(baseRoot)
   if (props.platform === 'devin' && (!devinSelectedModel.value || codexModelManifestState.value !== 'ready')) return []
   if (devinOmpDefaultBlocked.value) return []
-  if (props.platform === 'devin' && activeClientTab.value === 'omo' && !devinWorkspacePath.value) return []
-  if (props.platform === 'devin' && ['opencode', 'omo'].includes(activeClientTab.value) && devinProjectMode.value && (!devinWorkspacePath.value || !devinTestCommand.value)) return []
   const antigravityBase = ensureV1(`${baseRoot}/antigravity`)
   const antigravityGeminiBase = (() => {
     const trimmed = `${baseRoot}/antigravity`.replace(/\/+$/, '')
@@ -941,14 +910,22 @@ const currentFiles = computed((): FileConfig[] => {
         return [generateOpenCodeConfig('grok', apiBase, apiKey)]
       case 'devin':
         return [{
-          path: activeClientTab.value === 'omo' ? `${devinWorkspacePath.value}/opencode.json` : 'opencode.json',
+          path: 'opencode.json',
           content: JSON.stringify(devinOpenCodeConfig(apiBase, apiKey, devinSelectedModel.value, codexCatalogModelSlugs.value, {
-            omo: activeClientTab.value === 'omo', workspace: devinWorkspacePath.value,
-            project: devinProjectMode.value, testCommand: devinTestCommand.value
+            omo: activeClientTab.value === 'omo'
           }), null, 2)
         }, ...(activeClientTab.value === 'omo' ? [{
-          path: `${devinWorkspacePath.value}/.omo/omo.jsonc`,
-          content: JSON.stringify({ model_fallback: false, runtime_fallback: false, disabled_mcps: ['websearch', 'context7', 'grep_app'] }, null, 2),
+          path: '.omo/omo.jsonc',
+          content: JSON.stringify({
+            '[opencode]': {
+              model_fallback: false, runtime_fallback: false,
+              disabled_mcps: ['websearch', 'context7', 'grep_app'],
+              // This native hook inserts text into an earlier user message after
+              // three tools. Fusion requires the prior transcript to stay intact.
+              ...(devinSelectedModel.value.toLowerCase().startsWith('fusion-')
+                ? { disabled_hooks: ['category-skill-reminder'] } : {})
+            }
+          }, null, 2),
           hint: t('keys.useKeyModal.devin.mergeConfig')
         }] : [])]
       default:

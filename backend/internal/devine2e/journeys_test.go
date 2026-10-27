@@ -81,8 +81,8 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		require.NoError(t, err)
 		require.Zero(t, cost)
 	})
-	verifyRestrictedProjectGuidance(t, app, fixture, key, userPassword, keyID)
-	if os.Getenv("DEVIN_JOURNEY_GUIDANCE_ONLY") == "true" {
+	verifyNativeClientWorkflow(t, app, fixture, key, userPassword, keyID)
+	if os.Getenv("DEVIN_JOURNEY_NATIVE_POLICY_ONLY") == "true" {
 		return // Focused synthetic CLI regression; never an authorized live path.
 	}
 	profile := fusion.DefaultProfile("fusion-project-journey", fixtureModel, fixtureSidekick)
@@ -243,6 +243,15 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					fixture.journey.mu.Unlock()
 					report["reasoning_scope"] = map[string]string{"model_uid_effort": "fixture UID swe-2-max", "client_thinking": map[bool]string{true: "off", false: "client default"}[client == "omp"]}
 					report["public_requests"], report["http_attempts"], report["error_codes"] = forwarded, len(requests), errors
+					if client == "omo" && kind == "fusion" {
+						reminderSeen := false
+						for _, request := range requests {
+							for _, item := range request.items {
+								reminderSeen = reminderSeen || strings.Contains(string(item.Content), "[Category+Skill Reminder]")
+							}
+						}
+						report["omo_category_reminder_in_public_history"] = reminderSeen
+					}
 					capabilitiesRequired := os.Getenv("DEVIN_JOURNEY_CAPABILITIES") == "true" && client == "omp" && kind == "direct" && configProfile == "compatibility"
 					report["capabilities_required"] = capabilitiesRequired
 					independentCapabilities := os.Getenv("DEVIN_JOURNEY_CAPABILITIES") == "independent" && client == "omp" && kind == "direct" && configProfile == "compatibility"
@@ -269,6 +278,9 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					}
 					require.NoError(t, runErr, "real CLI project task failed; structural evidence retained")
 					require.Equal(t, "passed", report["status"])
+					if client == "omo" && kind == "fusion" {
+						require.Equal(t, false, report["omo_category_reminder_in_public_history"], "prove the pinned plugin consumed the copied compatibility setting")
+					}
 					for _, phase := range []string{"task", "resume"} {
 						require.Equal(t, false, report[phase].(map[string]any)["final_text_matches"], "normal project completion uses natural language, not a fixed marker")
 					}

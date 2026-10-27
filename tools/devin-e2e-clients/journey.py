@@ -266,7 +266,7 @@ def identity(client):
 
 def command(client, model, resume, project_kind='short'):
     if client in {"opencode", "omo"}:
-        cmd = [str(ROOT / "node_modules/opencode-linux-x64/bin/opencode"), "run", "--agent", "devin-project", "--model", "devin/" + model, "--format", "json", "--title", "Synthetic project acceptance"]
+        cmd = [str(ROOT / "node_modules/opencode-linux-x64/bin/opencode"), "run", "--model", "devin/" + model, "--format", "json", "--title", "Synthetic project acceptance"]
         if client == "opencode":
             cmd.append("--pure")
     else:
@@ -306,7 +306,7 @@ def invoke(args, directory, resume=False, protected=None):
     is_long = getattr(args, 'project_kind', 'short') == 'long'
     reads = long_project.ReadEvidence(directory/'workspace', lambda name: project_bytes(directory/'workspace', name)) if is_long and not resume else None
     proc = start_child(command(args.client,args.model,resume,getattr(args,'project_kind','short')),directory,env,gateway=args.ui_url,client=args.client,
-                       stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     instance = None
     if is_long:
         instance = ('container:'+proc.cid if isinstance(proc,container_sandbox.ContainerProcess) else
@@ -316,6 +316,7 @@ def invoke(args, directory, resume=False, protected=None):
               "frames": 0, "parse_errors": 0, "session_seen": False, "client_session_sha256": None, "session_changed": False,
               "bash_exit_code": None, "test_command_verified": False}
     result.update(reader_completed=False, reader_error=False, project_nonce_sha256=digest(nonce.encode()))
+    result.update(native_permission_request_seen=False, native_noninteractive_auto_reject_seen=False, stderr_bytes=0)
     size = 0
     tool_evidence = ToolEvidence(directory / 'workspace', TEST_COMMAND)
     completion = CompletionEvidence()
@@ -400,8 +401,27 @@ def invoke(args, directory, resume=False, protected=None):
             result['reader_error'] = True
             fatal('reader_error')
 
+    def consume_stderr():
+        tail = b''
+        try:
+            for chunk in iter(lambda: proc.stderr.read(4096), b''):
+                result['stderr_bytes'] += len(chunk)
+                if result['stderr_bytes'] > 4 * 1024 * 1024:
+                    result['reader_error'] = True
+                    fatal('reader_error')
+                    return
+                text = tail + chunk
+                result['native_permission_request_seen'] |= b'permission requested:' in text
+                result['native_noninteractive_auto_reject_seen'] |= b'auto-rejecting' in text
+                tail = text[-128:]
+        except (OSError, ValueError, TypeError, AttributeError):
+            result['reader_error'] = True
+            fatal('reader_error')
+
     thread = threading.Thread(target=consume, daemon=True)
+    stderr_thread = threading.Thread(target=consume_stderr, daemon=True)
     thread.start()
+    stderr_thread.start()
     try:
         proc.wait(timeout=getattr(args,'cli_seconds',150))
     except subprocess.TimeoutExpired:
@@ -412,7 +432,11 @@ def invoke(args, directory, resume=False, protected=None):
         thread.join(timeout=5)
         if thread.is_alive():
             result['reader_error'] = True
+        stderr_thread.join(timeout=5)
+        if stderr_thread.is_alive():
+            result['reader_error'] = True
         proc.stdout.close()
+        proc.stderr.close()
         ACTIVE.discard(proc)
     result["exit_code"] = proc.returncode
     result.update(client_started_ns=client_started_ns, client_finished_ns=time.time_ns())
@@ -462,6 +486,7 @@ def main():
     parser.add_argument('--cli-seconds', type=int, default=150)
     parser.add_argument('--catalog-recovery-probe', action='store_true')
     parser.add_argument('--catalog-observer-delay-ms', type=int, default=0)
+    parser.add_argument('--fixture-user-policy', choices=('none', 'ask', 'deny', 'test-command', 'approved'), default='none')
     args = parser.parse_args()
     if not 1 <= args.cli_seconds <= 300 or args.project_kind == 'long' and args.client != 'opencode':
         parser.error('bounded long project supports only OpenCode; CLI limit must be1..300seconds')
@@ -469,12 +494,26 @@ def main():
         parser.error('catalog recovery probe requires synthetic upstream')
     if args.catalog_observer_delay_ms and (not args.catalog_recovery_probe or not 0 <= args.catalog_observer_delay_ms <= 17000):
         parser.error('observer delay requires a bounded synthetic catalog probe')
+    if args.fixture_user_policy != 'none' and (args.upstream != 'synthetic' or args.client != 'opencode'):
+        parser.error('user approval fixtures are synthetic OpenCode cases only')
     tier = 'client_mock' if args.upstream == 'synthetic' else 'product_live_partial'
     client_identity = identity(args.client)
     isolation(args.client)  # reject writable personal OMO state before setup
     isolated=isolation_evidence()
     directory = Path(args.directory).resolve()
     workspace, expected, protected = prepare(directory, 'long') if args.project_kind=='long' else prepare(directory)
+    # A separate user-owned config proves the product connection file preserves
+    # native approval choices. It never changes the file copied from the page.
+    if args.fixture_user_policy != 'none':
+        policies = {
+            'ask': 'ask', 'deny': 'deny',
+            'test-command': {'*': 'deny', TEST_COMMAND: 'allow'},
+            'approved': {'*': 'ask', 'ls': 'allow', TEST_COMMAND: 'allow', 'python3 ./run_tests.py': 'allow'},
+        }
+        user_config = directory / 'config/opencode/opencode.json'
+        write_json(user_config, {'permission': {'bash': policies[args.fixture_user_policy]}})
+        if os.geteuid() == 0:
+            os.chown(user_config, 65534, 65534)
     if args.project_kind == 'long':
         args.long_facts = long_project.fact_values(lambda name: project_bytes(workspace,name))
         long_parts = {name:digest(project_bytes(workspace,name)) for name in json.loads(project_bytes(workspace,'requirements.json'))['parts']}
@@ -588,7 +627,9 @@ def main():
               "same_client_session": same_session,
               "context_pressure": extended.get('context_pressure', 'not_run'), "compact": extended.get('compact', 'not_run'),
               "fork": extended.get('fork', 'not_run'), "disconnect_recovery": 'not_run', "worker": "not_run",
-              "capability_evidence": extended, 'runtime_dependencies': dependencies}
+              "capability_evidence": extended, 'runtime_dependencies': dependencies,
+              'native_user_policy_fixture': args.fixture_user_policy,
+              'approval_flags': {'auto': False, 'yolo': False, 'dangerously_skip_permissions': False}}
     if args.project_kind=='long':
         report.update(project_kind='long', context_pressure='passed' if first.get('long_reads',{}).get('complete') else 'failed',
                       compact='not_claimed', compression_claim=False, dataset_bytes=long_project.PARTS*long_project.PART_BYTES,

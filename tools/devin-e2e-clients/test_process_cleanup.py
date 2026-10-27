@@ -11,6 +11,14 @@ import process_cleanup
 
 
 class ProcessIdentityTests(unittest.TestCase):
+    def test_diagnostics_separate_process_and_container_proof_without_exposing_identity(self):
+        for process_ok,container_ok in [(False,True),(True,False),(True,True)]:
+            evidence={}
+            with patch.object(process_cleanup,'cleanup_processes',return_value=process_ok), patch('container_sandbox.cleanup_registry',return_value=container_ok) as containers:
+                self.assertEqual(process_ok and container_ok,process_cleanup.cleanup('/private/synthetic-registry',diagnostics=evidence))
+            self.assertEqual({'schema_version':1,'process_cleanup_verified':process_ok,'container_cleanup_verified':container_ok},evidence)
+            containers.assert_called_once()
+
     def test_exited_group_leader_cannot_hide_a_surviving_tool(self):
         with tempfile.TemporaryDirectory() as temporary:
             registry=Path(temporary)/'registry'; registry.touch(mode=0o600)

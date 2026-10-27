@@ -124,11 +124,7 @@ async function main() {
     await page.locator(`button[data-client="${input.client}"]`).click()
     setStage('environment-key')
     await page.getByTestId('devin-key-from-env').check()
-    if (input.client !== 'omp') {
-      await page.getByTestId('devin-project-mode').check()
-      await page.getByTestId('devin-workspace-path').fill(input.workspace)
-      await page.getByTestId('devin-test-command').fill(input.test_command)
-    } else {
+    if (input.client === 'omp') {
       await page.getByTestId('devin-omp-profile').selectOption(input.profile)
     }
     setStage('config-generation')
@@ -151,8 +147,10 @@ async function main() {
       const copied = await page.evaluate(() => navigator.clipboard.readText())
       if (copied !== await node.locator('pre code').textContent()) throw new Error('Copied configuration differs from displayed configuration')
       const config = JSON.parse(copied)
+      if (input.client !== 'omp' && ['permission', 'agent', 'default_agent', 'tools', 'shell'].some(key => key in config)) throw new Error('Connection configuration must preserve native client approval settings')
       const advertised = await node.getAttribute('data-config-path')
       const name = advertised.replaceAll('\\', '/').split('/').at(-1)
+      if (name === 'omo.jsonc' && (!config['[opencode]'] || 'model_fallback' in config || 'disabled_hooks' in config)) throw new Error('Pinned OMO requires its plugin settings in the opencode harness block')
       const targets = {
         'opencode.json': path.join(input.workspace, 'opencode.json'),
         'omo.jsonc': path.join(input.workspace, '.omo/omo.jsonc'),

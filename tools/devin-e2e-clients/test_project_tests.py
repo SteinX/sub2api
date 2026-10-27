@@ -80,6 +80,16 @@ class ProjectTestReceiptTests(unittest.TestCase):
         self.assertEqual(1, report['test_execution']['calls'][0]['tests_run'])
         self.assertEqual(self.protected, report['test_execution']['calls'][0]['protected_sha256'])
 
+    def test_native_path_alias_needs_a_real_matching_runner_receipt(self):
+        result = subprocess.run([sys.executable, './run_tests.py'], cwd=self.root, capture_output=True, check=False)
+        self.event(result, command='python3 ./run_tests.py')
+        report = self.receipts.report()
+        self.assertTrue(report['client_tests_succeeded'])
+        call = report['test_execution']['calls'][0]
+        self.assertEqual('other_literal', call['command_class'])
+        self.assertEqual('test_path_alias', call['command_category'])
+        self.assertTrue(call['execution_verified'])
+
     def test_each_actual_call_survives_later_command_and_duplicate_terminal(self):
         result = self.run_tests()
         event = self.event(result)

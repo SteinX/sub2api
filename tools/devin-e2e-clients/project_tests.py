@@ -166,8 +166,10 @@ class TestReceipts:
         self.sequence += 1
         record['completion_sequence'] = self.sequence
         record['exit_code'], record['exit_source'] = code, exit_source
-        record['receipt_status'] = 'not_test_command' if record['command_class'] != 'configured_project_tests' else 'missing'
-        if record['command_class'] != 'configured_project_tests':
+        candidate = record['command_class'] == 'configured_project_tests' or record['command_category'] == 'test_path_alias'
+        record['test_runner_candidate'] = candidate
+        record['receipt_status'] = 'missing' if candidate else 'not_test_command'
+        if not candidate:
             return
         lines = [line[len(PREFIX):] for line in text.splitlines() if line.startswith(PREFIX)]
         if len(lines) != 1:
@@ -248,14 +250,14 @@ class TestReceipts:
         record=self.calls.get(tool['call_sha256'],{})
         if record.get('exit_code') is not None and record['exit_code'] != 0:
             return 'test_failed'
-        if record.get('command_class') == 'configured_project_tests':
+        if record.get('test_runner_candidate'):
             if not record.get('execution_verified') or record.get('passed') is not True:
                 return 'transport_uncertain'
         return None
 
     def report(self):
         calls = [{key: value for key, value in record.items() if not key.startswith('_')} for record in self.calls.values()]
-        candidates = [record for record in calls if record['command_class'] == 'configured_project_tests']
+        candidates = [record for record in calls if record.get('test_runner_candidate')]
         selected = max(candidates, key=lambda record: record.get('completion_sequence', -1), default=None)
         try:
             source = digest(self.read('price_math.py'))
