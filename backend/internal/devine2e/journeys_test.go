@@ -33,6 +33,7 @@ func TestDevinClientUserJourneysMock(t *testing.T) {
 	f := newNativeFixture(t)
 	f.agentMode.Store(true)
 	f.journey = &projectJourney{}
+	f.largeCatalog.Store(true)
 	runDevinCloudGatewaySuite(t, "mock", f, "journeys")
 }
 
@@ -81,6 +82,11 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		require.Zero(t, cost)
 	})
 	profile := fusion.DefaultProfile("fusion-project-journey", fixtureModel, fixtureSidekick)
+	if !t.Run("slow_catalog_timeout_and_manual_refresh", func(t *testing.T) {
+		verifyJourneyCatalogRecovery(t, app, fixture, key, userPassword)
+	}) {
+		t.Fatal("product catalog failure recovery did not complete")
+	}
 	profile.MaxHandoffs, profile.MaxRequests, profile.MaxTools = 2, 32, 20
 	profile.MaxCostUSD, profile.MaxWallSeconds = 1, 300
 	profile.Keepalive = &fusion.KeepalivePolicy{Enabled: false}

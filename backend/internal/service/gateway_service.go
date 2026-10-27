@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1446,6 +1447,14 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 	hasAnyMapping := false
 
 	for _, acc := range accounts {
+		// Repository JSON is untyped. Decode once for this request, rather than
+		// re-encoding the complete catalog for every candidate UID. Keep the
+		// shared repository account unchanged and never cache stale grants.
+		if acc.Platform == PlatformDevin && acc.Extra[devinCatalogExtraKey] != nil {
+			catalog := devinAccountCatalog(&acc)
+			acc.Extra = maps.Clone(acc.Extra)
+			acc.Extra[devinCatalogExtraKey] = catalog
+		}
 		// Passthrough routing accepts models independently of model_mapping, so a
 		// stale mapping on a passthrough account must not narrow the public list.
 		// Treat it like an unmapped account: skip its mapping here and let

@@ -78,19 +78,40 @@ test('DOM evidence distinguishes missing modal, wrong platform and missing targe
     globalThis.document = { querySelector: () => null }
     assert.deepEqual(modelControlSnapshot('swe-2-high'), {
       modal_present: false, modal_visible: false, devin_platform: false,
-      select_present: false, select_disabled: null, option_count: 0, target_option_present: false
+      select_present: false, select_disabled: null, option_count: 0, available_option_count: 0, target_option_present: false
     })
     const modal = { dataset: { platform: '' }, getClientRects: () => [{}] }
-    const select = { disabled: false, options: [{ value: 'other-synthetic-model' }] }
+    const select = { disabled: false, options: [{ value: '' }, { value: 'other-synthetic-model' }] }
     globalThis.document = { querySelector: selector => selector.includes('use-key-modal') ? modal : select }
     const before = modelControlSnapshot('swe-2-high')
     assert.equal(before.modal_visible, true)
     assert.equal(before.devin_platform, false)
     assert.equal(before.target_option_present, false)
+    assert.equal(before.available_option_count, 1)
     modal.dataset.platform = 'devin'
     select.options.push({ value: 'swe-2-high' })
     const after = modelControlSnapshot('swe-2-high')
     assert.equal(after.devin_platform, true)
     assert.equal(after.target_option_present, true)
+    assert.equal(after.available_option_count, 2)
   } finally { delete globalThis.document }
+})
+
+test('ready DOM evidence does not depend on an asynchronous response-body read', async () => {
+  const observer = createModelDiagnostics(origin, 'swe-2-high')
+  let finishRead
+  const reading = observer.response({ request: () => request(manifest), status: () => 200,
+    json: () => new Promise(resolve => { finishRead = resolve }) })
+  try {
+    globalThis.document = { querySelector: selector => selector.includes('use-key-modal')
+      ? { dataset: { platform: 'devin' }, getClientRects: () => [{}] }
+      : { disabled: false, options: [{ value: '' }, { value: 'swe-2-high' }, { value: 'other' }] } }
+    assert.equal(observer.diagnostics.model_count, 0)
+    assert.equal(modelControlSnapshot('swe-2-high').available_option_count, 2)
+  } finally {
+    delete globalThis.document
+    finishRead({ models: [{ slug: 'swe-2-high' }, { slug: 'other' }] })
+    await reading
+  }
+  assert.equal(observer.diagnostics.model_count, 2)
 })

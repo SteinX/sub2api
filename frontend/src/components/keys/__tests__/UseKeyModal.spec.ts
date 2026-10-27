@@ -168,6 +168,36 @@ describe('UseKeyModal', () => {
     wrapper.unmount()
   })
 
+  it('bounds a stalled Devin catalog and requires an explicit refresh', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockImplementationOnce((_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
+        options.signal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+      }))
+      .mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'recovered-model' }] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-synthetic', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    try {
+      await nextTick()
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      expect(wrapper.get('[data-testid="devin-models-refresh"]').attributes('disabled')).toBeDefined()
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(fetchMock.mock.calls[0]![1].signal.aborted).toBe(true)
+      expect(wrapper.get('[data-testid="devin-models-error"]').text()).toContain('keys.useKeyModal.devin.modelsTimeout')
+      expect(wrapper.get('[data-testid="devin-models-refresh"]').attributes('disabled')).toBeUndefined()
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      await wrapper.get('[data-testid="devin-models-refresh"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(0)
+      await nextTick()
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(wrapper.findAll('pre code').map(node => node.text()).join('\n')).toContain('recovered-model')
+    } finally { wrapper.unmount() }
+  })
+
   it('recovers Devin discovery with an explicit refresh without generating a guessed model', async () => {
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 403 })
@@ -184,7 +214,54 @@ describe('UseKeyModal', () => {
     wrapper.unmount()
   })
 
+  it('does not let a late timed-out response replace a refreshed catalog', async () => {
+    vi.useFakeTimers()
+    let finishOld: (value: unknown) => void = () => {}
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+      .mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'fresh-model' }] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-synthetic', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      await wrapper.get('[data-testid="devin-models-refresh"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(0)
+      finishOld({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'stale-model' }] }) })
+      await vi.advanceTimersByTimeAsync(0)
+      const options = wrapper.findAll('#devin-client-model option').map(option => option.text())
+      expect(options).toContain('fresh-model')
+      expect(options).not.toContain('stale-model')
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally { wrapper.unmount() }
+  })
+
+  it('hides old configuration exports while a refresh is loading or has timed out', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'old-model' }] }) })
+      .mockImplementationOnce(() => new Promise(() => {})))
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-synthetic', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(wrapper.find('[data-testid="devin-ccswitch-import"]').exists()).toBe(true)
+      await wrapper.get('[data-testid="devin-models-refresh"]').trigger('click')
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      expect(wrapper.find('[data-testid="devin-ccswitch-import"]').exists()).toBe(false)
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(wrapper.find('[data-testid="devin-models-error"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="devin-ccswitch-import"]').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     saveAsMock.mockClear()
   })

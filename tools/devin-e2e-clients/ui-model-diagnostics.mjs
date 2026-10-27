@@ -5,7 +5,7 @@ export function createModelDiagnostics(origin, selectedModel) {
     catalog_requests: 0, catalog_request_failures: 0, catalog_request_aborts: 0, cross_origin_catalog_requests: 0,
     model_response_shape: 'not_received', models_field_kind: 'not_received', data_field_kind: 'not_received', page_errors: 0,
     modal_present: false, modal_visible: false, devin_platform: false,
-    select_present: false, select_disabled: null, option_count: 0, target_option_present: false,
+    select_present: false, select_disabled: null, option_count: 0, available_option_count: 0, target_option_present: false,
     config_file_count: 0, copied_files: 0
   }
   function catalogRequest(request) {
@@ -59,6 +59,7 @@ export function modelControlSnapshot(model) {
     devin_platform: modal?.dataset.platform === 'devin',
     select_present: Boolean(select), select_disabled: select ? select.disabled : null,
     option_count: select ? select.options.length : 0,
+    available_option_count: select ? [...select.options].filter(option => option.value !== '').length : 0,
     target_option_present: select ? [...select.options].some(option => option.value === model) : false
   }
 }

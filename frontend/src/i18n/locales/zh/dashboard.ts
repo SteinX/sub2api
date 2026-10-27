@@ -165,6 +165,8 @@ export default {
         import: '将所选模型导入 CC Switch',
         instructionsTitle: 'Devin 接入步骤',
         refreshModels: '刷新可用模型',
+        modelsLoading: '正在加载可用模型…',
+        modelsTimeout: '模型列表加载超时，请点击刷新后重试。',
         noModels: '当前 Key 没有可用模型，请检查分组与账号授权后刷新。',
         workspace: '项目工作目录（绝对路径）',
         workspacePlaceholder: '例如 /Users/me/project 或 C:/work/project',

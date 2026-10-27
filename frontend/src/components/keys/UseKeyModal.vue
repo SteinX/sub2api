@@ -146,6 +146,9 @@
             <option value="" disabled>{{ t('keys.useKeyModal.devin.selectModel') }}</option>
             <option v-for="model in codexCatalogModelSlugs" :key="model" :value="model">{{ model }}</option>
           </select>
+          <p v-if="codexModelManifestState === 'loading'" role="status" data-testid="devin-models-loading" class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('keys.useKeyModal.devin.modelsLoading') }}
+          </p>
           <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.useKeyModal.devin.description') }}</p>
           <label v-if="['opencode', 'omo', 'omp'].includes(activeClientTab)" class="flex items-center gap-2 text-sm">
             <input v-model="devinKeyFromEnv" type="checkbox" data-testid="devin-key-from-env" />
@@ -158,8 +161,8 @@
             :disabled="codexModelManifestState === 'loading' || !apiKey"
             @click="loadCodexModelManifest"
           >{{ t('keys.useKeyModal.devin.refreshModels') }}</button>
-          <p v-if="codexModelManifestState === 'error'" role="alert" class="text-xs text-amber-700 dark:text-amber-300">
-            {{ t('keys.useKeyModal.codexModelCatalog.errorDescription') }}
+          <p v-if="codexModelManifestState === 'error'" role="alert" data-testid="devin-models-error" :data-timeout="devinModelManifestTimedOut" class="text-xs text-amber-700 dark:text-amber-300">
+            {{ t(devinModelManifestTimedOut ? 'keys.useKeyModal.devin.modelsTimeout' : 'keys.useKeyModal.codexModelCatalog.errorDescription') }}
           </p>
           <p v-else-if="codexModelManifestState === 'ready' && !codexCatalogModelSlugs.length" role="status" class="text-xs">
             {{ t('keys.useKeyModal.devin.noModels') }}
@@ -198,7 +201,7 @@
             {{ t('keys.useKeyModal.devin.ompDefaultBlocked') }}
           </p>
           <button
-            v-if="devinSelectedModel && (activeClientTab === 'codex' || activeClientTab === 'claude')"
+            v-if="codexModelManifestState === 'ready' && devinSelectedModel && (activeClientTab === 'codex' || activeClientTab === 'claude')"
             type="button"
             class="btn btn-secondary btn-sm"
             data-testid="devin-ccswitch-import"
@@ -355,7 +358,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h, watch, type Component } from 'vue'
+import { ref, computed, h, watch, onBeforeUnmount, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { saveAs } from 'file-saver'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -431,6 +434,8 @@ const codexLocalCatalogToml = computed(() => codexModelCatalogMode.value === 'fi
   ? `model_catalog_json = "${CODEX_MODEL_CATALOG_CONFIG_PATH}"\n`
   : '')
 let codexModelManifestController: AbortController | null = null
+let cancelModelManifestTimeout: (() => void) | null = null
+const devinModelManifestTimedOut = ref(false)
 let codexModelManifestRequestID = 0
 
 const showCodexModelCatalog = computed(() =>
@@ -777,6 +782,8 @@ const platformNote = computed(() => {
 const showPlatformNote = computed(() => activeClientTab.value !== 'opencode')
 
 function resetCodexModelManifest() {
+  cancelModelManifestTimeout?.()
+  cancelModelManifestTimeout = null
   codexModelManifestController?.abort()
   codexModelManifestController = null
   codexModelManifestRequestID += 1
@@ -785,20 +792,33 @@ function resetCodexModelManifest() {
   codexModelManifestModelCount.value = 0
   codexModelManifestResponseBytes.value = 0
   devinSelectedModel.value = ''
+  devinModelManifestTimedOut.value = false
 }
+
+onBeforeUnmount(resetCodexModelManifest)
 
 async function loadCodexModelManifest() {
   if (!showCodexModelCatalog.value || !props.apiKey) return
 
   codexModelManifestController?.abort()
+  cancelModelManifestTimeout?.()
   const controller = new AbortController()
   const requestID = ++codexModelManifestRequestID
   codexModelManifestController = controller
   codexModelManifestState.value = 'loading'
+  devinModelManifestTimedOut.value = false
+  const timeout = props.platform === 'devin' ? setTimeout(() => {
+    if (requestID !== codexModelManifestRequestID) return
+    devinModelManifestTimedOut.value = true
+    codexModelManifestState.value = 'error'
+    controller.abort()
+  }, 15000) : null
+  const clearTimeoutForRequest = () => { if (timeout !== null) clearTimeout(timeout) }
+  cancelModelManifestTimeout = clearTimeoutForRequest
 
   try {
     const result = await fetchCodexModelsManifest(props.baseUrl, props.apiKey, controller.signal)
-    if (requestID !== codexModelManifestRequestID) return
+    if (requestID !== codexModelManifestRequestID || devinModelManifestTimedOut.value) return
     codexModelManifestContent.value = result.content
     codexModelManifestModelCount.value = result.modelCount
     codexModelManifestResponseBytes.value = result.responseBytes
@@ -815,8 +835,10 @@ async function loadCodexModelManifest() {
     if (requestID !== codexModelManifestRequestID || errorName === 'AbortError') return
     codexModelManifestState.value = 'error'
   } finally {
+    clearTimeoutForRequest()
     if (requestID === codexModelManifestRequestID) {
       codexModelManifestController = null
+      cancelModelManifestTimeout = null
     }
   }
 }
