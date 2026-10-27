@@ -25,6 +25,8 @@ REQUIRED_CHECKS = {
 CLIENT_PINS = {'opencode': ('opencode-ai', '1.19.4'), 'omo': ('oh-my-opencode', '5.1.44'),
                'omp': ('@oh-my-pi/pi-coding-agent', '18.12.6')}
 PRODUCT_UI_SCOPE = 'full product application: login, key list, selection and configuration copy'
+TOOL_NAME = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
+FILE_MUTATORS = {'write', 'edit', 'apply_patch'}
 SECRET_KEYS = {'api_key', 'apikey', 'authorization', 'access_token', 'refresh_token', 'pat', 'cookie', 'raw_log', 'prompt', 'content',
                'account_id', 'group_id', 'channel_id', 'user_id', 'session_id', 'email', 'stdout', 'stderr', 'request_body', 'response_body'}
 
@@ -42,6 +44,26 @@ def private_fields(value):
     if isinstance(value, list):
         return any(private_fields(item) for item in value)
     return False
+
+
+def valid_tool_evidence(result):
+    tools, states, events = (result.get(key) for key in ['tools', 'tool_states', 'tool_events'])
+    if (not all(isinstance(value, dict) for value in [tools, states, events])
+            or type(result.get('incomplete_tool_calls')) is not int or result['incomplete_tool_calls'] != 0):
+        return False
+    if any(not isinstance(name, str) or not TOOL_NAME.fullmatch(name) or type(count) is not int or count < 0 for name, count in tools.items()):
+        return False
+    for collection in [states, events]:
+        for name, counts in collection.items():
+            if (not isinstance(name, str) or not TOOL_NAME.fullmatch(name) or not isinstance(counts, dict) or not counts
+                    or any(status not in {'pending', 'running', 'completed', 'error'} or type(count) is not int or count < 0 for status, count in counts.items())):
+                return False
+            if counts.get('error', 0):
+                return False
+    if set(states) != set(events) or set(states) != {name for name, count in tools.items() if count}:
+        return False
+    return all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
+               and events[name].get('completed', 0) >= tools[name] for name, counts in states.items())
 
 
 def validate(report, mode, commit, tree, state=None):
@@ -120,6 +142,8 @@ def validate(report, mode, commit, tree, state=None):
                 errors.append(ident + ':fusion_roles_unverified')
         for phase in ['task', 'resume']:
             result = case.get(phase) or {}
+            if not valid_tool_evidence(result):
+                errors.append(ident + ':' + phase + '_tool_evidence_invalid')
             if client=='omo' and result.get('plugin_runtime_started') is not True:
                 errors.append(ident+':'+phase+'_omo_plugin_not_observed')
             if (result.get('exit_code') != 0 or result.get('normal_stop') is not True or result.get('event_error') is not False
@@ -130,7 +154,15 @@ def validate(report, mode, commit, tree, state=None):
         if case.get('task', {}).get('client_session_sha256') != (case.get('resume') or {}).get('client_session_sha256'):
             errors.append(ident + ':session_identity_mismatch')
         tools = case.get('task', {}).get('tools', {})
-        if (tools.get('read', 0) < 3 or tools.get('write', 0) < 1 or tools.get('bash', 0) < 1
+        mutations = case.get('task', {}).get('source_mutation_tools', {})
+        allowed_mutators = {'write'} if client == 'omp' else FILE_MUTATORS
+        before, after = case.get('source_before_task_sha256'), case.get('source_after_task_sha256')
+        if (not HEX64.fullmatch(str(before or '')) or not HEX64.fullmatch(str(after or '')) or before == after
+                or case.get('source_changed_by_task') is not True or not isinstance(mutations, dict) or not mutations
+                or any(name not in allowed_mutators or type(count) is not int or count <= 0
+                       or count > tools.get(name, 0) for name, count in mutations.items())):
+            errors.append(ident + ':source_mutation_unverified')
+        if (tools.get('read', 0) < 3 or tools.get('bash', 0) < 1
                 or case.get('task', {}).get('client_tests_succeeded') is not True or case.get('task', {}).get('test_command_verified') is not True
                 or case.get('task', {}).get('bash_exit_code') != 0 or case.get('resume', {}).get('tools', {}).get('read', 0) < 1):
             errors.append(ident + ':actual_client_tools_missing')

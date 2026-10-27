@@ -23,6 +23,8 @@ def evidence(live=False):
                     'client_session_sha256': DIGEST, 'tools': {'read': 4, 'write': 1, 'bash': 1},
                     'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0, 'plugin_runtime_started': True}
         case = {'id': ident, 'model_kind': kind, 'status': 'passed', 'artifact_sha256': DIGEST,
+                'source_before_task_sha256': '1' * 64, 'source_after_task_sha256': '2' * 64,
+                'source_changed_by_task': True,
                 'tier': 'user_e2e' if live else 'client_mock', 'eligible_for_real_e2e': live,
                 'public_model_uid': 'fusion-test' if kind == 'fusion' else 'physical-lead',
                 'physical_lead_uid': 'physical-lead', 'physical_sidekick_uid': 'physical-sidekick' if kind == 'fusion' else '',
@@ -39,6 +41,12 @@ def evidence(live=False):
                 'pricing_contract': {'identified': True, 'physical_model_uids': ['physical-lead', 'physical-sidekick'] if kind == 'fusion' else ['physical-lead'],
                                      'snapshot_sha256': DIGEST, 'group_config_sha256': DIGEST, 'public_key_route_verified': True,
                                      'sources': {'physical-lead': 'builtin_exact', 'physical-sidekick': 'group'}}}
+        for phase in ['task', 'resume']:
+            result = case[phase]
+            result['tool_states'] = {name: {'completed': count} for name, count in result['tools'].items() if count}
+            result['tool_events'] = copy.deepcopy(result['tool_states'])
+            result['incomplete_tool_calls'] = 0
+            result['source_mutation_tools'] = {'write': 1} if phase == 'task' else {}
         for key in ['initial_project_test_failed', 'protected_project_files_intact', 'artifact_verified_before_oracle',
                     'artifact_verified_after_resume', 'source_unchanged_after_resume', 'independent_project_test_passed', 'same_client_session']:
             case[key] = True
@@ -57,6 +65,41 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_edit_only_mutation_is_valid_without_write(self):
+        report, _ = evidence()
+        case = report['cases'][0]
+        task = case['task']
+        task['tools']['write'] = 0
+        task['tools']['edit'] = 1
+        for field in ['tool_states', 'tool_events']:
+            task[field].pop('write')
+            task[field]['edit'] = {'completed': 1}
+        task['source_mutation_tools'] = {'edit': 1}
+        self.assertEqual([], gate.validate(report, 'client_mock', COMMIT, TREE))
+
+    def test_completed_write_cannot_replace_independent_source_change(self):
+        report, _ = evidence()
+        case = report['cases'][0]
+        case['source_after_task_sha256'] = case['source_before_task_sha256']
+        self.assertIn(case['id'] + ':source_mutation_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
+
+    def test_mutation_stats_are_required_and_bash_or_failed_tools_cannot_supply_them(self):
+        for changes in [ {'source_mutation_tools': {}}, {'source_mutation_tools': {'bash': 1}},
+                         {'source_mutation_tools': {'write': 2}}, {'source_mutation_tools': {'write': True}},
+                         {'tool_states': {'write': {'error': 1}}}, {'tool_states': {'write': {'pending': 1}}},
+                         {'incomplete_tool_calls': 1}, {'tool_events': {}}, {'tools': {'write': -1}} ]:
+            report, _ = evidence()
+            case = report['cases'][0]
+            case['task'].update(changes)
+            with self.subTest(changes=changes):
+                self.assertTrue(gate.validate(report, 'client_mock', COMMIT, TREE))
+
+    def test_old_count_only_evidence_cannot_silently_pass_new_gate(self):
+        report, _ = evidence()
+        report['cases'][0]['task'].pop('tool_states')
+        self.assertTrue(gate.validate(report, 'client_mock', COMMIT, TREE))
+
+
     def test_installed_omo_package_does_not_prove_plugin_runtime_started(self):
         for phase in ['task','resume']:
             report,_=evidence()

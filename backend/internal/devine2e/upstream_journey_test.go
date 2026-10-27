@@ -20,6 +20,7 @@ import (
 type projectJourney struct {
 	mu              sync.Mutex
 	workspace       string
+	mutationTool    string
 	maxContextBytes int
 }
 
@@ -40,7 +41,11 @@ def report():
 func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetChatMessageResponse) {
 	j.mu.Lock()
 	workspace := j.workspace
+	mutationTool := j.mutationTool
 	j.mu.Unlock()
+	if mutationTool == "" {
+		mutationTool = "write"
+	}
 	reply.DeltaText, reply.DeltaToolCalls = "PROJECT_FAILED", nil
 	reply.Usage.BillingModelUid = request.ChatModelUid
 	reply.StopReason = pb.StopReason_STOP_REASON_STOP_PATTERN
@@ -84,7 +89,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	type priorCall struct{ name, path string }
 	calls := map[string]priorCall{}
 	reads := map[string]int{}
-	wrote, tested := false, false
+	wrote, tested, mutationFailed := false, false, false
 	for i, prompt := range request.ChatMessagePrompts {
 		for _, call := range prompt.ToolCalls {
 			var args map[string]any
@@ -98,6 +103,9 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 			calls[call.Id] = priorCall{call.Name, path}
 		}
 		call := calls[prompt.ToolCallId]
+		if prompt.ToolResultIsError && (call.name == "edit" || call.name == "write") {
+			mutationFailed = true
+		}
 		if call.name == fusion.DelegateTool {
 			lastReport = i
 		}
@@ -107,7 +115,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		switch call.name {
 		case "read", "read_file":
 			reads[filepath.Base(call.path)]++
-		case "write":
+		case "write", "edit":
 			wrote = true
 		case "bash":
 			tested = true
@@ -155,13 +163,35 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		readPath = "requirements.json"
 	case reads["price_math.py"] == 0:
 		readPath = "price_math.py"
+	case mutationTool == "failed_edit" && mutationFailed:
+		reply.DeltaText = final // an errored tool cannot be hidden by normal final text
+		return
 	case !wrote:
+		name := mutationTool
+		if mutationTool == "noop" {
+			name = "write"
+		} else if mutationTool == "failed_edit" {
+			name = "edit"
+		}
 		for _, tool := range request.Tools {
-			if tool.Name == "write" {
-				call(tool, journeyPathArgs(tool, filepath.Join(workspace, "price_math.py"), map[string]any{"content": fixedProjectSource}))
+			if tool.Name == name {
+				args := map[string]any{"content": fixedProjectSource}
+				if mutationTool == "noop" {
+					args["content"] = strings.Replace(fixedProjectSource, "subtotal - discount", "subtotal + discount", 1)
+				} else if name == "edit" {
+					old := "return subtotal + discount"
+					if mutationTool == "failed_edit" {
+						old = "SYNTHETIC_ABSENT_EDIT_TARGET"
+					}
+					args = map[string]any{"oldString": old, "newString": "return subtotal - discount"}
+				}
+				call(tool, journeyPathArgs(tool, filepath.Join(workspace, "price_math.py"), args))
 				return
 			}
 		}
+		return
+	case mutationTool == "noop":
+		reply.DeltaText = final // deliberately false success; no source repair or tests
 		return
 	case !tested:
 		for _, tool := range request.Tools {

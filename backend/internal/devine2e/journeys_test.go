@@ -95,6 +95,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	require.NoError(t, json.Unmarshal([]byte(current.Get("extra").Raw), &extra))
 	extra["devin_fusion_profiles"] = []fusion.Profile{profile}
 	api(t, app, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra})
+	verifyProjectMutationNegatives(t, app, fixture, key, userPassword)
 	reports := []map[string]any{}
 	billing := map[string]any{"verified": false, "tier": "synthetic billing; not a provider invoice"}
 	defer func() {
@@ -126,6 +127,10 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					t.Cleanup(func() { _ = os.RemoveAll(directory) })
 					fixture.journey.mu.Lock()
 					fixture.journey.workspace = filepath.Join(directory, "workspace")
+					fixture.journey.mutationTool = "write"
+					if client == "opencode" && kind == "direct" {
+						fixture.journey.mutationTool = "edit"
+					}
 					fixture.journey.maxContextBytes = 0
 					fixture.journey.mu.Unlock()
 					admission := newJourneyAdmission(t, app, model, 40)

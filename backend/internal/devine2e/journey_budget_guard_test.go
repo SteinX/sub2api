@@ -23,6 +23,20 @@ type syntheticJourneyBudget struct {
 	outcomes   []string
 }
 
+func assertSyntheticJourneyOutcomes(t *testing.T, budget *syntheticJourneyBudget, expected []string) {
+	t.Helper()
+	snapshot := func() []string {
+		budget.mu.Lock()
+		defer budget.mu.Unlock()
+		return append([]string(nil), budget.outcomes...)
+	}
+	// Reading the response EOF does not join the handler's deferred Complete.
+	// Keep the exact outcome assertion, but wait for its observable callback and
+	// never read the callback's shared slice without its mutex.
+	require.Eventually(t, func() bool { return len(snapshot()) == len(expected) }, time.Second, time.Millisecond)
+	require.Equal(t, expected, snapshot())
+}
+
 func TestApprovedJourneyDirectDeadlineStopsForwarding(t *testing.T) {
 	var calls atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +61,7 @@ func TestApprovedJourneyDirectDeadlineStopsForwarding(t *testing.T) {
 		}
 	}
 	require.EqualValues(t, 1, calls.Load())
-	require.Equal(t, []string{"uncertain"}, budget.outcomes)
+	assertSyntheticJourneyOutcomes(t, budget, []string{"uncertain"})
 }
 
 func TestApprovedJourneyDirectQuoteRequiresTheCurrentIdentifiedModel(t *testing.T) {
@@ -128,7 +142,7 @@ func TestApprovedJourneyRequiresProtocolCompletionAndStopsAcrossCases(t *testing
 				}
 			}
 			require.EqualValues(t, 1, upstream.Load())
-			require.Equal(t, []string{test.expected}, budget.outcomes)
+			assertSyntheticJourneyOutcomes(t, budget, []string{test.expected})
 		})
 	}
 }
@@ -156,5 +170,5 @@ func TestApprovedJourneyTransportUncertaintyStopsWithoutRetry(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, budget.calls)
-	require.Equal(t, []string{"uncertain"}, budget.outcomes)
+	assertSyntheticJourneyOutcomes(t, budget, []string{"uncertain"})
 }
