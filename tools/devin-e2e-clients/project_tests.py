@@ -1,6 +1,8 @@
 """Per-call project-test evidence. Raw commands, output and IDs stay in memory."""
 import hashlib
 import json
+import os
+from pathlib import Path
 import re
 import shlex
 import time
@@ -75,6 +77,29 @@ def command_class(command, expected):
     return 'configured_project_tests' if words == shlex.split(expected, posix=True) else 'other_literal'
 
 
+def command_category(command, expected, workspace):
+    """Finite diagnostics only; never authorize, rewrite or retain an argument.
+
+    A path alias is a spelling candidate, not verified execution equivalence.
+    Unknown programs, options and paths remain in the existing broad classes.
+    """
+    classification = command_class(command, expected)
+    if classification == 'configured_project_tests':
+        return 'exact_test_command' if command == expected else 'test_argv_variant'
+    if classification != 'other_literal':
+        return classification
+    words = shlex.split(command, posix=True)
+    if words and words[0] in {'pwd', '/bin/pwd', '/usr/bin/pwd'}:
+        return 'pwd'
+    if words and words[0] in {'ls', '/bin/ls', '/usr/bin/ls'}:
+        return 'ls'
+    if (shlex.split(expected, posix=True) == ['python3', 'run_tests.py'] and len(words) == 2
+            and words[0] in {'python3', '/bin/python3', '/usr/bin/python3'}
+            and words[1] in {'run_tests.py', './run_tests.py', os.fspath(Path(workspace) / 'run_tests.py')}):
+        return 'test_path_alias'
+    return classification
+
+
 def output_text(event):
     if event.get('type') == 'tool_use':
         value = event.get('part', {}).get('state', {}).get('output')
@@ -119,11 +144,13 @@ class TestReceipts:
             return
         call_hash = tool['call_sha256']
         record = self.calls.setdefault(call_hash, {'call_sha256': call_hash, 'command_class': tool.get('command_class', 'unidentified'),
+            'command_category': tool.get('command_category', 'unidentified'),
             'command_sha256': tool.get('command_sha256'), 'state': tool['status'], 'exit_code': None,
             'exit_source': 'unverified', 'receipt_status': 'not_terminal', 'execution_verified': False, 'passed': None})
         record['state'] = tool['status']
         record['tool_error_kind'] = tool.get('error_kind')
         record['command_class'] = tool.get('command_class', 'unidentified')
+        record['command_category'] = tool.get('command_category', 'unidentified')
         record['command_sha256'] = tool.get('command_sha256')
         if tool['status'] not in {'completed', 'error'}:
             return

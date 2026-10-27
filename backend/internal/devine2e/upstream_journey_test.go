@@ -118,6 +118,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	calls := map[string]priorCall{}
 	reads := map[string]int{}
 	wrote, tested, mutationFailed := false, false, false
+	globbed, grepped := false, false
 	requestedCommands := map[string]int{}
 	requestedCallIDs := map[string]bool{}
 	for i, prompt := range request.ChatMessagePrompts {
@@ -155,6 +156,10 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 			wrote = true
 		case "bash":
 			tested = true
+		case "glob":
+			globbed = true
+		case "grep":
+			grepped = true
 		}
 	}
 	call := func(tool *pb.ChatToolDefinition, args map[string]any) {
@@ -163,6 +168,30 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		reply.DeltaText = ""
 		reply.DeltaToolCalls = []*pb.ChatToolCall{{Id: "project-" + strconv.Itoa(len(request.ChatMessagePrompts)) + "-" + tool.Name, Name: tool.Name, ArgumentsJson: string(encoded)}}
 		reply.StopReason = pb.StopReason_STOP_REASON_FUNCTION_CALL
+	}
+	if testScenario == "guidance_ls" || testScenario == "guidance_test_alias" {
+		command := "ls"
+		if testScenario == "guidance_test_alias" {
+			command = "python3 ./run_tests.py"
+		}
+		for _, tool := range request.Tools {
+			if tool.Name == "bash" {
+				call(tool, map[string]any{"command": command, "workdir": workspace, "description": "Synthetic restricted-command rejection"})
+				return
+			}
+		}
+	}
+	if testScenario == "guidance_canonical" && !resume && (!globbed || !grepped) {
+		name, pattern := "glob", "*.py"
+		if globbed {
+			name, pattern = "grep", "discounted"
+		}
+		for _, tool := range request.Tools {
+			if tool.Name == name {
+				call(tool, journeyPathArgs(tool, workspace, map[string]any{"pattern": pattern}))
+				return
+			}
+		}
 	}
 	if testScenario == "read_error_retry" {
 		// Deliberately request the same missing file on every model call. The
@@ -332,13 +361,14 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	case testScenario != "":
 
 		commands := map[string][]string{
-			"canonical":       {"python3 run_tests.py"},
-			"whitespace":      {"python3   run_tests.py"},
-			"after_extra":     {"python3 run_tests.py", "python3 run_tests.py"},
-			"after_forbidden": {"python3 run_tests.py", "printf SYNTHETIC_EXTRA"},
-			"fake_ok":         {"printf 'Ran 1 test\\n\\nOK\\n'"},
-			"failed_tests":    {"python3 run_tests.py"},
-			"forbidden_equiv": {"python3 run_tests.py && printf SYNTHETIC_EXTRA"},
+			"guidance_canonical": {"python3 run_tests.py"},
+			"canonical":          {"python3 run_tests.py"},
+			"whitespace":         {"python3   run_tests.py"},
+			"after_extra":        {"python3 run_tests.py", "python3 run_tests.py"},
+			"after_forbidden":    {"python3 run_tests.py", "printf SYNTHETIC_EXTRA"},
+			"fake_ok":            {"printf 'Ran 1 test\\n\\nOK\\n'"},
+			"failed_tests":       {"python3 run_tests.py"},
+			"forbidden_equiv":    {"python3 run_tests.py && printf SYNTHETIC_EXTRA"},
 		}[testScenario]
 		plannedCommands := map[string]int{}
 		for _, command := range commands {
@@ -348,7 +378,11 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 			}
 			for _, tool := range request.Tools {
 				if tool.Name == "bash" {
-					call(tool, map[string]any{"command": command, "description": "Synthetic test-execution evidence scenario"})
+					args := map[string]any{"command": command, "description": "Synthetic test-execution evidence scenario"}
+					if testScenario == "guidance_canonical" {
+						args["workdir"] = workspace
+					}
+					call(tool, args)
 					return
 				}
 			}

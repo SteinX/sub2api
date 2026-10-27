@@ -159,6 +159,11 @@ jobs:
         run: |
           npm ci --prefix tools/devin-e2e-clients --ignore-scripts --omit=optional --no-audit --no-fund
           pnpm --dir frontend install --frozen-lockfile
+      - name: Install the public search executable before client isolation
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
+          rg --version
       - name: Validate acceptance negative cases and runner boundaries
         # Docker is already required for the isolated PostgreSQL/Redis fixture.
         # This adds no privileged mode, host networking or daemon permission.

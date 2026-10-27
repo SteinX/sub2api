@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from project_evidence import ToolEvidence
+from project_evidence import ToolEvidence, tool_error_categories
 
 
 def event(name, status='completed', inputs=None, call_id='call-1'):
@@ -63,6 +63,32 @@ class ProjectToolEvidenceTests(unittest.TestCase):
         self.assertEqual({'error': 1}, report['tool_states']['custom_tool'])
         self.assertEqual(0, report['tools']['custom_tool'])
         self.assertTrue(self.tracker.failed)
+
+    def test_command_categories_retain_no_raw_command_or_path(self):
+        for index, (command, category) in enumerate([
+            ('pwd', 'pwd'), ('ls /private/synthetic-secret', 'ls'),
+            ('python3 ./run_tests.py', 'test_path_alias'),
+            ('rm /private/synthetic-secret', 'other_literal'),
+        ]):
+            self.tracker.observe(event('bash', 'error', call_id=f'category-{index}', inputs={'command': command}))
+            call = self.tracker.report()['tool_calls'][-1]
+            self.assertEqual(category, call['command_category'])
+            self.assertFalse(call['test_command'])
+        encoded = json.dumps(self.tracker.report())
+        for raw in ['synthetic-secret', '/private/', 'python3 ./run_tests.py', 'category-0']:
+            self.assertNotIn(raw, encoded)
+
+    def test_tool_error_categories_keep_only_finite_markers(self):
+        detail = 'Ripgrep.Error: ripgrep execution failed: ENOENT /private/synthetic-secret'
+        value = event('glob', 'error', inputs={'pattern': '*.py'})
+        value['part']['state']['error'] = detail
+        self.tracker.observe(value)
+        record = self.tracker.report()['tool_calls'][0]
+        self.assertEqual('client_tool_error', record['error_kind'])
+        self.assertEqual(['ripgrep_error', 'missing_path'], record['tool_error_categories'])
+        self.assertNotIn('synthetic-secret', json.dumps(self.tracker.report()))
+        self.assertEqual(['unclassified'], tool_error_categories('opaque synthetic-secret'))
+        self.assertEqual(['unavailable'], tool_error_categories(None))
 
     def test_changed_or_missing_tool_identity_is_rejected(self):
         self.tracker.observe(event('edit', 'running'))

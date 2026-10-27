@@ -81,6 +81,10 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		require.NoError(t, err)
 		require.Zero(t, cost)
 	})
+	verifyRestrictedProjectGuidance(t, app, fixture, key, userPassword, keyID)
+	if os.Getenv("DEVIN_JOURNEY_GUIDANCE_ONLY") == "true" {
+		return // Focused synthetic CLI regression; never an authorized live path.
+	}
 	profile := fusion.DefaultProfile("fusion-project-journey", fixtureModel, fixtureSidekick)
 	if !t.Run("slow_catalog_timeout_and_manual_refresh", func(t *testing.T) {
 		verifyJourneyCatalogRecovery(t, app, fixture, key, userPassword)

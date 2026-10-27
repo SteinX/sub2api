@@ -7,7 +7,7 @@ import time
 import unittest
 
 from project_evidence import ToolEvidence
-from project_tests import PREFIX, PROTECTED, TEST_RUNNER, TestReceipts, command_class, digest
+from project_tests import PREFIX, PROTECTED, TEST_RUNNER, TestReceipts, command_category, command_class, digest
 
 
 class ProjectTestReceiptTests(unittest.TestCase):
@@ -47,6 +47,28 @@ class ProjectTestReceiptTests(unittest.TestCase):
         for command in ['python3 run_tests.py\necho OK', 'python3 run_tests.py && printf OK', 'python3 run_tests.py > out/fake',
                         'python3 $TEST', 'python3 `echo run_tests.py`', 'bash run_tests.py', 'python3 other.py']:
             self.assertNotEqual('configured_project_tests', command_class(command, 'python3 run_tests.py'))
+
+    def test_finite_command_categories_do_not_authorize_or_retain_values(self):
+        cases = {
+            'python3 run_tests.py': 'exact_test_command',
+            'python3   run_tests.py': 'test_argv_variant',
+            "python3 'run_tests.py'": 'test_argv_variant',
+            'python3 ./run_tests.py': 'test_path_alias',
+            '/usr/bin/python3 run_tests.py': 'test_path_alias',
+            f'python3 {self.root}/run_tests.py': 'test_path_alias',
+            'pwd': 'pwd', '/bin/pwd -P': 'pwd',
+            'ls /private/synthetic-secret': 'ls',
+            'rm /private/synthetic-secret': 'other_literal',
+            'python3 other.py': 'other_literal',
+            'python3 -u run_tests.py': 'other_literal',
+            'ls /private/synthetic-secret && pwd': 'other_shell',
+        }
+        for command, expected in cases.items():
+            with self.subTest(category=expected):
+                self.assertEqual(expected, command_category(command, 'python3 run_tests.py', self.root))
+                if expected not in {'exact_test_command', 'test_argv_variant'}:
+                    self.assertNotEqual('configured_project_tests', command_class(command, 'python3 run_tests.py'))
+        self.assertEqual('other_literal', command_category('python3 /elsewhere/run_tests.py', 'python3 run_tests.py', self.root))
 
     def test_real_runner_receipt_and_allowed_whitespace_do_not_need_english_markers(self):
         result = self.run_tests()
