@@ -217,8 +217,8 @@ class ProtectedSnapshotTests(unittest.TestCase):
                  patch.dict(os.environ,{'DEVIN_JOURNEY_GATEWAY_KEY':'synthetic'}):
                 result = journey.invoke(SimpleNamespace(client='opencode',model='synthetic',ui_url='http://127.0.0.1'),directory)
             self.assertEqual(original_test,(workspace/'test_project.py').read_bytes())
-            self.assertFalse(result['normal_stop'],'invalid test proof stops consumption before a later false normal terminal')
-            self.assertFalse(result['passed'])
+            self.assertTrue(result['normal_stop'],'receipt diagnostics do not override an actual normal client terminal')
+            self.assertTrue(result['passed'],'invoke completion alone never certifies overall project correctness')
             self.assertFalse(result['client_tests_succeeded'],'the client cannot establish the expected protected-file baseline')
             self.assertEqual('wrong_project_or_tests',result['test_execution']['calls'][0]['receipt_status'])
 

@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestJourneyToolLimitLongWitnessRequiresEightDistinctCompletedReadsInOneSuccessfulRequest(t *testing.T) {
+func TestJourneyToolLimitLongWitnessRequiresEightDistinctFilesFromCompletedToolsInOneSuccessfulRequest(t *testing.T) {
 	directory := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(directory, "workspace/context"), 0700))
 	hashes := map[string]any{}
@@ -38,6 +38,22 @@ func TestJourneyToolLimitLongWitnessRequiresEightDistinctCompletedReadsInOneSucc
 		return agentRequest{Forwarded: true, Status: 200, items: values, response: &journeyResponseBody{eof: true, data: []byte(`{"choices":[{"finish_reason":"stop"}]}`)}}
 	}
 	require.Equal(t, true, longPublicContext(directory, []agentRequest{healthy(items)}, report)["complete"])
+	t.Run("one_bash_output_with_all_files", func(t *testing.T) {
+		encoded, _ := json.Marshal(report)
+		var proof map[string]any
+		require.NoError(t, json.Unmarshal(encoded, &proof))
+		var text strings.Builder
+		for _, item := range items {
+			text.WriteString(item.Output + "\n")
+		}
+		task := proof["task"].(map[string]any)
+		task["tool_calls"] = []any{map[string]any{"name": "bash", "status": "completed", "call_sha256": callHash("actual-bash")}}
+		for _, value := range task["long_reads"].(map[string]any)["parts"].([]any) {
+			value.(map[string]any)["call_sha256"] = callHash("actual-bash")
+		}
+		request := healthy([]apicompat.ResponsesInputItem{{Type: "function_call_output", CallID: "actual-bash", Output: text.String()}})
+		require.Equal(t, true, longPublicContext(directory, []agentRequest{request}, proof)["complete"])
+	})
 	for _, kind := range []string{"split", "truncated", "unknown_id", "not_forwarded", "status", "source_eof", "incomplete_read", "duplicate_part"} {
 		t.Run(kind, func(t *testing.T) {
 			copied := append([]apicompat.ResponsesInputItem(nil), items...)

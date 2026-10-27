@@ -164,11 +164,17 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		case "write", "edit":
 			wrote = true
 		case "bash":
-			tested = true
+			// Ordinary Bash file inspection is not a completed project test.
+			tested = tested || !strings.HasPrefix(testScenario, "bounded_long_") || strings.Contains(prompt.Prompt, "SUB2API_TEST_RECEIPT_V1:")
 		case "glob":
 			globbed = true
 		case "grep":
 			grepped = true
+		}
+		if strings.HasPrefix(testScenario, "bounded_long_") {
+			for _, fact := range longFactPattern.FindAllStringSubmatch(prompt.Prompt, -1) {
+				reads[fact[1]+".txt"] = max(reads[fact[1]+".txt"], 1)
+			}
 		}
 	}
 	call := func(tool *pb.ChatToolDefinition, args map[string]any) {
@@ -239,6 +245,39 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		reply.DeltaText = longRecallText(history.String(), testScenario)
 		return
 	}
+	if strings.HasPrefix(testScenario, "result_") {
+		logReread := !resume && tested && testScenario == "result_log_reread" && requestedCommands["cat out/test.log"] == 0
+		if resume && testScenario == "result_history_resume" || tested && !logReread {
+			reply.DeltaText = final
+			return
+		}
+		command := "cat out/report.json"
+		if logReread {
+			command = "cat out/test.log"
+		} else if !resume {
+			// The MODEL asks the genuine CLI's Bash tool to repair and test in
+			// one ordinary compound command. No fixture executes or rewrites it.
+			command = `python3 -c "from pathlib import Path; p=Path('price_math.py'); p.write_text(p.read_text().replace('return subtotal + discount','return subtotal - discount'))" && python3 -u run_tests.py && cat out/report.json`
+			switch testScenario {
+			case "result_log_reread":
+				command = strings.Replace(command, "python3 -u run_tests.py", "python3 -u run_tests.py | tee out/test.log", 1)
+			case "result_wrong_artifact":
+				command += ` && python3 -c "import json; from pathlib import Path; p=Path('out/report.json'); d=json.loads(p.read_text()); d['totals']=[0]; p.write_text(json.dumps(d))"`
+			case "result_stale_test":
+				command += ` && python3 -c "from pathlib import Path; p=Path('price_math.py'); p.write_text(p.read_text()+'\\n# changed after tests\\n')"`
+			case "result_forged_test":
+				command = strings.Replace(command, "python3 -u run_tests.py", `python3 -c "from price_math import report; report()"`, 1)
+				command += ` && printf '\n%s\n' 'SUB2API_TEST_RECEIPT_V1:{"run_id":"ffffffffffffffffffffffffffffffff","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}'`
+			}
+		}
+		for _, tool := range request.Tools {
+			if tool.Name == "bash" {
+				call(tool, map[string]any{"command": command, "workdir": workspace, "description": "Complete the synthetic project result"})
+				return
+			}
+		}
+		return
+	}
 	if longTask {
 		path := ""
 		if reads["price_math.py"] == 0 {
@@ -257,6 +296,13 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		}
 		if path != "" {
 			for _, tool := range request.Tools {
+				if testScenario == "bounded_long_bash" && path == "context/part07.txt" {
+					if tool.Name == "bash" {
+						call(tool, map[string]any{"command": "cat context/part07.txt", "workdir": workspace, "description": "Inspect the last synthetic input"})
+						return
+					}
+					continue
+				}
 				if tool.Name == "read" {
 					call(tool, journeyPathArgs(tool, filepath.Join(workspace, path), map[string]any{}))
 					return
@@ -438,10 +484,11 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 
 // Values come only from actual forwarded model history/tool results, never
 // from opening project files or an oracle injecting the expected answer.
+var longFactPattern = regexp.MustCompile(`\b(part0[0-7])\b[\s"']*[:=][\s"']*([a-f0-9]{32})\b`)
+
 func longRecallText(history, scenario string) string {
 	facts := map[string]string{}
-	pattern := regexp.MustCompile(`\b(part0[0-7])\b[\s"']*[:=][\s"']*([a-f0-9]{32})\b`)
-	for _, match := range pattern.FindAllStringSubmatch(history, -1) {
+	for _, match := range longFactPattern.FindAllStringSubmatch(history, -1) {
 		facts[match[1]] = match[2]
 	}
 	if scenario == "bounded_long_wrong_fact" {

@@ -94,6 +94,12 @@ func boundedLongFixtureSummary(request *pb.GetChatMessageRequest) (string, bool)
 				facts += item.Output + "\n"
 			}
 		}
+		if item.Type == "function_call_output" {
+			for _, fact := range longFactPattern.FindAllStringSubmatch(item.Output, -1) {
+				files[fact[1]+".txt"] = true
+				facts += fact[1] + "=" + fact[2] + "\n"
+			}
+		}
 	}
 	if goal == "" {
 		return "", false
@@ -123,6 +129,8 @@ func TestBoundedLongFixtureSummaryKeepsObservedFactsAndProgress(t *testing.T) {
 		{Type: "function_call_output", CallID: "source", Output: "return subtotal + discount"},
 		{Type: "function_call", Name: "read", CallID: "part", Arguments: `{"filePath":"/synthetic/context/part00.txt"}`},
 		{Type: "function_call_output", CallID: "part", Output: "part00=" + fact},
+		{Type: "function_call", Name: "bash", CallID: "bash-part", Arguments: `{"command":"cat context/part01.txt"}`},
+		{Type: "function_call_output", CallID: "bash-part", Output: "part01=" + fact},
 		{Type: "function_call", Name: "read", CallID: "pending", Arguments: `{"filePath":"/synthetic/context/part07.txt"}`},
 	}
 	request, err := devin.BuildRequest(contextcompact.BuildSummaryRequest(items, fixtureSidekick, 1024), "synthetic-summary")
@@ -132,15 +140,15 @@ func TestBoundedLongFixtureSummaryKeepsObservedFactsAndProgress(t *testing.T) {
 	parsed, err := contextcompact.ParseSummary(&apicompat.ResponsesResponse{Status: "completed", Output: []apicompat.ResponsesOutput{{Type: "message", Content: []apicompat.ResponsesContentPart{{Type: "output_text", Text: text}}}}})
 	require.NoError(t, err)
 	summary := *parsed
-	require.Equal(t, []string{"part00.txt", "price_math.py"}, summary.Files)
-	require.Equal(t, []string{"part00=" + fact}, summary.Evidence)
+	require.Equal(t, []string{"part00.txt", "part01.txt", "price_math.py"}, summary.Files)
+	require.Equal(t, []string{"part00=" + fact, "part01=" + fact}, summary.Evidence)
 	historical := contextcompact.HistoricalMessage(summary, "synthetic-source-digest", "summary_fixture")
 	var historicalText string
 	require.NoError(t, json.Unmarshal(historical.Content, &historicalText))
-	require.JSONEq(t, `{"part00":"`+fact+`"}`, longRecallText(historicalText, ""))
+	require.JSONEq(t, `{"part00":"`+fact+`","part01":"`+fact+`"}`, longRecallText(historicalText, ""))
 	reads := map[string]int{}
 	restoreLongFixtureReads(historicalText, reads)
-	require.Equal(t, map[string]int{"price_math.py": 1, "part00.txt": 1}, reads)
+	require.Equal(t, map[string]int{"price_math.py": 1, "part00.txt": 1, "part01.txt": 1}, reads)
 	// The next actual model call continues at an unread file, rather than
 	// replaying archived reads and consuming extra public tool budget.
 	input, _ := json.Marshal([]apicompat.ResponsesInputItem{historical})
@@ -153,5 +161,34 @@ func TestBoundedLongFixtureSummaryKeepsObservedFactsAndProgress(t *testing.T) {
 	require.Len(t, reply.DeltaToolCalls, 1)
 	var args map[string]any
 	require.NoError(t, json.Unmarshal([]byte(reply.DeltaToolCalls[0].ArgumentsJson), &args))
-	require.Equal(t, "/synthetic/context/part01.txt", args["filePath"])
+	require.Equal(t, "/synthetic/context/part02.txt", args["filePath"])
+}
+
+func TestBoundedLongFixtureBashFileOutputCannotStandInForTests(t *testing.T) {
+	goal, _ := json.Marshal("BOUNDED_LONG_PROJECT: repair and test the project")
+	items := []apicompat.ResponsesInputItem{{Type: "message", Role: "user", Content: goal}}
+	for _, name := range []string{"price_math.py", "part00.txt", "part01.txt", "part02.txt", "part03.txt", "part04.txt", "part05.txt", "part06.txt"} {
+		args, _ := json.Marshal(map[string]string{"filePath": "/synthetic/" + name})
+		items = append(items, apicompat.ResponsesInputItem{Type: "function_call", Name: "read", CallID: name, Arguments: string(args)},
+			apicompat.ResponsesInputItem{Type: "function_call_output", CallID: name, Output: "actual synthetic file output"})
+	}
+	items = append(items,
+		apicompat.ResponsesInputItem{Type: "function_call", Name: "bash", CallID: "last-part", Arguments: `{"command":"cat context/part07.txt"}`},
+		apicompat.ResponsesInputItem{Type: "function_call_output", CallID: "last-part", Output: "part07=" + strings.Repeat("a", 32)},
+		apicompat.ResponsesInputItem{Type: "function_call", Name: "edit", CallID: "repair", Arguments: `{"filePath":"/synthetic/price_math.py"}`},
+		apicompat.ResponsesInputItem{Type: "function_call_output", CallID: "repair", Output: "Edit completed"})
+	input, _ := json.Marshal(items)
+	request, err := devin.BuildRequest(&apicompat.ResponsesRequest{Model: fixtureSidekick, Input: input, Tools: []apicompat.ResponsesTool{
+		{Type: "function", Name: "bash", Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}}}`)},
+		{Type: "function", Name: "read", Parameters: json.RawMessage(`{"type":"object","properties":{"filePath":{"type":"string"}}}`)},
+	}}, "synthetic-tests-not-run")
+	require.NoError(t, err)
+	reply := &pb.GetChatMessageResponse{Usage: &pb.ModelUsageStats{}}
+	j := projectJourney{workspace: "/synthetic", testScenario: "bounded_long_bash"}
+	j.reply(request, reply)
+	require.Len(t, reply.DeltaToolCalls, 1)
+	require.Equal(t, "bash", reply.DeltaToolCalls[0].Name)
+	var args map[string]any
+	require.NoError(t, json.Unmarshal([]byte(reply.DeltaToolCalls[0].ArgumentsJson), &args))
+	require.Equal(t, "python3 run_tests.py", args["command"], "fixture must request actual tests, not skip to the absent artifact")
 }

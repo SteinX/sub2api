@@ -50,6 +50,18 @@ class BoundedLongTests(unittest.TestCase):
             self.assertFalse(long.recall(text,facts)['passed'])
         self.assertNotIn(facts['part01'],json.dumps(long.recall(json.dumps(facts),facts)))
 
+    def test_one_bash_output_can_witness_all_files_without_read_calls_or_arguments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);data,_,read=self.create(root);proof=long.ReadEvidence(root,read)
+            text='\n'.join(read(path).decode() for path in data['parts'])
+            proof.observe({'type':'tool_use','part':{'state':{'output':text}}},
+                          {'name':'bash','status':'completed','call_sha256':'a'*64})
+            report=proof.report()
+            self.assertTrue(report['complete'])
+            self.assertEqual(131072,report['complete_payload_bytes'])
+            self.assertEqual({'a'*64},{part['call_sha256'] for part in report['parts']})
+            self.assertNotIn(text,json.dumps(report))
+
     def test_early_correct_facts_cannot_supply_a_later_error_terminal(self):
         facts={f'part{i:02d}':str(i)*32 for i in range(8)}
         completion=CompletionEvidence()

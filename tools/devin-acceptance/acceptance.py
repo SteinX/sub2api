@@ -22,7 +22,7 @@ CONDITIONAL_CHECKS = {'cla-check', 'cla-lock', 'live', 'sync'}
 REQUIRED_CHECKS = {
     ('backend-ci.yml', name) for name in ['shell', 'test', 'frontend', 'golangci-lint', 'release-helpers']
 } | {('security-scan.yml', name) for name in ['backend-security', 'frontend-security']} | {
-    ('devin-e2e.yml', name) for name in ['mock', 'clients-mock', 'user-journeys-mock']
+    ('devin-e2e.yml', name) for name in ['mock', 'clients-mock', 'user-journeys-contracts', 'user-journeys-matrix', 'user-journeys-mock']
 }
 CLIENT_PINS = {'opencode': ('opencode-ai', '1.19.4'), 'omo': ('oh-my-opencode', '5.1.44'),
                'omp': ('@oh-my-pi/pi-coding-agent', '18.12.6')}
@@ -83,53 +83,13 @@ def valid_tool_evidence(result):
             if call['name'] not in FILE_MUTATORS:
                 return False
             mutations[call['name']] += 1
+    mutation_stats = result.get('source_mutation_tools')
     return (all(completed[name] == count for name, count in tools.items())
-            and dict(mutations) == result.get('source_mutation_tools')
+            and isinstance(mutation_stats, dict)
+            and all(name in FILE_MUTATORS and type(count) is int and count > 0 for name, count in mutation_stats.items())
+            and dict(mutations) == mutation_stats
             and all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
                     and events[name].get('completed', 0) >= tools[name] for name, counts in states.items()))
-
-
-def valid_client_test_receipt(case):
-    task = case.get('task', {})
-    if not valid_tool_evidence(task):
-        return False
-    execution = task.get('test_execution', {})
-    if not isinstance(execution, dict):
-        return False
-    calls = execution.get('calls')
-    if (execution.get('schema') != 'devin_project_test_v1' or execution.get('passed') is not True
-            or execution.get('conflicting_evidence') is not False or not isinstance(calls, list) or not calls
-            or any(not isinstance(call, dict) or not HEX64.fullmatch(str(call.get('call_sha256', ''))) for call in calls)
-            or execution.get('source_after_task_sha256') != case.get('source_after_task_sha256')):
-        return False
-    actual = {call['call_sha256']: call for call in task.get('tool_calls', []) if call.get('name') == 'bash'}
-    if len(calls) != len(actual) or len({call.get('call_sha256') for call in calls}) != len(calls):
-        return False
-    for call in calls:
-        tool = actual.get(call.get('call_sha256'), {})
-        if (call.get('state') != tool.get('status') or call.get('command_class') != tool.get('command_class')
-                or call.get('command_sha256') != tool.get('command_sha256') or not HEX64.fullmatch(str(call.get('command_sha256', '')))
-                or type(call.get('completion_sequence')) is not int or call['completion_sequence'] <= 0):
-            return False
-    candidates = [call for call in calls if call.get('command_class') == 'configured_project_tests']
-    selected = max(candidates, key=lambda call: call['completion_sequence'], default={})
-    protected = case.get('protected_project_sha256', {})
-    if (execution.get('selected_call_sha256') != selected.get('call_sha256') or selected.get('execution_verified') is not True
-            or selected.get('receipt_status') != 'verified' or selected.get('passed') is not True or type(selected.get('exit_code')) is not int or selected['exit_code'] != 0
-            or selected.get('state') != 'completed' or selected.get('exit_source') not in {'client_metadata', 'omp_success_and_runner_receipt'}
-            or not all(HEX64.fullmatch(str(selected.get(key, ''))) for key in ['receipt_sha256', 'run_sha256'])
-            or selected.get('output_reference_sha256') != selected.get('receipt_sha256')
-            or selected.get('project_nonce_sha256') != case.get('project_nonce_sha256')
-            or selected.get('source_before_sha256') != case.get('source_after_task_sha256')
-            or selected.get('source_after_sha256') != case.get('source_after_task_sha256')
-            or not isinstance(protected, dict) or set(protected) != ({'requirements.json', 'test_project.py', 'run_tests.py'} |
-                ({f'context/part{index:02d}.txt' for index in range(8)} if case.get('project_kind')=='long' else set()))
-            or any(not HEX64.fullmatch(str(value)) for value in protected.values()) or selected.get('protected_sha256') != protected
-            or type(selected.get('tests_run')) is not int or selected['tests_run'] <= 0
-            or any(type(selected.get(key)) is not int or selected[key] != 0 for key in ['failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'])):
-        return False
-    stamps = [task.get('client_started_ns'), selected.get('started_ns'), selected.get('finished_ns'), task.get('client_finished_ns')]
-    return all(type(value) is int and value > 0 for value in stamps) and stamps == sorted(stamps)
 
 
 def valid_fusion_audit(case):
@@ -238,6 +198,9 @@ def validate(report, mode, commit, tree, state=None):
                 errors.append(ident + ':' + key)
         if case.get('independent_project_test_executed') is not True:
             errors.append(ident + ':independent_oracle_not_executed')
+        if (case.get('independent_project_tests_executed') is not True or case.get('independent_project_tests_passed') is not True
+                or type(case.get('independent_project_tests_exit_code')) is not int or case['independent_project_tests_exit_code'] != 0):
+            errors.append(ident + ':independent_project_tests_unverified')
         nonce = case.get('project_nonce_sha256')
         if not HEX64.fullmatch(str(nonce or '')):
             errors.append(ident + ':project_nonce_unverified')
@@ -272,7 +235,7 @@ def validate(report, mode, commit, tree, state=None):
                 errors.append(ident + ':fusion_roles_unverified')
         for phase in ['task', 'resume']:
             result = case.get(phase) or {}
-            if (result.get('completion_contract') != 'project_artifacts_v2' or result.get('terminal_event_seen') is not True
+            if (result.get('completion_contract') != 'project_results_v3' or result.get('terminal_event_seen') is not True
                     or result.get('reader_completed') is not True or result.get('reader_error') is not False
                     or type(result.get('final_text_bytes')) is not int or result['final_text_bytes'] <= 0
                     or not HEX64.fullmatch(str(result.get('final_text_sha256', '')))
@@ -289,21 +252,10 @@ def validate(report, mode, commit, tree, state=None):
                 errors.append(ident + ':' + phase + '_terminal_failure')
         if case.get('task', {}).get('client_session_sha256') != (case.get('resume') or {}).get('client_session_sha256'):
             errors.append(ident + ':session_identity_mismatch')
-        tools = case.get('task', {}).get('tools', {})
-        mutations = case.get('task', {}).get('source_mutation_tools', {})
-        allowed_mutators = {'write'} if client == 'omp' else FILE_MUTATORS
         before, after = case.get('source_before_task_sha256'), case.get('source_after_task_sha256')
         if (not HEX64.fullmatch(str(before or '')) or not HEX64.fullmatch(str(after or '')) or before == after
-                or case.get('source_changed_by_task') is not True or not isinstance(mutations, dict) or not mutations
-                or any(name not in allowed_mutators or type(count) is not int or count <= 0
-                       or count > tools.get(name, 0) for name, count in mutations.items())):
+                or case.get('source_changed_by_task') is not True):
             errors.append(ident + ':source_mutation_unverified')
-        if (tools.get('read', 0) < 3 or tools.get('bash', 0) < 1
-                or case.get('task', {}).get('client_tests_succeeded') is not True or case.get('task', {}).get('test_command_verified') is not True
-                or case.get('task', {}).get('bash_exit_code') != 0 or case.get('resume', {}).get('tools', {}).get('read', 0) < 1):
-            errors.append(ident + ':actual_client_tools_missing')
-        if not valid_client_test_receipt(case):
-            errors.append(ident + ':client_test_receipt_unverified')
         if case.get('capabilities_required') is True:
             extended = case.get('capability_evidence', {})
             if extended.get('status') != 'passed' or any(extended.get(name) != 'passed' for name in ['context_pressure', 'compact', 'fork', 'idle_process_recovery']):

@@ -243,7 +243,12 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 						report["fusion_execution"] = snapshotFusionAudit(budget.db, keyID, records, true)
 					}
 					if configProfile == "long" && mode == "live" {
-						report["public_context_witness"] = longPublicContext(directory, records, report)
+						witness := longPublicContext(directory, records, report)
+						report["public_context_witness"] = witness
+						report["context_pressure"] = "not_observed"
+						if witness["complete"] == true {
+							report["context_pressure"] = "passed"
+						}
 					}
 					savePrivateAgentUsage(t, app, keyID, client, kind)
 					require.NoError(t, parseErr, "retain private structural evidence; never repeat an unknown send")
@@ -261,9 +266,6 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 						return
 					}
 					require.Equal(t, "passed", report["status"])
-					if configProfile == "long" {
-						require.Equal(t, true, report["public_context_witness"].(map[string]any)["complete"])
-					}
 					if kind == "direct" {
 						require.Eventually(t, func() bool {
 							var current int

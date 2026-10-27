@@ -1,4 +1,8 @@
-"""Per-call project-test evidence. Raw commands, output and IDs stay in memory."""
+"""Untrusted client receipt diagnostics; independent tests decide correctness.
+
+File/output consistency does not prove that a client ran the tests. Raw
+commands, output and IDs stay in memory; no diagnostic authorizes success.
+"""
 import hashlib
 import json
 import os
@@ -165,13 +169,18 @@ class TestReceipts:
         record['_terminal'] = terminal_hash
         self.sequence += 1
         record['completion_sequence'] = self.sequence
+        record['client_exit_code'] = code
         record['exit_code'], record['exit_source'] = code, exit_source
-        candidate = record['command_class'] == 'configured_project_tests' or record['command_category'] == 'test_path_alias'
+        lines = [line[len(PREFIX):] for line in text.splitlines() if line.startswith(PREFIX)]
+        # A genuine runner receipt can come from an alias, wrapper or compound
+        # shell command. Spelling is diagnostic; the fresh protected receipt,
+        # actual tool exit and final source still decide whether tests passed.
+        candidate = (bool(lines) or record['command_class'] == 'configured_project_tests'
+                     or record['command_category'] == 'test_path_alias')
         record['test_runner_candidate'] = candidate
         record['receipt_status'] = 'missing' if candidate else 'not_test_command'
         if not candidate:
             return
-        lines = [line[len(PREFIX):] for line in text.splitlines() if line.startswith(PREFIX)]
         if len(lines) != 1:
             record['receipt_status'] = 'missing' if not lines else 'ambiguous'
             return
@@ -197,6 +206,11 @@ class TestReceipts:
             if not isinstance(proof, dict) or proof.get('run_id') != run_id:
                 record['receipt_status'] = 'run_identity_mismatch'
                 return
+            prior = self.calls.get(self.run_ids.get(run_id), {})
+            if prior.get('receipt_sha256') == digest(raw):
+                record.update(receipt_status='repeated_display', test_runner_candidate=False,
+                              repeated_receipt_sha256=digest(raw))
+                return  # A log reread is not another test or a conflict.
             status = self.validate(proof, code, blocked)
             record['receipt_status'] = status
             if status != 'verified':
@@ -248,11 +262,8 @@ class TestReceipts:
         if not tool or tool['name'] != 'bash' or tool['status'] != 'completed':
             return None
         record=self.calls.get(tool['call_sha256'],{})
-        if record.get('exit_code') is not None and record['exit_code'] != 0:
+        if record.get('client_exit_code') is not None and record['client_exit_code'] != 0:
             return 'test_failed'
-        if record.get('test_runner_candidate'):
-            if not record.get('execution_verified') or record.get('passed') is not True:
-                return 'transport_uncertain'
         return None
 
     def report(self):
@@ -264,7 +275,8 @@ class TestReceipts:
         except (OSError, ValueError):
             source = None
         passed = bool(selected and selected['execution_verified'] and selected['passed'] is True and selected.get('source_after_sha256') == source and not self.failed)
-        return {'test_execution': {'schema': SCHEMA, 'calls': calls, 'selected_call_sha256': selected['call_sha256'] if selected else None,
+        return {'test_execution': {'schema': SCHEMA, 'verification_scope':'client receipt consistency only; not proof of test execution',
+                'eligible_as_execution_proof':False, 'calls': calls, 'selected_call_sha256': selected['call_sha256'] if selected else None,
                 'source_after_task_sha256': source, 'passed': passed, 'conflicting_evidence': self.failed},
                 'client_tests_succeeded': passed, 'test_command_verified': bool(selected and selected['execution_verified']),
                 'bash_exit_code': selected['exit_code'] if selected and selected['execution_verified'] else None}

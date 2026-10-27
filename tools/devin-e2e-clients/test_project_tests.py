@@ -90,6 +90,21 @@ class ProjectTestReceiptTests(unittest.TestCase):
         self.assertEqual('test_path_alias', call['command_category'])
         self.assertTrue(call['execution_verified'])
 
+    def test_compound_command_needs_the_same_real_receipt_not_a_particular_spelling(self):
+        result=subprocess.run('python3 -u run_tests.py && printf done',shell=True,cwd=self.root,capture_output=True)
+        self.event(result,command='python3 -u run_tests.py && printf done')
+        report=self.receipts.report()
+        self.assertTrue(report['client_tests_succeeded'])
+        self.assertEqual('other_shell',report['test_execution']['calls'][0]['command_class'])
+        self.assertNotIn('printf done',json.dumps(report))
+
+    def test_fabricated_receipt_reference_does_not_replace_a_real_receipt(self):
+        output=PREFIX+json.dumps({'run_id':'f'*32,'sha256':'f'*64})
+        self.event(subprocess.CompletedProcess([],0,b'',b''),command='printf fake-receipt',output=output)
+        report=self.receipts.report()
+        self.assertFalse(report['client_tests_succeeded'])
+        self.assertEqual('file_unavailable',report['test_execution']['calls'][0]['receipt_status'])
+
     def test_each_actual_call_survives_later_command_and_duplicate_terminal(self):
         result = self.run_tests()
         event = self.event(result)
@@ -134,8 +149,8 @@ class ProjectTestReceiptTests(unittest.TestCase):
         self.assertEqual('exit_unverified', self.receipts.report()['test_execution']['calls'][1]['receipt_status'])
         self.assertFalse(self.receipts.report()['client_tests_succeeded'])
 
-    def test_failed_or_uncertain_test_must_stop_before_any_tool_ack(self):
-        for code,output,reason in [(1,'truncated before receipt','test_failed'),(0,'OK','transport_uncertain')]:
+    def test_actual_nonzero_exit_stops_but_untrusted_receipt_cannot_stop_a_successful_tool(self):
+        for code,output,reason in [(1,'truncated before receipt','test_failed'),(0,'OK',None)]:
             with self.subTest(code=code):
                 self.event(self.run_tests(),call_id='no-proof-'+str(code),output=output,code=code)
                 tool=self.tracker.calls['no-proof-'+str(code)]
@@ -143,12 +158,34 @@ class ProjectTestReceiptTests(unittest.TestCase):
         self.event(self.run_tests(),call_id='actual-valid')
         self.assertIsNone(self.receipts.fatal_reason(self.tracker.calls['actual-valid']))
 
+    def test_log_reread_is_a_repeated_display_not_a_new_test_or_conflict(self):
+        result=self.run_tests()
+        self.event(result,command='python3 run_tests.py | tee out/test.log')
+        first=self.receipts.report()['test_execution']['selected_call_sha256']
+        self.event(result,command='cat out/test.log',call_id='reread')
+        report=self.receipts.report()['test_execution']
+        self.assertFalse(report['conflicting_evidence'])
+        self.assertEqual(first,report['selected_call_sha256'])
+        self.assertEqual('repeated_display',report['calls'][1]['receipt_status'])
+        self.assertFalse(report['calls'][1]['test_runner_candidate'])
+        self.assertFalse(report['eligible_as_execution_proof'])
+
     def test_omp_success_requires_actual_output_receipt_and_matching_file(self):
         result = self.run_tests()
         self.event(result, client='omp', code=None)
         self.assertTrue(self.receipts.report()['client_tests_succeeded'])
         (self.root / 'price_math.py').write_text('changed = True')
         self.assertFalse(self.receipts.report()['client_tests_succeeded'])
+
+    def test_omp_omitted_exit_cannot_inherit_a_failed_receipt_exit(self):
+        (self.root/'price_math.py').write_text('value = 999\n')
+        result=self.run_tests()
+        self.assertEqual(1,result.returncode)
+        self.event(result,client='omp',code=None)
+        call=self.receipts.report()['test_execution']['calls'][0]
+        self.assertEqual(1,call['exit_code'],'untrusted receipt remains diagnostic')
+        self.assertIsNone(call['client_exit_code'],'the actual success event omitted an exit code')
+        self.assertIsNone(self.receipts.fatal_reason(self.tracker.calls['synthetic-call']))
 
     def test_stale_wrong_nonce_changed_protected_source_and_zero_tests_are_rejected(self):
         result = self.run_tests()
@@ -184,12 +221,13 @@ class ProjectTestReceiptTests(unittest.TestCase):
         self.event(result, client='omp', code=False)
         self.assertFalse(self.receipts.report()['client_tests_succeeded'])
 
-    def test_receipt_reuse_across_call_ids_and_changed_terminal_are_rejected(self):
+    def test_repeated_receipt_display_is_diagnostic_but_changed_tool_terminal_is_rejected(self):
         result = self.run_tests()
         event = self.event(result)
         self.event(result, call_id='different-call')
-        self.assertFalse(self.receipts.report()['client_tests_succeeded'])
-        self.assertTrue(self.receipts.report()['test_execution']['conflicting_evidence'])
+        self.assertTrue(self.receipts.report()['client_tests_succeeded'])
+        self.assertFalse(self.receipts.report()['test_execution']['conflicting_evidence'])
+        self.assertEqual('repeated_display',self.receipts.report()['test_execution']['calls'][1]['receipt_status'])
         event['part']['state']['output'] = 'changed terminal output'
         with self.assertRaisesRegex(ValueError, 'terminal_changed'):
             self.receipts.observe(self.tracker.observe(event), event)

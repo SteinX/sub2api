@@ -21,7 +21,7 @@ def evidence(live=False):
         terminal = {'exit_code': 0, 'normal_stop': True, 'final_text_matches': True, 'event_error': False,
                     'timed_out': False, 'parse_errors': 0, 'session_changed': False, 'session_seen': True,
                     'client_session_sha256': DIGEST, 'tools': {'read': 4, 'write': 1, 'bash': 1},
-                    'completion_contract': 'project_artifacts_v2', 'terminal_event_seen': True,
+                    'completion_contract': 'project_results_v3', 'terminal_event_seen': True,
                     'reader_completed': True, 'reader_error': False,
                     'final_text_bytes': 35, 'final_text_sha256': DIGEST, 'project_nonce_sha256': DIGEST,
                     'client_tests_succeeded': True, 'test_command_verified': True, 'bash_exit_code': 0, 'plugin_runtime_started': True}
@@ -31,6 +31,7 @@ def evidence(live=False):
                 'source_changed_by_task': True, 'project_nonce_sha256': DIGEST,
                 'protected_project_sha256': {name: DIGEST for name in ['requirements.json','test_project.py','run_tests.py']},
                 'independent_project_test_executed': True,
+                'independent_project_tests_executed': True, 'independent_project_tests_passed': True, 'independent_project_tests_exit_code': 0,
                 'tier': 'user_e2e' if live else 'client_mock', 'eligible_for_real_e2e': live,
                 'public_model_uid': 'fusion-test' if kind == 'fusion' else 'physical-lead',
                 'physical_lead_uid': 'physical-lead', 'physical_sidekick_uid': 'physical-sidekick' if kind == 'fusion' else '',
@@ -102,6 +103,12 @@ def evidence(live=False):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_both_mock_journey_shards_remain_required_with_the_aggregate_context(self):
+        for name in ['user-journeys-contracts','user-journeys-matrix','user-journeys-mock']:
+            report,state=evidence(live=True)
+            state['checks']=[check for check in state['checks'] if check['name']!=name]
+            self.assertIn('required_check_missing:devin-e2e.yml/'+name,gate.validate(report,'user_e2e',COMMIT,TREE,state))
+
     def test_buffered_guard_does_not_certify_unmodified_live_transport(self):
         report,_=evidence(live=True);case=report['cases'][0]
         case['batch_guard'].update(buffered_transport=True,response_observation='bounded_response_buffer')
@@ -129,16 +136,22 @@ class AcceptanceTests(unittest.TestCase):
             with self.subTest(target=target, field=field):
                 self.assertIn(case['id'] + ':fusion_collaboration_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
 
-    def test_aggregate_or_text_success_cannot_replace_per_call_test_receipt(self):
-        for field, value in [('test_execution', None), ('tool_calls', []), ('tool_calls', None)]:
+    def test_client_receipts_do_not_replace_independent_test_results(self):
+        for value in [None, {}, {'passed': True, 'execution_verified': True}]:
             report, _ = evidence()
-            report['cases'][0]['task'][field] = value
-            with self.subTest(field=field, value=value):
-                if field == 'test_execution':
-                    report['cases'][0]['task'].pop(field)
-                self.assertIn(report['cases'][0]['id'] + ':client_test_receipt_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
+            case=report['cases'][0]
+            case['task']['test_execution']=value
+            case['task']['client_tests_succeeded']=False
+            self.assertEqual([],gate.validate(report,'client_mock',COMMIT,TREE))
+            for key in ['independent_project_tests_executed','independent_project_tests_passed']:
+                case[key]=False
+                self.assertIn(case['id']+':independent_project_tests_unverified',gate.validate(report,'client_mock',COMMIT,TREE))
+                case[key]=True
+            for code in [None,False,1]:
+                case['independent_project_tests_exit_code']=code
+                self.assertIn(case['id']+':independent_project_tests_unverified',gate.validate(report,'client_mock',COMMIT,TREE))
 
-    def test_wrong_stale_unproven_or_empty_test_receipts_are_rejected(self):
+    def test_wrong_stale_or_forged_client_receipts_are_diagnostic_only(self):
         for field, value in [('tests_run', 0), ('exit_code', False), ('state', 'error'), ('execution_verified', False),
                              ('project_nonce_sha256', '0' * 64), ('source_after_sha256', '0' * 64),
                              ('protected_sha256', {}), ('started_ns', 0), ('finished_ns', 5), ('receipt_sha256', '')]:
@@ -146,7 +159,7 @@ class AcceptanceTests(unittest.TestCase):
             case = report['cases'][0]
             case['task']['test_execution']['calls'][0][field] = value
             with self.subTest(field=field):
-                self.assertIn(case['id'] + ':client_test_receipt_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
+                self.assertEqual([],gate.validate(report,'client_mock',COMMIT,TREE))
 
     def test_natural_language_completion_does_not_need_exact_marker(self):
         report, _ = evidence()
@@ -190,7 +203,21 @@ class AcceptanceTests(unittest.TestCase):
         case['source_after_task_sha256'] = case['source_before_task_sha256']
         self.assertIn(case['id'] + ':source_mutation_unverified', gate.validate(report, 'client_mock', COMMIT, TREE))
 
-    def test_mutation_stats_are_required_and_bash_or_failed_tools_cannot_supply_them(self):
+    def test_results_do_not_require_read_or_mutator_tools_or_resume_tools(self):
+        report,_=evidence()
+        case=report['cases'][0]
+        task=case['task'];bash=next(call for call in task['tool_calls'] if call['name']=='bash')
+        bash.update(command_class='other_shell',source_targeted=False)
+        task.update(tools={'bash':1},tool_states={'bash':{'completed':1}},tool_events={'bash':{'completed':1}},
+                    tool_calls=[bash],source_mutation_tools={})
+        receipt=task['test_execution']['calls'][0]
+        receipt.update(command_class='other_shell',test_runner_candidate=True)
+        case['resume'].update(tools={},tool_states={},tool_events={},tool_calls=[],source_mutation_tools={})
+        self.assertEqual([],gate.validate(report,'client_mock',COMMIT,TREE))
+        case['artifact_verified_before_oracle']=False
+        self.assertIn(case['id']+':artifact_verified_before_oracle',gate.validate(report,'client_mock',COMMIT,TREE))
+
+    def test_tool_diagnostics_must_match_actual_events_and_remain_well_typed(self):
         for changes in [ {'source_mutation_tools': {}}, {'source_mutation_tools': {'bash': 1}},
                          {'source_mutation_tools': {'write': 2}}, {'source_mutation_tools': {'write': True}},
                          {'tool_states': {'write': {'error': 1}}}, {'tool_states': {'write': {'pending': 1}}},
