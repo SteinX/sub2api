@@ -3,6 +3,7 @@ from collections import Counter
 import os
 from pathlib import Path
 import re
+from project_tests import command_class, digest
 
 FILE_MUTATORS = frozenset({'write', 'edit', 'apply_patch'})
 TOOL_NAME = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
@@ -52,11 +53,26 @@ class ToolEvidence:
         # Duplicate terminal events are observations, not additional tool calls.
         if previous and previous['status'] in {'completed', 'error'} and status != previous['status']:
             raise ValueError('tool_terminal_changed')
-        record = previous or {'name': name, 'source_targeted': False, 'test_command': False}
+        record = previous or {'name': name, 'call_sha256': digest(call_id.encode()), 'source_targeted': False,
+                              'test_command': False, 'states': [], 'error_kind': None}
         if inputs is not None:
             record['source_targeted'] |= self.source_targeted(name, inputs)
-            record['test_command'] |= isinstance(inputs, dict) and inputs.get('command') == self.test_command
+            if name == 'bash' and isinstance(inputs, dict) and isinstance(inputs.get('command'), str):
+                fingerprint = digest(inputs['command'].encode())
+                if record.get('command_sha256') not in {None, fingerprint}:
+                    raise ValueError('tool_command_changed')
+                record['command_sha256'] = fingerprint
+                record['command_class'] = command_class(inputs['command'], self.test_command)
+                record['test_command'] = record['command_class'] == 'configured_project_tests'
         record['status'] = status
+        if status == 'error':
+            # Classify the actual client error without retaining its body/rules.
+            detail = (event.get('part', {}).get('state', {}).get('error') if kind == 'tool_use' else None)
+            text = detail.lower() if isinstance(detail, str) else ''
+            denied = ('permission' in text and any(word in text for word in ['deny', 'denied', 'reject'])) or text.startswith('the user has specified a rule which prevents')
+            record['error_kind'] = 'client_permission_rejection' if denied else 'client_tool_error'
+        if not record['states'] or record['states'][-1] != status:
+            record['states'].append(status)
         self.calls[call_id] = record
         self.events.setdefault(name, Counter())[status] += 1
         self.failed |= status == 'error'
@@ -75,5 +91,6 @@ class ToolEvidence:
                 if record['source_targeted']:
                     mutations[name] += 1
         return {'tools': tools, 'tool_states': states, 'tool_events': self.events,
+                'tool_calls': list(self.calls.values()),
                 'source_mutation_tools': dict(mutations),
                 'incomplete_tool_calls': sum(r['status'] not in {'completed', 'error'} for r in self.calls.values())}

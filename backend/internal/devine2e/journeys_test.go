@@ -95,6 +95,10 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 	require.NoError(t, json.Unmarshal([]byte(current.Get("extra").Raw), &extra))
 	extra["devin_fusion_profiles"] = []fusion.Profile{profile}
 	api(t, app, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra})
+	verifyProjectTestReceipts(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
+	if os.Getenv("DEVIN_JOURNEY_EVIDENCE_ONLY") == "true" {
+		return // Only this explicitly synthetic runner has a focused evidence mode.
+	}
 	verifyProjectMutationNegatives(t, app, fixture, key, userPassword)
 	reports := []map[string]any{}
 	billing := map[string]any{"verified": false, "tier": "synthetic billing; not a provider invoice"}
@@ -157,9 +161,15 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_PROCESS_REGISTRY="+processRegistry, "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
 					output, runErr := cmd.Output()
 					cleanupErr := cleanupJourneyProcessesAt(processRegistry, containerRegistry)
-					var report map[string]any
-					require.NoError(t, json.Unmarshal(output, &report), "journey runner must return sanitized structural evidence")
+					report := map[string]any{"status": "failed", "stage": "runner_output"}
+					parseErr := json.Unmarshal(output, &report)
+					if report == nil {
+						report = map[string]any{"status": "failed", "stage": "runner_output"}
+					}
 					forwarded, requests := admission.snapshot()
+					if kind == "fusion" && forwarded > 0 {
+						report["fusion_execution"] = snapshotFusionAudit(agentDatabase(t, app), keyID, requests, false)
+					}
 					errors := map[string]int{}
 					for _, request := range requests {
 						if request.ErrorCode != "" {
@@ -203,8 +213,9 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 						report["expectation"] = "product refuses known incompatible configuration; task not run"
 					}
 					reports = append(reports, report)
-					require.NoError(t, cleanupErr, "mock client cleanup not verified")
 					writeAgentArtifact(t, "journey-"+strings.ReplaceAll(id, "/", "-")+".json", report)
+					require.NoError(t, parseErr, "journey runner must return sanitized structural evidence")
+					require.NoError(t, cleanupErr, "mock client cleanup not verified")
 					t.Logf("journey=%s status=%v forwarded=%d errors=%v", id, report["status"], forwarded, errors)
 					if client == "omp" && kind == "fusion" && configProfile == "default" && report["status"] == "unsupported_by_product" {
 						require.NoError(t, runErr)
@@ -246,7 +257,7 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 					}
 					verifyAgentUsage(t, app, keyID, usageBefore+nativeCount)
 					if kind == "fusion" {
-						verifyAgentFusion(t, app, keyID, requests, "journey-"+client)
+						require.Equal(t, true, report["fusion_execution"].(map[string]any)["complete"], "retain partial collaboration evidence even when client proof failed")
 					}
 				})
 			}

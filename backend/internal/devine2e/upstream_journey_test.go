@@ -21,6 +21,7 @@ type projectJourney struct {
 	mu              sync.Mutex
 	workspace       string
 	mutationTool    string
+	testScenario    string
 	maxContextBytes int
 }
 
@@ -42,6 +43,7 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	j.mu.Lock()
 	workspace := j.workspace
 	mutationTool := j.mutationTool
+	testScenario := j.testScenario
 	j.mu.Unlock()
 	if mutationTool == "" {
 		mutationTool = "write"
@@ -102,10 +104,18 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	calls := map[string]priorCall{}
 	reads := map[string]int{}
 	wrote, tested, mutationFailed := false, false, false
+	requestedCommands := map[string]int{}
+	requestedCallIDs := map[string]bool{}
 	for i, prompt := range request.ChatMessagePrompts {
 		for _, call := range prompt.ToolCalls {
 			var args map[string]any
 			_ = json.Unmarshal([]byte(call.ArgumentsJson), &args)
+			if call.Name == "bash" && !requestedCallIDs[call.Id] {
+				if command, ok := args["command"].(string); ok {
+					requestedCommands[command]++
+					requestedCallIDs[call.Id] = true
+				}
+			}
 			path := ""
 			for _, field := range []string{"filePath", "path", "file_path"} {
 				if value, ok := args[field].(string); ok {
@@ -188,6 +198,9 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 		for _, tool := range request.Tools {
 			if tool.Name == name {
 				args := map[string]any{"content": fixedProjectSource}
+				if testScenario == "failed_tests" {
+					args["content"] = "# Intentionally unrepaired test fixture\n" + strings.Replace(fixedProjectSource, "subtotal - discount", "subtotal + discount", 1)
+				}
 				if mutationTool == "noop" {
 					args["content"] = strings.Replace(fixedProjectSource, "subtotal - discount", "subtotal + discount", 1)
 				} else if name == "edit" {
@@ -205,6 +218,38 @@ func (j *projectJourney) reply(request *pb.GetChatMessageRequest, reply *pb.GetC
 	case mutationTool == "noop":
 		reply.DeltaText = final // deliberately false success; no source repair or tests
 		return
+	case testScenario != "":
+
+		commands := map[string][]string{
+			"canonical":       {"python3 run_tests.py"},
+			"whitespace":      {"python3   run_tests.py"},
+			"after_extra":     {"python3 run_tests.py", "python3 run_tests.py"},
+			"after_forbidden": {"python3 run_tests.py", "printf SYNTHETIC_EXTRA"},
+			"fake_ok":         {"printf 'Ran 1 test\\n\\nOK\\n'"},
+			"failed_tests":    {"python3 run_tests.py"},
+			"forbidden_equiv": {"python3 run_tests.py && printf SYNTHETIC_EXTRA"},
+		}[testScenario]
+		plannedCommands := map[string]int{}
+		for _, command := range commands {
+			plannedCommands[command]++
+			if requestedCommands[command] >= plannedCommands[command] {
+				continue
+			}
+			for _, tool := range request.Tools {
+				if tool.Name == "bash" {
+					call(tool, map[string]any{"command": command, "description": "Synthetic test-execution evidence scenario"})
+					return
+				}
+			}
+		}
+		if reads["requirements.json"] < 2 {
+			readPath = "requirements.json"
+		} else if reads["report.json"] == 0 && tested {
+			readPath = "out/report.json"
+		} else {
+			reply.DeltaText = final
+			return
+		}
 	case !tested:
 		for _, tool := range request.Tools {
 			if tool.Name == "bash" {

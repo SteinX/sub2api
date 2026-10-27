@@ -1,6 +1,8 @@
 import json
 import io
 from contextlib import redirect_stderr
+import subprocess
+import threading
 import os
 from pathlib import Path
 import tempfile
@@ -36,7 +38,7 @@ class JourneyProofTests(unittest.TestCase):
                      'timed_out': False, 'incomplete_tool_calls': 0}
             resumed = {'passed': True, 'tools': {'read': 1}, 'client_session_sha256': 'a' * 64,
                        'project_nonce_sha256': journey.digest(b'wrong-project')}
-            def invoke(*args):
+            def invoke(*args, **kwargs):
                 (workspace / 'price_math.py').write_text('repaired source')
                 (workspace / 'out').mkdir(exist_ok=True)
                 (workspace / 'out/report.json').write_text(json.dumps(expected))
@@ -76,6 +78,8 @@ class JourneyProofTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); (root / 'workspace').mkdir()
             (root / 'workspace/requirements.json').write_text(json.dumps({'nonce': 'synthetic'}))
+            (root / 'workspace/test_project.py').write_text('protected test')
+            (root / 'workspace/run_tests.py').write_text('protected runner')
             args = SimpleNamespace(client='opencode', model='synthetic', ui_url='http://127.0.0.1')
             with patch.object(journey, 'isolation', return_value={}), patch.object(journey, 'project_environment', return_value={}), \
                  patch.object(journey, 'start_child', return_value=Child()), patch.object(journey.os, 'killpg'), \
@@ -115,24 +119,6 @@ class JourneyProofTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 journey.isolation('omo')
 
-    def test_omp_test_evidence_requires_matching_command_call_and_explicit_success_receipt(self):
-        with tempfile.TemporaryDirectory() as temp:
-            workspace = Path(temp); (workspace / 'out').mkdir()
-            started = time.time_ns() - 1000000000
-            event = {'isError': False, 'result': {'details': {}, 'content': [{'text': 'Ran 1 test\n\nOK'}]}}
-            receipt = workspace / 'out/test-execution.json'
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', started))
-            receipt.write_text(json.dumps({'nonce': 'nonce', 'exit_code': 0}))
-            self.assertTrue(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', started))
-            self.assertFalse(journey.omp_test_result(event, 'echo fake-success', workspace, 'nonce', started))
-            self.assertFalse(journey.omp_test_result(event, None, workspace, 'nonce', started))
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'different', started))
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', time.time_ns() + 1000000000))
-            event['result']['details']['exitCode'] = 1
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', started))
-            event['result']['details'] = {'timedOut': True}
-            self.assertFalse(journey.omp_test_result(event, journey.TEST_COMMAND, workspace, 'nonce', started))
-
     def test_final_artifact_and_protected_files_are_rechecked_after_resume(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp); (workspace / 'out').mkdir()
@@ -161,6 +147,49 @@ class JourneyProofTests(unittest.TestCase):
             (root / 'workspace/out').symlink_to(root / 'outside', target_is_directory=True)
             with self.assertRaises(OSError):
                 journey.project_bytes(root / 'workspace', 'out/report.json')
+
+
+class ProtectedSnapshotTests(unittest.TestCase):
+    def test_client_cannot_replace_expected_test_fingerprints_during_start(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            workspace = directory / 'workspace'; workspace.mkdir()
+            for name, text in {'requirements.json':'{"nonce":"synthetic"}', 'price_math.py':'value = 1\n',
+                               'test_project.py':'import unittest\nclass Check(unittest.TestCase):\n def test_value(self): self.assertEqual(1,1)\n',
+                               'run_tests.py':journey.TEST_RUNNER}.items():
+                (workspace/name).write_text(text)
+            original_test = (workspace/'test_project.py').read_bytes()
+            observed = threading.Event()
+            class ReceiptObserver(journey.TestReceipts):
+                def observe(self, tool, event):
+                    super().observe(tool, event)
+                    if tool and tool['name'] == 'bash': observed.set()
+            class Child:
+                pid = 1073741823
+                returncode = 0
+                def wait(self, timeout=None):
+                    if not observed.wait(2): raise AssertionError('receipt event was not consumed')
+                    (workspace/'test_project.py').write_bytes(original_test)
+                    return 0
+            def start(*args, **kwargs):
+                (workspace/'test_project.py').write_bytes(b'# Replaced after child launch\n' + original_test)
+                executed = subprocess.run([sys.executable, 'run_tests.py'], cwd=workspace, capture_output=True, check=True)
+                events = [{'type':'step_start','sessionID':'synthetic-session'},
+                          {'type':'tool_use','part':{'callID':'synthetic-call','tool':'bash','state':{'status':'completed',
+                           'input':{'command':journey.TEST_COMMAND},'metadata':{'exit':0},'output':executed.stdout.decode()}}},
+                          {'type':'text','part':{'text':'The project is verified.'}},
+                          {'type':'step_finish','part':{'reason':'stop'}}]
+                child = Child()
+                child.stdout = io.BytesIO(b''.join(json.dumps(event).encode()+b'\n' for event in events))
+                return child
+            with patch.object(journey,'isolation',return_value={}), patch.object(journey,'project_environment',return_value={}), \
+                 patch.object(journey,'start_child',side_effect=start), patch.object(journey,'TestReceipts',ReceiptObserver), \
+                 patch.dict(os.environ,{'DEVIN_JOURNEY_GATEWAY_KEY':'synthetic'}):
+                result = journey.invoke(SimpleNamespace(client='opencode',model='synthetic',ui_url='http://127.0.0.1'),directory)
+            self.assertEqual(original_test,(workspace/'test_project.py').read_bytes())
+            self.assertTrue(result['normal_stop'])
+            self.assertFalse(result['client_tests_succeeded'],'the client cannot establish the expected protected-file baseline')
+            self.assertEqual('wrong_project_or_tests',result['test_execution']['calls'][0]['receipt_status'])
 
 
 if __name__ == '__main__':

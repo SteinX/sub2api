@@ -6,7 +6,9 @@ replacement for repository permissions. It never invokes clients or providers.
 """
 import argparse
 import base64
+from collections import Counter
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -28,7 +30,8 @@ PRODUCT_UI_SCOPE = 'full product application: login, key list, selection and con
 TOOL_NAME = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
 FILE_MUTATORS = {'write', 'edit', 'apply_patch'}
 SECRET_KEYS = {'api_key', 'apikey', 'authorization', 'access_token', 'refresh_token', 'pat', 'cookie', 'raw_log', 'prompt', 'content',
-               'account_id', 'group_id', 'channel_id', 'user_id', 'session_id', 'email', 'stdout', 'stderr', 'request_body', 'response_body'}
+               'account_id', 'group_id', 'channel_id', 'user_id', 'session_id', 'email', 'stdout', 'stderr', 'request_body', 'response_body',
+               'command', 'raw_command', 'tool_input', 'tool_output', 'brief'}
 
 
 def read_report(path):
@@ -62,8 +65,117 @@ def valid_tool_evidence(result):
                 return False
     if set(states) != set(events) or set(states) != {name for name, count in tools.items() if count}:
         return False
-    return all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
-               and events[name].get('completed', 0) >= tools[name] for name, counts in states.items())
+    calls = result.get('tool_calls')
+    if (not isinstance(calls, list) or any(not isinstance(call, dict) or not HEX64.fullmatch(str(call.get('call_sha256', ''))) for call in calls)
+            or len({call['call_sha256'] for call in calls}) != len(calls)):
+        return False
+    completed = Counter()
+    mutations = Counter()
+    for call in calls:
+        if (not HEX64.fullmatch(str(call.get('call_sha256', ''))) or call.get('name') not in tools
+                or call.get('status') != 'completed' or not isinstance(call.get('states'), list) or not call['states']
+                or call['states'][-1] != 'completed' or any(status not in {'pending', 'running', 'completed'} for status in call['states'])):
+            return False
+        completed[call['name']] += 1
+        if type(call.get('source_targeted')) is not bool:
+            return False
+        if call['source_targeted']:
+            if call['name'] not in FILE_MUTATORS:
+                return False
+            mutations[call['name']] += 1
+    return (all(completed[name] == count for name, count in tools.items())
+            and dict(mutations) == result.get('source_mutation_tools')
+            and all(counts.get('completed', 0) == tools[name] and not counts.get('pending', 0) and not counts.get('running', 0)
+                    and events[name].get('completed', 0) >= tools[name] for name, counts in states.items()))
+
+
+def valid_client_test_receipt(case):
+    task = case.get('task', {})
+    if not valid_tool_evidence(task):
+        return False
+    execution = task.get('test_execution', {})
+    if not isinstance(execution, dict):
+        return False
+    calls = execution.get('calls')
+    if (execution.get('schema') != 'devin_project_test_v1' or execution.get('passed') is not True
+            or execution.get('conflicting_evidence') is not False or not isinstance(calls, list) or not calls
+            or any(not isinstance(call, dict) or not HEX64.fullmatch(str(call.get('call_sha256', ''))) for call in calls)
+            or execution.get('source_after_task_sha256') != case.get('source_after_task_sha256')):
+        return False
+    actual = {call['call_sha256']: call for call in task.get('tool_calls', []) if call.get('name') == 'bash'}
+    if len(calls) != len(actual) or len({call.get('call_sha256') for call in calls}) != len(calls):
+        return False
+    for call in calls:
+        tool = actual.get(call.get('call_sha256'), {})
+        if (call.get('state') != tool.get('status') or call.get('command_class') != tool.get('command_class')
+                or call.get('command_sha256') != tool.get('command_sha256') or not HEX64.fullmatch(str(call.get('command_sha256', '')))
+                or type(call.get('completion_sequence')) is not int or call['completion_sequence'] <= 0):
+            return False
+    candidates = [call for call in calls if call.get('command_class') == 'configured_project_tests']
+    selected = max(candidates, key=lambda call: call['completion_sequence'], default={})
+    protected = case.get('protected_project_sha256', {})
+    if (execution.get('selected_call_sha256') != selected.get('call_sha256') or selected.get('execution_verified') is not True
+            or selected.get('receipt_status') != 'verified' or selected.get('passed') is not True or type(selected.get('exit_code')) is not int or selected['exit_code'] != 0
+            or selected.get('state') != 'completed' or selected.get('exit_source') not in {'client_metadata', 'omp_success_and_runner_receipt'}
+            or not all(HEX64.fullmatch(str(selected.get(key, ''))) for key in ['receipt_sha256', 'run_sha256'])
+            or selected.get('output_reference_sha256') != selected.get('receipt_sha256')
+            or selected.get('project_nonce_sha256') != case.get('project_nonce_sha256')
+            or selected.get('source_before_sha256') != case.get('source_after_task_sha256')
+            or selected.get('source_after_sha256') != case.get('source_after_task_sha256')
+            or not isinstance(protected, dict) or set(protected) != {'requirements.json', 'test_project.py', 'run_tests.py'}
+            or any(not HEX64.fullmatch(str(value)) for value in protected.values()) or selected.get('protected_sha256') != protected
+            or type(selected.get('tests_run')) is not int or selected['tests_run'] <= 0
+            or any(type(selected.get(key)) is not int or selected[key] != 0 for key in ['failures', 'errors', 'skipped', 'expected_failures', 'unexpected_successes'])):
+        return False
+    stamps = [task.get('client_started_ns'), selected.get('started_ns'), selected.get('finished_ns'), task.get('client_finished_ns')]
+    return all(type(value) is int and value > 0 for value in stamps) and stamps == sorted(stamps)
+
+
+def valid_fusion_audit(case):
+    audit = case.get('fusion_execution', {})
+    if (audit.get('schema_version') != 1 or audit.get('available') is not True or audit.get('complete') is not True
+            or audit.get('missing_session_headers') != 0 or not isinstance(audit.get('sessions'), list) or not audit['sessions']):
+        return False
+    sessions, attempts = set(), set()
+    def amount(value):
+        return type(value) in {int, float} and math.isfinite(value) and value >= 0
+    for session in audit['sessions']:
+        fingerprint = session.get('session_sha256')
+        if (not HEX64.fullmatch(str(fingerprint)) or fingerprint in sessions or session.get('available') is not True
+                or session.get('complete') is not True or session.get('state') != 'TURN_COMPLETED' or session.get('role') != 'lead'
+                or session.get('separate_contexts') is not True or session.get('role_usage_settled') is not True):
+            return False
+        sessions.add(fingerprint)
+        handoffs = [item for item in session.get('handoffs', []) if item.get('turn') == session.get('turns')]
+        if not handoffs or any(item.get('report_present') is not True or item.get('lead_report_linked') is not True
+                               or type(item.get('report_bytes')) is not int or item['report_bytes'] <= 0
+                               or not all(HEX64.fullmatch(str(item.get(key))) for key in ['handoff_sha256', 'report_sha256']) for item in handoffs):
+            return False
+        roles = Counter()
+        for attempt in session.get('attempts', []):
+            identity, role = attempt.get('attempt_sha256'), attempt.get('role')
+            if (not HEX64.fullmatch(str(identity)) or identity in attempts or role not in {'lead', 'sidekick'}
+                    or attempt.get('model_uid') != case.get('physical_' + role + '_uid') or attempt.get('status') != 'completed'
+                    or any(attempt.get(field) is not True for field in ['settled', 'applied', 'usage_query_available', 'usage_available', 'usage_matches'])
+                    or attempt.get('failure_present') is not False or attempt.get('usage_rows') != 1
+                    or any(not amount(attempt.get(field)) for field in ['cost_usd', 'actual_cost_usd', 'total_cost_usd'])
+                    or abs(attempt['cost_usd'] - max(attempt['actual_cost_usd'], attempt['total_cost_usd'])) > 1e-9
+                    or any(type(attempt.get(field)) is not int or attempt[field] < 0 for field in ['input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens'])):
+                return False
+            attempts.add(identity)
+            if attempt.get('purpose') == 'inference':
+                roles[role] += 1
+            elif attempt.get('purpose') not in {'compaction', 'cache_refresh'}:
+                return False
+        review = session.get('lead_review', {})
+        if (roles.get('lead', 0) < 2 or roles.get('sidekick', 0) < 1 or dict(roles) != session.get('role_attempts')
+                or review.get('state') != 'completed_with_report_context' or review.get('current_turn') != session.get('turns')
+                or type(review.get('final_request_index')) is not int or review['final_request_index'] < 0
+                or type(review.get('final_answer_bytes')) is not int or review['final_answer_bytes'] <= 0
+                or not HEX64.fullmatch(str(review.get('final_answer_sha256')))
+                or any(review.get(field) is not True for field in ['report_context_linked', 'sidekick_then_lead', 'request_boundaries_valid'])):
+            return False
+    return True
 
 
 def validate(report, mode, commit, tree, state=None):
@@ -140,6 +252,8 @@ def validate(report, mode, commit, tree, state=None):
         if case.get('model_kind') == 'direct' and sidekick:
             errors.append(ident + ':unexpected_sidekick')
         if case.get('model_kind') == 'fusion':
+            if not valid_fusion_audit(case):
+                errors.append(ident + ':fusion_collaboration_unverified')
             contexts = case.get('native_context_hashes', {})
             lead_contexts, sidekick_contexts = set(contexts.get('lead', {})), set(contexts.get('sidekick', {}))
             if (not sidekick or physical.get(sidekick, 0) < 1 or not lead_contexts or not sidekick_contexts
@@ -177,6 +291,8 @@ def validate(report, mode, commit, tree, state=None):
                 or case.get('task', {}).get('client_tests_succeeded') is not True or case.get('task', {}).get('test_command_verified') is not True
                 or case.get('task', {}).get('bash_exit_code') != 0 or case.get('resume', {}).get('tools', {}).get('read', 0) < 1):
             errors.append(ident + ':actual_client_tools_missing')
+        if not valid_client_test_receipt(case):
+            errors.append(ident + ':client_test_receipt_unverified')
         if case.get('capabilities_required') is True:
             extended = case.get('capability_evidence', {})
             if extended.get('status') != 'passed' or any(extended.get(name) != 'passed' for name in ['context_pressure', 'compact', 'fork', 'idle_process_recovery']):

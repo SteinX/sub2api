@@ -183,6 +183,9 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					cleanupErr := cleanupJourneyProcesses()
 					report := map[string]any{"status": "failed", "stage": "runner_output"}
 					parseErr := json.Unmarshal(output, &report)
+					if report == nil {
+						report = map[string]any{"status": "failed", "stage": "runner_output"}
+					}
 					forwarded, records := admission.snapshot()
 					report["id"], report["model_kind"], report["public_model_uid"] = id, kind, model
 					report["physical_lead_uid"], report["physical_sidekick_uid"] = plan.Models.Direct, ""
@@ -211,6 +214,9 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 					report["usage_scope"] = "persisted local public-key execution records, cumulative; not a provider invoice"
 					reports = append(reports, report)
 					report["client_process_cleanup_verified"] = cleanupErr == nil
+					if mode == "live" && kind == "fusion" && forwarded > 0 {
+						report["fusion_execution"] = snapshotFusionAudit(budget.db, keyID, records, true)
+					}
 					savePrivateAgentUsage(t, app, keyID, client, kind)
 					require.NoError(t, parseErr, "retain private structural evidence; never repeat an unknown send")
 					require.NoError(t, cleanupErr, "client cleanup not verified; stop this batch")
@@ -234,7 +240,7 @@ func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key,
 						}, 10*time.Second, 100*time.Millisecond, "each direct public inference must add its own physical-model usage row; earlier cases cannot supply this evidence")
 					}
 					if kind == "fusion" {
-						verifyAgentFusion(t, app, keyID, records, "private-product-"+client, true)
+						require.Equal(t, true, report["fusion_execution"].(map[string]any)["complete"], "Fusion collaboration or per-attempt settlement is not proven")
 					}
 					if client == "omp" && kind == "direct" && configProfile == "compatibility" && os.Getenv("DEVIN_JOURNEY_CAPABILITIES") == "true" {
 						capabilities, ok := report["capability_evidence"].(map[string]any)
