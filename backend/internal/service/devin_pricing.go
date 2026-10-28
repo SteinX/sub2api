@@ -69,15 +69,8 @@ func devinPricingGroupID(key *APIKey) int64 {
 // pricingModels uses only the existing live credential-scoped cache. Persisted
 // scheduling catalogs are deliberately not pricing evidence.
 func (s *DevinService) pricingModels(ctx context.Context, a *Account) ([]*pb.ClientModelConfig, time.Time, error) {
-	ctx = devin.WithClientIdentity(ctx)
-	models, err := s.Models(ctx, a)
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	s.mu.Lock()
-	until := s.runtime[s.runtimeKey(ctx, a)].modelsUntil
-	s.mu.Unlock()
-	return models, until, nil
+	catalog, err := s.modelCatalog(ctx, a)
+	return catalog.models, catalog.validUntil, err
 }
 
 func (s *OpenAIGatewayService) captureDevinPricing(ctx context.Context, a *Account, key *APIKey, models []*pb.ClientModelConfig, catalogUntil time.Time, uids ...string) *devinPricingSnapshot {

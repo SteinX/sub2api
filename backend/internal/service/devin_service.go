@@ -30,6 +30,18 @@ type devinRuntime struct {
 	usageUntil              time.Time
 }
 
+// Keep discovery data and its freshness window in the same lookup result. A
+// forced refresh may replace the runtime cache before a waiting caller resumes.
+type devinModelCatalogResult struct {
+	models     []*pb.ClientModelConfig
+	validUntil time.Time
+}
+
+func (r devinModelCatalogResult) clone() devinModelCatalogResult {
+	r.models = devin.CloneModels(r.models)
+	return r
+}
+
 // DevinService owns credential-scoped runtime caches; account scheduling stays in the gateway.
 type DevinService struct {
 	contextStore  mc.Store
@@ -324,16 +336,21 @@ func (s *DevinService) RecoverToken(ctx context.Context, a *Account, failed stri
 }
 
 func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([]*pb.ClientModelConfig, error) {
+	catalog, err := s.modelCatalog(ctx, a, force...)
+	return catalog.models, err
+}
+
+func (s *DevinService) modelCatalog(ctx context.Context, a *Account, force ...bool) (devinModelCatalogResult, error) {
 	ctx = devin.WithClientIdentity(ctx)
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return devinModelCatalogResult{}, err
 	}
 	key := s.runtimeKey(ctx, a)
 	s.mu.Lock()
 	e := s.runtime[key]
 	s.mu.Unlock()
 	if (len(force) == 0 || !force[0]) && e.models != nil && time.Now().Before(e.modelsUntil) {
-		return devin.CloneModels(e.models), nil
+		return (devinModelCatalogResult{models: e.models, validUntil: e.modelsUntil}).clone(), nil
 	}
 	pending := s.flights.DoChan("models:"+key, func() (any, error) {
 		// Another caller may populate the cache between the first lookup and
@@ -343,7 +360,7 @@ func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([
 			cached := s.runtime[key]
 			s.mu.Unlock()
 			if cached.models != nil && time.Now().Before(cached.modelsUntil) {
-				return cached.models, nil
+				return devinModelCatalogResult{models: cached.models, validUntil: cached.modelsUntil}, nil
 			}
 		}
 		sharedCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -369,40 +386,41 @@ func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([
 		// Empty discovery must not poison the shared forwarding catalog after
 		// a manual sync. Callers still receive the empty result for validation.
 		if len(models) == 0 {
-			return models, nil
+			return devinModelCatalogResult{models: models}, nil
 		}
-		s.mu.Lock()
-		e := s.runtime[key]
-		e.models = models
-		e.modelsUntil = time.Now().Add(2 * time.Minute)
+		now := time.Now()
+		catalog := devinModelCatalogResult{models: models, validUntil: now.Add(2 * time.Minute)}
 		// Refresh at a free promotion's end even if the ordinary cache TTL has
 		// not elapsed. Failed refreshes never return the expired cache entry.
 		for _, model := range models {
-			if until, free := devin.ModelFreeUntil(model, time.Now(), e.modelsUntil); free {
-				e.modelsUntil = until
+			if until, free := devin.ModelFreeUntil(model, now, catalog.validUntil); free {
+				catalog.validUntil = until
 			}
 		}
+		s.mu.Lock()
+		e := s.runtime[key]
+		e.models, e.modelsUntil = catalog.models, catalog.validUntil
 		s.runtime[key] = e
 		s.mu.Unlock()
-		return models, nil
+		return catalog, nil
 	})
 	var result singleflight.Result
 	select {
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return devinModelCatalogResult{}, ctx.Err()
 	case result = <-pending:
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return devinModelCatalogResult{}, err
 	}
 	if result.Err != nil {
-		return nil, result.Err
+		return devinModelCatalogResult{}, result.Err
 	}
-	models, ok := result.Val.([]*pb.ClientModelConfig)
+	catalog, ok := result.Val.(devinModelCatalogResult)
 	if !ok {
-		return nil, errors.New("invalid Devin model cache result")
+		return devinModelCatalogResult{}, errors.New("invalid Devin model cache result")
 	}
-	return devin.CloneModels(models), nil
+	return catalog.clone(), nil
 }
 
 func DevinModelsBody(models []*pb.ClientModelConfig, account *Account) ([]byte, error) {
