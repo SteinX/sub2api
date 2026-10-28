@@ -1,0 +1,15 @@
+client_model_configs {
+  model_uid: "gpt-5.5"
+  pricing_type: MODEL_PRICING_TYPE_API
+  model_cost_tier: MODEL_COST_TIER_HIGH
+  max_tokens: 262144
+  model_info { max_output_tokens: 4096 model_features { supports_tool_calls: true } }
+}
+client_model_configs {
+  model_uid: "future-promoted-v99"
+  pricing_type: MODEL_PRICING_TYPE_API
+  model_cost_tier: MODEL_COST_TIER_FREE
+  max_tokens: 262144
+  promo_status { is_active: true end_date { seconds: 4102444800 } label: "Synthetic promotion" }
+  model_info { max_output_tokens: 4096 model_features { supports_tool_calls: true } }
+}

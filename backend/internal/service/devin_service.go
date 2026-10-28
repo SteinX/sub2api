@@ -375,6 +375,13 @@ func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([
 		e := s.runtime[key]
 		e.models = models
 		e.modelsUntil = time.Now().Add(2 * time.Minute)
+		// Refresh at a free promotion's end even if the ordinary cache TTL has
+		// not elapsed. Failed refreshes never return the expired cache entry.
+		for _, model := range models {
+			if until, free := devin.ModelFreeUntil(model, time.Now(), e.modelsUntil); free {
+				e.modelsUntil = until
+			}
+		}
 		s.runtime[key] = e
 		s.mu.Unlock()
 		return models, nil

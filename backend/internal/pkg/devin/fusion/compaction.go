@@ -117,6 +117,7 @@ func (e *Engine) performCompaction(ctx context.Context, s *Session, r *compactio
 	outcome, err := x.Execute(ctx, call)
 	r.Attempt.Response = outcome.Response
 	r.Attempt.BillingModel = outcome.BillingModel
+	r.Attempt.PricingSnapshot = outcome.PricingSnapshot
 	r.Request = nil
 	if outcome.Response != nil && outcome.Response.Usage != nil {
 		r.Attempt.Status = "completed"
