@@ -5877,6 +5877,8 @@
             </div>
           </div>
 
+          <DevinClientIdentitySettings />
+
           <!-- Web Search Emulation -->
           <div class="card">
             <div
@@ -9001,6 +9003,7 @@ import {
   type RechargeBonusTierDraft,
 } from "@/utils/rechargeBonus";
 import OpenAIFastPolicyUserSelector from "@/views/admin/settings/OpenAIFastPolicyUserSelector.vue";
+import DevinClientIdentitySettings from "@/views/admin/settings/DevinClientIdentitySettings.vue";
 import { useClipboard } from "@/composables/useClipboard";
 import {
   useStepUp,

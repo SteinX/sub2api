@@ -5,7 +5,7 @@
     width="wide"
     @close="emit('close')"
   >
-    <div class="space-y-4">
+    <div class="space-y-4" data-testid="use-key-modal" :data-platform="platform || ''">
       <!-- No Group Assigned Warning -->
       <div v-if="!platform" class="flex items-start gap-3 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
         <svg class="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
@@ -35,6 +35,7 @@
               v-for="tab in clientTabs"
               :key="tab.id"
               type="button"
+              :data-client="tab.id"
               @click="activeClientTab = tab.id"
               :class="[
                 'whitespace-nowrap py-2.5 px-1 border-b-2 font-medium text-sm transition-colors',
@@ -133,11 +134,78 @@
           </nav>
         </div>
 
+        <div v-if="platform === 'devin'" class="space-y-2">
+          <label class="input-label" for="devin-client-model">{{ t('keys.useKeyModal.devin.model') }}</label>
+          <select
+            id="devin-client-model"
+            v-model="devinSelectedModel"
+            data-testid="devin-client-model"
+            class="input"
+            :disabled="codexModelManifestState !== 'ready' || !codexCatalogModelSlugs.length"
+          >
+            <option value="" disabled>{{ t('keys.useKeyModal.devin.selectModel') }}</option>
+            <option v-for="model in codexCatalogModelSlugs" :key="model" :value="model">{{ model }}</option>
+          </select>
+          <p v-if="codexModelManifestState === 'loading'" role="status" data-testid="devin-models-loading" class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('keys.useKeyModal.devin.modelsLoading') }}
+          </p>
+          <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('keys.useKeyModal.devin.description') }}</p>
+          <label v-if="['opencode', 'omo', 'omp'].includes(activeClientTab)" class="flex items-center gap-2 text-sm">
+            <input v-model="devinKeyFromEnv" type="checkbox" data-testid="devin-key-from-env" />
+            {{ t('keys.useKeyModal.devin.keyFromEnv') }}
+          </label>
+          <button
+            type="button"
+            data-testid="devin-models-refresh"
+            class="btn btn-secondary btn-sm"
+            :disabled="codexModelManifestState === 'loading' || !apiKey"
+            @click="loadCodexModelManifest"
+          >{{ t('keys.useKeyModal.devin.refreshModels') }}</button>
+          <p v-if="codexModelManifestState === 'error'" role="alert" data-testid="devin-models-error" :data-timeout="devinModelManifestTimedOut" class="text-xs text-amber-700 dark:text-amber-300">
+            {{ t(devinModelManifestTimedOut ? 'keys.useKeyModal.devin.modelsTimeout' : 'keys.useKeyModal.codexModelCatalog.errorDescription') }}
+          </p>
+          <p v-else-if="codexModelManifestState === 'ready' && !codexCatalogModelSlugs.length" role="status" class="text-xs">
+            {{ t('keys.useKeyModal.devin.noModels') }}
+          </p>
+          <label v-if="activeClientTab === 'omp'" class="input-label">
+            {{ t('keys.useKeyModal.devin.ompProfile') }}
+            <select v-model="devinOmpProfile" data-testid="devin-omp-profile" class="input">
+              <option value="compatibility">{{ t('keys.useKeyModal.devin.ompCompatibility') }}</option>
+              <option value="default">{{ t('keys.useKeyModal.devin.ompDefault') }}</option>
+            </select>
+          </label>
+          <p v-if="devinOmpDefaultBlocked" role="alert" data-testid="devin-omp-incompatible" class="text-sm text-amber-700 dark:text-amber-300">
+            {{ t('keys.useKeyModal.devin.ompDefaultBlocked') }}
+          </p>
+          <button
+            v-if="codexModelManifestState === 'ready' && devinSelectedModel && (activeClientTab === 'codex' || activeClientTab === 'claude')"
+            type="button"
+            class="btn btn-secondary btn-sm"
+            data-testid="devin-ccswitch-import"
+            @click="emit('ccswitchImport', { clientType: activeClientTab === 'codex' ? 'codex' : 'claude', model: devinSelectedModel })"
+          >{{ t('keys.useKeyModal.devin.import') }}</button>
+        </div>
+
+        <section
+          v-if="platform === 'devin'"
+          data-testid="devin-instructions"
+          class="space-y-2 rounded-lg border border-gray-200 p-4 text-sm text-gray-600 dark:border-dark-700 dark:text-gray-300"
+        >
+          <h3 class="font-medium text-gray-900 dark:text-white">{{ t('keys.useKeyModal.devin.instructionsTitle') }}</h3>
+          <p>{{ t('keys.useKeyModal.devin.credentials') }}</p>
+          <p>{{ t('keys.useKeyModal.devin.protocols') }}</p>
+          <p>{{ devinClientInstructions }}</p>
+          <p>{{ t('keys.useKeyModal.devin.fusion') }}</p>
+          <p>{{ t('keys.useKeyModal.devin.check') }}</p>
+        </section>
+
         <!-- Code Blocks (Stacked for multi-file platforms) -->
         <div class="space-y-4">
           <div
             v-for="(file, index) in currentFiles"
             :key="index"
+            data-testid="client-config-file"
+            :data-config-path="file.path"
             class="relative"
           >
             <!-- File Hint (if exists) -->
@@ -173,7 +241,7 @@
         </div>
 
         <section
-          v-if="showCodexModelCatalog"
+          v-if="showCodexModelCatalog && (platform !== 'devin' || activeClientTab === 'codex')"
           data-testid="codex-model-catalog"
           class="overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-dark-700 dark:bg-dark-800/50"
         >
@@ -267,13 +335,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h, watch, type Component } from 'vue'
+import { ref, computed, h, watch, onBeforeUnmount, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { saveAs } from 'file-saver'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildCodexModelCatalogUrl, fetchCodexModelsManifest } from '@/api/codex'
+import { devinOmpConfig, devinOpenCodeConfig } from '@/utils/devinClientConfig'
 import type { GroupPlatform } from '@/types'
 import {
   findCodexCatalogModel,
@@ -293,6 +362,7 @@ interface Props {
 
 interface Emits {
   (e: 'close'): void
+  (e: 'ccswitchImport', config: { clientType: 'codex' | 'claude'; model: string }): void
 }
 
 interface TabConfig {
@@ -321,6 +391,11 @@ type CodexAuthMode = 'legacy' | 'api-key'
 const codexAuthMode = ref<CodexAuthMode>('legacy')
 type CodexModelManifestState = 'idle' | 'loading' | 'ready' | 'error'
 const codexModelManifestState = ref<CodexModelManifestState>('idle')
+const devinSelectedModel = ref('')
+const devinOmpProfile = ref<'compatibility' | 'default'>('compatibility')
+const devinOmpDefaultBlocked = computed(() => props.platform === 'devin' && activeClientTab.value === 'omp'
+  && devinOmpProfile.value === 'default' && devinSelectedModel.value.toLowerCase().startsWith('fusion-'))
+const devinKeyFromEnv = ref(false)
 const codexModelManifestContent = ref('')
 const codexModelManifestModelCount = ref(0)
 const codexModelCatalogMode = ref<'remote' | 'file'>('remote')
@@ -331,11 +406,13 @@ const codexLocalCatalogToml = computed(() => codexModelCatalogMode.value === 'fi
   ? `model_catalog_json = "${CODEX_MODEL_CATALOG_CONFIG_PATH}"\n`
   : '')
 let codexModelManifestController: AbortController | null = null
+let cancelModelManifestTimeout: (() => void) | null = null
+const devinModelManifestTimedOut = ref(false)
 let codexModelManifestRequestID = 0
 
 const showCodexModelCatalog = computed(() =>
   props.show &&
-  (activeClientTab.value === 'codex' ||
+  (props.platform === 'devin' || activeClientTab.value === 'codex' ||
     (props.platform === 'openai' && activeClientTab.value === 'codex-ws'))
 )
 
@@ -359,6 +436,7 @@ const defaultClientTab = computed(() => {
   if (props.claudeCodeOnly) return 'claude'
   switch (props.platform) {
     case 'openai':
+    case 'devin':
       return 'codex'
     case 'grok':
       return 'grok'
@@ -502,6 +580,14 @@ const clientTabs = computed((): TabConfig[] => {
       return [
         { id: 'systemone', label: t('keys.useKeyModal.cliTabs.systemOne'), icon: TerminalIcon }
       ]
+    case 'devin':
+      return [
+        { id: 'codex', label: t('keys.useKeyModal.cliTabs.codexCli'), icon: TerminalIcon },
+        { id: 'claude', label: t('keys.useKeyModal.cliTabs.claudeCode'), icon: TerminalIcon },
+        { id: 'opencode', label: t('keys.useKeyModal.cliTabs.opencode'), icon: TerminalIcon },
+        { id: 'omo', label: 'OMO (OpenCode)', icon: TerminalIcon },
+        { id: 'omp', label: 'OMP', icon: TerminalIcon }
+      ]
     case 'deepseek':
     case 'minimax':
     case 'composite':
@@ -532,7 +618,17 @@ const openaiTabs: TabConfig[] = [
   { id: 'windows', label: 'Windows', icon: WindowsIcon }
 ]
 
-const showShellTabs = computed(() => activeClientTab.value !== 'opencode')
+const showShellTabs = computed(() => !['opencode', 'omo'].includes(activeClientTab.value))
+
+const devinClientInstructions = computed(() => {
+  switch (activeClientTab.value) {
+    case 'omp': return t(`keys.useKeyModal.devin.${devinOmpProfile.value === 'default' ? 'ompDefaultInstructions' : 'ompInstructions'}`)
+    case 'omo': return t('keys.useKeyModal.devin.omoInstructions')
+    case 'opencode': return t('keys.useKeyModal.devin.opencodeInstructions')
+    case 'claude': return t('keys.useKeyModal.devin.claudeInstructions')
+    default: return t('keys.useKeyModal.devin.codexInstructions')
+  }
+})
 
 const showCodexAuthMode = computed(() =>
   props.platform === 'openai' &&
@@ -548,6 +644,7 @@ const currentTabs = computed(() => {
 })
 
 const platformDescription = computed(() => {
+  if (props.platform === 'devin') return t('keys.useKeyModal.devin.description')
   if (activeClientTab.value === 'codex' &&
     props.platform !== 'openai' &&
     props.platform !== 'grok' &&
@@ -594,6 +691,7 @@ const platformDescription = computed(() => {
 })
 
 const platformNote = computed(() => {
+  if (props.platform === 'devin') return t('keys.useKeyModal.devin.note')
   if (activeClientTab.value === 'codex' &&
     props.platform !== 'openai' &&
     props.platform !== 'grok' &&
@@ -655,6 +753,8 @@ const platformNote = computed(() => {
 const showPlatformNote = computed(() => activeClientTab.value !== 'opencode')
 
 function resetCodexModelManifest() {
+  cancelModelManifestTimeout?.()
+  cancelModelManifestTimeout = null
   codexModelManifestController?.abort()
   codexModelManifestController = null
   codexModelManifestRequestID += 1
@@ -662,25 +762,43 @@ function resetCodexModelManifest() {
   codexModelManifestContent.value = ''
   codexModelManifestModelCount.value = 0
   codexModelManifestResponseBytes.value = 0
+  devinSelectedModel.value = ''
+  devinModelManifestTimedOut.value = false
 }
+
+onBeforeUnmount(resetCodexModelManifest)
 
 async function loadCodexModelManifest() {
   if (!showCodexModelCatalog.value || !props.apiKey) return
 
   codexModelManifestController?.abort()
+  cancelModelManifestTimeout?.()
   const controller = new AbortController()
   const requestID = ++codexModelManifestRequestID
   codexModelManifestController = controller
   codexModelManifestState.value = 'loading'
+  devinModelManifestTimedOut.value = false
+  const timeout = props.platform === 'devin' ? setTimeout(() => {
+    if (requestID !== codexModelManifestRequestID) return
+    devinModelManifestTimedOut.value = true
+    codexModelManifestState.value = 'error'
+    controller.abort()
+  }, 15000) : null
+  const clearTimeoutForRequest = () => { if (timeout !== null) clearTimeout(timeout) }
+  cancelModelManifestTimeout = clearTimeoutForRequest
 
   try {
     const result = await fetchCodexModelsManifest(props.baseUrl, props.apiKey, controller.signal)
-    if (requestID !== codexModelManifestRequestID) return
+    if (requestID !== codexModelManifestRequestID || devinModelManifestTimedOut.value) return
     codexModelManifestContent.value = result.content
     codexModelManifestModelCount.value = result.modelCount
     codexModelManifestResponseBytes.value = result.responseBytes
     if (codexModelCatalogOversized.value) codexModelCatalogMode.value = 'file'
     codexModelManifestState.value = 'ready'
+    if (props.platform === 'devin') {
+      const slugs = parseCodexCatalogModels(result.content).map(model => model.slug)
+      if (!slugs.includes(devinSelectedModel.value)) devinSelectedModel.value = slugs[0] || ''
+    }
   } catch (error) {
     const errorName = error && typeof error === 'object' && 'name' in error
       ? String((error as { name?: unknown }).name || '')
@@ -688,8 +806,10 @@ async function loadCodexModelManifest() {
     if (requestID !== codexModelManifestRequestID || errorName === 'AbortError') return
     codexModelManifestState.value = 'error'
   } finally {
+    clearTimeoutForRequest()
     if (requestID === codexModelManifestRequestID) {
       codexModelManifestController = null
+      cancelModelManifestTimeout = null
     }
   }
 }
@@ -710,6 +830,10 @@ function selectCodexCatalogModel(preferredModel: string): string {
   if (codexCatalogModelSlugs.value.includes(preferredModel)) return preferredModel
   return codexCatalogModelSlugs.value[0] || preferredModel
 }
+
+watch(() => props.show && props.platform === 'devin' ? `${props.baseUrl}|${props.apiKey}` : '', context => {
+  if (context) void loadCodexModelManifest()
+}, { immediate: true })
 
 function codexReasoningEffortTomlLine(modelSlug: string): string {
   return formatCodexReasoningEffortTomlLine(
@@ -737,13 +861,17 @@ const comment = (value: string) => wrapToken('text-slate-500', value)
 // Generate file configs based on platform and active tab
 const currentFiles = computed((): FileConfig[] => {
   const baseUrl = props.baseUrl || window.location.origin
-  const apiKey = props.apiKey
+  const apiKey = props.platform === 'devin' && devinKeyFromEnv.value && ['opencode', 'omo', 'omp'].includes(activeClientTab.value)
+    ? (activeClientTab.value === 'omp' ? 'SUB2API_API_KEY' : '{env:SUB2API_API_KEY}')
+    : props.apiKey
   const baseRoot = baseUrl.replace(/\/v1\/?$/, '').replace(/\/+$/, '')
   const ensureV1 = (value: string) => {
     const trimmed = value.replace(/\/+$/, '')
     return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`
   }
   const apiBase = ensureV1(baseRoot)
+  if (props.platform === 'devin' && (!devinSelectedModel.value || codexModelManifestState.value !== 'ready')) return []
+  if (devinOmpDefaultBlocked.value) return []
   const antigravityBase = ensureV1(`${baseRoot}/antigravity`)
   const antigravityGeminiBase = (() => {
     const trimmed = `${baseRoot}/antigravity`.replace(/\/+$/, '')
@@ -754,7 +882,18 @@ const currentFiles = computed((): FileConfig[] => {
     return trimmed.endsWith('/v1beta') ? trimmed : `${trimmed}/v1beta`
   })()
 
-  if (activeClientTab.value === 'opencode') {
+  if (props.platform === 'devin' && activeClientTab.value === 'omp') {
+    const advertisedContext = findCodexCatalogModel(codexModelManifestContent.value, devinSelectedModel.value)?.context_window
+    const config = devinOmpConfig(apiBase, apiKey, devinSelectedModel.value, advertisedContext, devinOmpProfile.value)
+    const directory = activeTab.value === 'unix' ? '~/.omp/agent' : '%USERPROFILE%\\.omp\\agent'
+    const separator = activeTab.value === 'unix' ? '/' : '\\'
+    return [
+      { path: `${directory}${separator}models.yml`, content: JSON.stringify(config.models, null, 2), hint: t('keys.useKeyModal.claudeSettingsHint') },
+      { path: `${directory}${separator}config.yml`, content: JSON.stringify(config.settings, null, 2), hint: t('keys.useKeyModal.devin.mergeConfig') }
+    ]
+  }
+
+  if (activeClientTab.value === 'opencode' || (props.platform === 'devin' && activeClientTab.value === 'omo')) {
     switch (props.platform) {
       case 'anthropic':
         return [generateOpenCodeConfig('anthropic', apiBase, apiKey)]
@@ -769,6 +908,26 @@ const currentFiles = computed((): FileConfig[] => {
         ]
       case 'grok':
         return [generateOpenCodeConfig('grok', apiBase, apiKey)]
+      case 'devin':
+        return [{
+          path: 'opencode.json',
+          content: JSON.stringify(devinOpenCodeConfig(apiBase, apiKey, devinSelectedModel.value, codexCatalogModelSlugs.value, {
+            omo: activeClientTab.value === 'omo'
+          }), null, 2)
+        }, ...(activeClientTab.value === 'omo' ? [{
+          path: '.omo/omo.jsonc',
+          content: JSON.stringify({
+            '[opencode]': {
+              model_fallback: false, runtime_fallback: false,
+              disabled_mcps: ['websearch', 'context7', 'grep_app'],
+              // This native hook inserts text into an earlier user message after
+              // three tools. Fusion requires the prior transcript to stay intact.
+              ...(devinSelectedModel.value.toLowerCase().startsWith('fusion-')
+                ? { disabled_hooks: ['category-skill-reminder'] } : {})
+            }
+          }, null, 2),
+          hint: t('keys.useKeyModal.devin.mergeConfig')
+        }] : [])]
       default:
         return [generateOpenCodeConfig('openai', apiBase, apiKey)]
     }
@@ -802,12 +961,16 @@ const currentFiles = computed((): FileConfig[] => {
       return generateAnthropicFiles(`${baseUrl}/antigravity`, apiKey)
     case 'grok':
       if (activeClientTab.value === 'claude') {
-        return generateGrokClaudeFiles(baseRoot, apiKey)
+        return generateModelClaudeFiles(baseRoot, apiKey, 'grok-4.5')
       }
       if (activeClientTab.value === 'codex') {
         return generateGrokCodexFiles(apiBase, apiKey)
       }
       return generateGrokFiles(apiBase, apiKey)
+    case 'devin':
+      return activeClientTab.value === 'codex'
+        ? generateRoutedCodexFiles(apiBase, apiKey, 'devin')
+        : generateModelClaudeFiles(baseRoot, apiKey, devinSelectedModel.value)
     case 'deepseek':
       if (activeClientTab.value === 'codex') {
         return generateRoutedCodexFiles(apiBase, apiKey, 'deepseek')
@@ -922,16 +1085,16 @@ $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
   ]
 }
 
-function generateGrokClaudeFiles(baseUrl: string, apiKey: string): FileConfig[] {
+function generateModelClaudeFiles(baseUrl: string, apiKey: string, model: string): FileConfig[] {
   const environment = {
     ANTHROPIC_BASE_URL: baseUrl,
     ANTHROPIC_AUTH_TOKEN: apiKey,
-    ANTHROPIC_MODEL: 'grok-4.5',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: 'grok-4.5',
-    ANTHROPIC_DEFAULT_SONNET_MODEL: 'grok-4.5',
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'grok-4.5',
-    ANTHROPIC_DEFAULT_FABLE_MODEL: 'grok-4.5',
-    CLAUDE_CODE_SUBAGENT_MODEL: 'grok-4.5',
+    ANTHROPIC_MODEL: model,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: model,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: model,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+    ANTHROPIC_DEFAULT_FABLE_MODEL: model,
+    CLAUDE_CODE_SUBAGENT_MODEL: model,
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
   }
   let path: string
@@ -941,7 +1104,7 @@ function generateGrokClaudeFiles(baseUrl: string, apiKey: string): FileConfig[] 
     case 'unix':
       path = 'Terminal'
       content = Object.entries(environment)
-        .map(([name, value]) => `export ${name}="${value}"`)
+        .map(([name, value]) => `export ${name}="${value.replace(/[\\"$`]/g, '\\$&')}"`)
         .join('\n')
       break
     case 'cmd':
@@ -953,7 +1116,7 @@ function generateGrokClaudeFiles(baseUrl: string, apiKey: string): FileConfig[] 
     case 'powershell':
       path = 'PowerShell'
       content = Object.entries(environment)
-        .map(([name, value]) => `$env:${name}="${value}"`)
+        .map(([name, value]) => `$env:${name}="${value.replace(/[`"$]/g, '`$&')}"`)
         .join('\n')
       break
     default:
@@ -1322,7 +1485,7 @@ function generateRoutedCodexFiles(
     composite: 'gpt-5.5'
   }
   const preferredModel = preferredModels[platform] || ''
-  const model = selectCodexCatalogModel(preferredModel)
+  const model = platform === 'devin' ? devinSelectedModel.value : selectCodexCatalogModel(preferredModel)
   const labels: Record<GroupPlatform, string> = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
@@ -1337,6 +1500,7 @@ function generateRoutedCodexFiles(
     typesafe: 'TypeSafe / Jev',
     command_code: 'Command Code',
     cline: 'Cline',
+    devin: 'Devin',
     composite: 'Composite'
   }
   const label = labels[platform]
@@ -1346,8 +1510,8 @@ function generateRoutedCodexFiles(
 
   const configContent = `# Codex CLI -> Sub2API ${label} group
 model_provider = "sub2api"
-model = "${model}"
-review_model = "${model}"
+model = "${escapeTomlBasicString(model)}"
+review_model = "${escapeTomlBasicString(model)}"
 disable_response_storage = true
 ${codexLocalCatalogToml.value}
 [model_providers.sub2api]

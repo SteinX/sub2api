@@ -8,6 +8,10 @@ import { buildModelMappingObject, getModelsByPlatform, getPresetMappingsByPlatfo
 import { BUILTIN_PLATFORM_CATALOG, resetPlatformCatalog, setPlatformCatalog } from '@/constants/platformCatalog'
 
 describe('useModelWhitelist', () => {
+  it('uses the authorized catalog instead of Claude model defaults for Devin', () => {
+    expect(getModelsByPlatform('devin')).toEqual([])
+    expect(getPresetMappingsByPlatform('devin')).toEqual([])
+  })
   it('平台清单中没有内置模型列表的多协议供应商不预填白名单', () => {
     setPlatformCatalog({
       ...BUILTIN_PLATFORM_CATALOG,

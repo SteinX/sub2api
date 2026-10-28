@@ -61,6 +61,9 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	if account.Platform == PlatformDevin {
+		return s.forwardDevin(ctx, c, account, body, "chat", promptCacheKey, defaultMappedModel)
+	}
 	return s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
 }
 

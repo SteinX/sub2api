@@ -1491,6 +1491,15 @@ export interface GrokBillingSummary {
 export interface AccountUsageInfo {
   source?: 'passive' | 'active'
   updated_at: string | null
+  daily?: UsageProgress | null
+  devin_usage?: {
+    plan_name?: string
+    available_prompt_credits?: number | null
+    available_flow_credits?: number | null
+    available_flex_credits?: number | null
+    acu_consumed?: number | null
+    acu_limit?: number | null
+  } | null
   five_hour: UsageProgress | null
   seven_day: UsageProgress | null
   seven_day_sonnet: UsageProgress | null

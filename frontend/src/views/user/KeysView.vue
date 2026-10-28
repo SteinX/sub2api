@@ -394,6 +394,8 @@
             <div class="flex items-center gap-1">
               <!-- Use Key Button -->
               <button
+                data-testid="key-use"
+                :data-key-name="row.name"
                 @click="openUseKeyModal(row)"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-green-50 hover:text-green-600 dark:hover:bg-green-900/20 dark:hover:text-green-400"
               >
@@ -491,15 +493,13 @@
             <label
               v-for="provider in createProviderOptions"
               :key="provider.value"
-              class="relative min-w-0"
-              :class="provider.count === 0 ? 'cursor-not-allowed' : 'cursor-pointer'"
+              class="relative min-w-0 cursor-pointer"
             >
               <input
                 type="radio"
                 name="key-provider"
                 :value="provider.value"
                 :checked="createProvider === provider.value"
-                :disabled="provider.count === 0"
                 class="peer sr-only"
                 @change="selectCreateProvider(provider.value)"
               />
@@ -529,7 +529,10 @@
             </label>
           </div>
           <p class="mt-2 text-xs leading-5 text-gray-500 dark:text-gray-400" aria-live="polite">
-            {{ groups.length === 0 ? t('common.noGroupsAvailable') : t(`keys.providerHints.${createProvider}`) }}
+            {{ t(`keys.providerHints.${createProvider}`) }}
+          </p>
+          <p v-if="formGroupOptions.length === 0" class="mt-1 text-xs leading-5 text-amber-700 dark:text-amber-400" role="status">
+            {{ t('keys.providerGroupsUnavailable') }}
           </p>
         </fieldset>
 
@@ -1075,6 +1078,7 @@
       :api-key="selectedKey?.key || ''"
       :base-url="publicSettings?.api_base_url || ''"
       :platform="selectedKey?.group?.platform || null"
+      @ccswitch-import="config => selectedKey && executeCcsImport(selectedKey, config.clientType, config.model)"
       :claude-code-only="selectedKey?.group?.claude_code_only || false"
       :allow-messages-dispatch="selectedKey?.group?.allow_messages_dispatch || false"
       @close="closeUseKeyModal"
@@ -1548,7 +1552,7 @@ const selectCreateProvider = (provider: KeyGroupProvider) => {
 // Also handles groups arriving after the create dialog has already opened.
 watch([showCreateModal, createProviderOptions], ([isOpen, providers], [wasOpen]) => {
   if (!isOpen) return
-  if (!wasOpen || !providers.some((provider) => provider.value === createProvider.value && provider.count > 0)) {
+  if (!wasOpen || providers.some((provider) => provider.count > 0) && !formGroupOptions.value.length) {
     selectCreateProvider(providers.find((provider) => provider.count > 0)?.value ?? 'anthropic')
   }
   if (!formGroupOptions.value.some((group) => group.value === formData.value.group_id)) {
@@ -2011,6 +2015,10 @@ const resetRateLimitUsage = async () => {
 
 const importToCcswitch = (row: ApiKey) => {
   const platform = row.group?.platform || 'anthropic'
+  if (platform === 'devin') {
+    openUseKeyModal(row)
+    return
+  }
 
   // For antigravity platform, show client selection dialog
   if (platform === 'antigravity') {
@@ -2023,7 +2031,7 @@ const importToCcswitch = (row: ApiKey) => {
   executeCcsImport(row, platform === 'gemini' ? 'gemini' : 'claude')
 }
 
-const executeCcsImport = (row: ApiKey, clientType: CcSwitchClientType) => {
+const executeCcsImport = (row: ApiKey, clientType: CcSwitchClientType, model?: string) => {
   const baseUrl = publicSettings.value?.api_base_url || window.location.origin
   const platform = row.group?.platform || 'anthropic'
 
@@ -2034,6 +2042,7 @@ const executeCcsImport = (row: ApiKey, clientType: CcSwitchClientType) => {
     platform,
     clientType,
     providerName,
+    model,
     apiKey: row.key,
     usageScript
   })

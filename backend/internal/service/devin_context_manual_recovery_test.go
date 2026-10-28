@@ -1,0 +1,163 @@
+//go:build unit
+
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
+	mc "github.com/Wei-Shaw/sub2api/internal/pkg/managedcontext"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+)
+
+func TestContextCompactRetryRecoversWithoutInferenceAdmission(t *testing.T) {
+	for _, interruptedAt := range []string{"billing", "legacy_billing", "application", "worker_receipt", "stateless_billing"} {
+		t.Run(interruptedAt, func(t *testing.T) { testContextManualRecovery(t, interruptedAt) })
+	}
+}
+
+func testContextManualRecovery(t *testing.T, interruptedAt string) {
+	t.Helper()
+	cfg, key := contextEnabledFixture()
+	models := []*pb.ClientModelConfig{{ModelUid: "gpt-5.5", MaxTokens: 65536, ModelInfo: &pb.ModelInfo{MaxOutputTokens: 4096, ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}}}}
+	a := &Account{ID: 7, Platform: PlatformDevin, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true, Concurrency: 1, GroupIDs: []int64{9}, Credentials: map[string]any{"access_token": "synthetic-token"}, Extra: devinCatalogExtra(models, "fixture")}
+	a.Extra[DevinContextEnabledExtra], a.Extra[DevinContextAutoExtra] = true, false
+	calls := 0
+	upstream := &devinHTTP{handle: func(r *http.Request) (*http.Response, error) {
+		var reply proto.Message
+		switch r.URL.Path {
+		case devin.ModelsPath:
+			reply = &pb.GetCliModelConfigsResponse{ClientModelConfigs: models}
+		case devin.UserJWTPath:
+			reply = &pb.GetUserJwtResponse{UserJwt: "synthetic-jwt"}
+		case devin.ChatPath:
+			calls++
+			text := "ready"
+			if calls == 1 {
+				text = strings.Repeat("old evidence ", 3300)
+			} else if calls == 3 {
+				text = `{"goal":"Keep the API","current_state":"Completed evidence summarized","decisions":[],"changes":[],"evidence":[],"checks":[],"open_questions":[],"next_steps":[],"files":[]}`
+			}
+			require.LessOrEqual(t, calls, 3, "recovery must not issue another provider call")
+			message := &pb.GetChatMessageResponse{ActualModelUid: proto.String("gpt-5.5"), MessageId: "physical", StopReason: pb.StopReason_STOP_REASON_STOP_PATTERN, DeltaText: text, Usage: &pb.ModelUsageStats{InputTokens: 100, OutputTokens: 20, BillingModelUid: "gpt-5.5"}}
+			b, err := proto.Marshal(message)
+			require.NoError(t, err)
+			return devinReply(200, append(devinTestFrame(0, b), devinTestFrame(2, []byte(`{}`))...)), nil
+		default:
+			t.Fatalf("unexpected endpoint %s", r.URL.Path)
+		}
+		b, err := proto.Marshal(reply)
+		require.NoError(t, err)
+		return devinReply(200, b), nil
+	}}
+	repo := &fusionAccountRepo{account: a}
+	billing := &fusionBillingRepo{}
+	s := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{inserted: true}, billing, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	s.cfg, s.accountRepo = cfg, repo
+	cfg.Billing.InflightReservation.Enabled = true
+	s.billingCacheService = NewBillingCacheService(&fusionTestBillingCache{newMemInflightCache(100)}, nil, nil, nil, nil, nil, cfg, nil)
+	defer s.billingCacheService.Stop()
+	s.concurrencyService = NewConcurrencyService(&stubConcurrencyCacheForTest{acquireResult: true})
+	s.devin = NewDevinService(repo, nil, upstream, cfg, nil)
+	store := newContextGatewayStore()
+	s.devin.contextStore = store
+	defer func() { require.NoError(t, s.devin.managedEngine().Close(context.Background())) }()
+	keys := &APIKeyService{apiKeyRepo: &apiKeyRepoStub{apiKey: key}}
+	run := func(id, mode, session string, body []byte, revision int64) (*ContextRunResult, error) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.ClientRequestID, "shared-client-id"))
+		c.Request.Header.Set(mc.HeaderMode, "managed")
+		c.Request.Header.Set("Idempotency-Key", id)
+		return s.RunContext(c, key, keys, body, mode, session, revision, 0)
+	}
+	first, err := run("first", "responses", "", []byte(`{"model":"gpt-5.5","input":"Keep the API","max_output_tokens":128}`), 0)
+	require.NoError(t, err)
+	body, _ := json.Marshal(map[string]any{"model": "gpt-5.5", "input": "Continue", "previous_response_id": first.Response.ID, "max_output_tokens": 128})
+	second, err := run("second", "responses", first.SessionID, body, 0)
+	require.NoError(t, err)
+	body, _ = json.Marshal(map[string]any{"mode": "internal", "session_id": second.SessionID, "lane": "main", "expected_revision": second.Revision})
+	mode, sessionID, revision := "internal", second.SessionID, second.Revision
+	if interruptedAt == "stateless_billing" {
+		mode, sessionID, revision = "stateless", "", 0
+		body, _ = json.Marshal(map[string]any{"mode": mode, "model": "gpt-5.5", "max_output_tokens": 128, "input": []map[string]any{{"role": "user", "content": "Keep the API"}, {"role": "assistant", "content": strings.Repeat("old evidence ", 3300)}, {"role": "user", "content": "Continue"}}})
+	}
+	billing.fail = interruptedAt != "application"
+	interrupted := false
+	if interruptedAt == "application" {
+		store.fail = func(r *mc.Record) bool {
+			var session mc.Session
+			if !interrupted && r.Kind == "session" && json.Unmarshal(r.Data, &session) == nil && session.Epoch > 0 {
+				interrupted = true
+				return true
+			}
+			return false
+		}
+	} else if interruptedAt == "worker_receipt" {
+		store.fail = func(r *mc.Record) bool {
+			if !interrupted && r.Kind == "job" && (r.Status == "failed" || r.Status == "needs_retry") {
+				interrupted = true
+				return true
+			}
+			return false
+		}
+	}
+	failed, err := run("compact", mode, sessionID, body, revision)
+	require.Error(t, err)
+	require.Equal(t, 3, calls)
+	if interruptedAt == "legacy_billing" {
+		r, readErr := store.Read(context.Background(), contextScope(key), "job", failed.Job.ID)
+		require.NoError(t, readErr)
+		var j mc.Job
+		require.NoError(t, json.Unmarshal(r.Data, &j))
+		j.State, j.Reason, r.Status = "failed", "context_billing_pending", "failed"
+		r.Data, _ = json.Marshal(j)
+		require.NoError(t, store.CAS(context.Background(), r, nil, nil, nil))
+	}
+	if interruptedAt != "application" {
+		require.Len(t, billing.commands, 2)
+		if interruptedAt == "worker_receipt" {
+			require.True(t, interrupted)
+		}
+	} else {
+		require.True(t, interrupted)
+		require.Len(t, billing.commands, 3)
+	}
+	billing.fail = false
+	a.Schedulable, a.Extra[DevinContextEnabledExtra] = false, false
+	s.concurrencyService = nil
+	result, err := run("compact", mode, sessionID, body, revision)
+	require.NoError(t, err)
+	require.True(t, result.Replayed)
+	require.Len(t, billing.commands, 3, "the known summary is charged exactly once")
+	if mode == "internal" {
+		require.True(t, result.Job.Accounted)
+		session, _, err := s.devin.managedEngine().LoadSession(context.Background(), contextScope(key), second.SessionID)
+		require.NoError(t, err)
+		require.Zero(t, session.ReservedBytes)
+		require.Empty(t, session.ReservationOperationID)
+		require.Equal(t, 100, session.MaintenanceUsage.InputTokens)
+		require.Equal(t, "applied", result.Job.State)
+		require.Empty(t, result.Job.Reason, "recovered jobs do not keep stale billing errors")
+		require.Equal(t, uint64(1), session.Epoch)
+		require.LessOrEqual(t, result.Job.After, result.Job.Target, "recovery retains the original validated model target")
+	} else {
+		require.Equal(t, "compacted", result.Compact.Status)
+		require.Less(t, result.Compact.After, result.Compact.Before)
+	}
+	repo.lookupErr = errors.New("account no longer available")
+	_, err = run("compact", mode, sessionID, body, revision)
+	require.NoError(t, err, "fully settled replay does not need account metadata")
+	require.Equal(t, 3, calls)
+	require.Len(t, billing.commands, 3)
+}

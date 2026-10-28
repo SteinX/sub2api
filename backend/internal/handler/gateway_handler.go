@@ -1185,6 +1185,45 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 	// Get available models from account configurations for the selected group platform.
 	availableModels := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, platform)
+	if requested := c.Query("pricing_models"); requested != "" {
+		models := strings.Split(requested, ",")
+		if platform != service.PlatformDevin || apiKey == nil || h.openAIGatewayService == nil || len(models) > 16 || len(requested) > 2048 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_pricing_discovery", "message": "pricing discovery requires a Devin key and at most 16 model UIDs"}})
+			return
+		}
+		visible := availableModels
+		if apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
+			visible = apiKey.Group.ModelAllowlist.FilterForListing(visible)
+		}
+		allowed := make(map[string]bool, len(visible))
+		for _, model := range visible {
+			allowed[model] = true
+		}
+		data := make([]service.DevinPricingAdmission, 0, len(models))
+		contextTokens, outputTokens := 0, 0
+		if c.Query("context_tokens") != "" || c.Query("output_tokens") != "" {
+			var parseErr, errorOut error
+			contextTokens, parseErr = strconv.Atoi(c.Query("context_tokens"))
+			outputTokens, errorOut = strconv.Atoi(c.Query("output_tokens"))
+			if parseErr != nil || errorOut != nil || contextTokens < 1 || contextTokens > 8_000_000 || outputTokens < 1 || outputTokens > 32768 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_pricing_token_bound"}})
+				return
+			}
+		}
+		for _, model := range models {
+			if !allowed[model] {
+				data = append(data, service.DevinPricingAdmission{Model: model, Source: "not_advertised"})
+				continue
+			}
+			if contextTokens > 0 {
+				data = append(data, h.openAIGatewayService.InspectDevinContextPrice(c.Request.Context(), apiKey, model, contextTokens, outputTokens))
+			} else {
+				data = append(data, h.openAIGatewayService.InspectDevinPricing(c.Request.Context(), apiKey, model))
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"object": "devin.pricing_admission", "data": data})
+		return
+	}
 	if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
 		source := modelListingSource(platform, availableModels, defaultModelIDsForPlatform(platform))
 		writeAllowlistedModelsList(c, platform, apiKey.Group.ModelAllowlist.FilterForListing(source))
@@ -1197,6 +1236,10 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	}
 
 	// Fallback to default models
+	if platform == service.PlatformDevin {
+		writeModelsList(c, platform, availableModels)
+		return
+	}
 	if platform == service.PlatformOpenAI {
 		writeModelsListResponse(c, openai.DefaultModels)
 		return
@@ -1339,6 +1382,14 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 }
 
 func writeModelsList(c *gin.Context, platform string, modelIDs []string) {
+	if platform == service.PlatformDevin {
+		rows := make([]gin.H, 0, len(modelIDs))
+		for _, id := range modelIDs {
+			rows = append(rows, gin.H{"id": id, "object": "model", "owned_by": "devin"})
+		}
+		c.JSON(200, gin.H{"object": "list", "data": rows})
+		return
+	}
 	if platform == service.PlatformOpenAI {
 		writeOpenAIModelsList(c, modelIDs)
 		return
@@ -1480,6 +1531,8 @@ func defaultCodexModelIDsForPlatform(platform string) []string {
 
 func defaultModelIDsForPlatform(platform string) []string {
 	switch platform {
+	case service.PlatformDevin:
+		return nil // The account's credential-scoped catalog is authoritative.
 	case service.PlatformOpenAI:
 		return openai.DefaultModelIDs()
 	case service.PlatformGemini:

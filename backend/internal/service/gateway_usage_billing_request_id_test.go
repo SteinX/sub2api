@@ -28,11 +28,25 @@ func TestResolveUsageBillingRequestID_ClientWinsOverPlainUpstream(t *testing.T) 
 func TestIsForcedUsageBillingRequestID(t *testing.T) {
 	t.Parallel()
 	require.True(t, isForcedUsageBillingRequestID("web_search:x"))
+	require.True(t, isForcedUsageBillingRequestID("fusion:attempt-1"))
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "same-public-id")
+	require.Equal(t, "fusion:attempt-1", resolveUsageBillingRequestID(ctx, "fusion:attempt-1"))
+	require.Equal(t, "fusion:attempt-2", resolveUsageBillingRequestID(ctx, "fusion:attempt-2"))
 	require.True(t, isForcedUsageBillingRequestID("grok-video:task-1"))
 	require.True(t, isForcedUsageBillingRequestID("grok_audio:up-1"))
 	require.True(t, isForcedUsageBillingRequestID("grok_realtime:sess-1"))
 	require.True(t, isForcedUsageBillingRequestID(GeminiCachedContentCreateUsageRequestID("abc")))
 	require.False(t, isForcedUsageBillingRequestID("resp_abc"))
+}
+
+func TestContextBillingAttemptsKeepTheirIDsAcrossIngressAndRecovery(t *testing.T) {
+	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "shared-turn")
+	ctx = context.WithValue(ctx, ctxkey.RequestID, "local-turn")
+	for _, id := range []string{"context:summary-attempt", "context:inference-attempt"} {
+		require.True(t, isForcedUsageBillingRequestID(id))
+		require.Equal(t, id, resolveUsageBillingRequestID(ctx, id))
+		require.Equal(t, id, resolveUsageBillingRequestID(context.Background(), id), "recovery keeps the original physical money event")
+	}
 }
 
 func TestGeminiCachedContentUsageRequestIDs(t *testing.T) {

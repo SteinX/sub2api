@@ -466,3 +466,14 @@ func TestGatewayRoutesOpenAICountTokensPathIsRegistered(t *testing.T) {
 	router.ServeHTTP(w, req)
 	require.NotEqual(t, http.StatusNotFound, w.Code)
 }
+
+func TestGatewayManagedContextRoutes(t *testing.T) {
+	router := newGatewayRoutesTestRouter(service.PlatformDevin)
+	registered := map[string]bool{}
+	for _, r := range router.Routes() {
+		registered[r.Method+" "+r.Path] = true
+	}
+	for _, route := range []string{"POST /v1/context/compact", "GET /v1/context/sessions/:id", "POST /v1/context/sessions/:id/cancel", "GET /v1/context/sessions/:id/history", "GET /v1/context/sessions/:id/history/:message_id", "GET /v1/context/compactions/:job_id"} {
+		require.True(t, registered[route], route)
+	}
+}

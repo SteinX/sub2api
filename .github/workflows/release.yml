@@ -1,4 +1,5 @@
 name: Release
+run-name: Release ${{ inputs.tag || github.ref_name }}${{ inputs.dry_run == true && ' (dry run)' || '' }}${{ (inputs.simple_release == true || vars.SIMPLE_RELEASE == 'true') && ' (simple)' || '' }}
 
 on:
   push:
@@ -35,6 +36,11 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
       owner_lower: ${{ steps.plan.outputs.owner_lower }}
@@ -50,7 +56,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - name: Preserve tooling for releases of older tags
-        run: cp -R .github/release-tools "$RUNNER_TEMP/release-tools"
+        run: |
+          cp -R .github/release-tools "$RUNNER_TEMP/release-tools"
+          cp -R tools/devin-acceptance "$RUNNER_TEMP/release-tools/devin-acceptance"
       - name: Checkout selected application source
         uses: actions/checkout@v6
         with:
@@ -69,6 +77,15 @@ jobs:
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" plan "${args[@]}"
+      - name: Require declared validation and current review/security state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACCEPTANCE_REF: ${{ inputs.tag || github.ref_name }}
+          ACCEPTANCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          args=(--ref "$ACCEPTANCE_REF" --repository "$ACCEPTANCE_REPOSITORY")
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          python "$RUNNER_TEMP/release-tools/devin-acceptance/release_guard.py" "${args[@]}"
       - uses: actions/upload-artifact@v7
         with:
           name: release-tooling
@@ -196,12 +213,17 @@ jobs:
     permissions:
       contents: write
       packages: write
+      actions: read
+      checks: read
+      pull-requests: read
     env:
       SIMPLE_RELEASE: ${{ needs.prepare.outputs.simple }}
       DRY_RUN: ${{ needs.prepare.outputs.dry_run }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
       RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+      # Forks publish to their own GHCR namespace without upstream credentials.
+      PUBLISH_DOCKERHUB: ${{ github.event.repository.fork != true || vars.PUBLISH_DOCKERHUB == 'true' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -234,7 +256,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
-        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}
+        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.PUBLISH_DOCKERHUB == 'true' && env.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -246,16 +268,28 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
+          username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Recheck declared validation and exact-SHA review/security before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--ref "$RELEASE_TAG" --repository "${{ github.repository }}")
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          python "$RUNNER_TEMP/release-tools/devin-acceptance/release_guard.py" "${args[@]}"
       - name: Build images and publish manifests
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'skip' }}
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_USERNAME: ${{ env.PUBLISH_DOCKERHUB == 'true' && secrets.DOCKERHUB_USERNAME || 'skip' }}
         run: bash "$RUNNER_TEMP/release-tools/release-images.sh"
       - name: Get annotated tag notes
         id: tag_message
         run: |
-          TAG_MESSAGE=$(git tag -l --format='%(contents:body)' "$RELEASE_TAG")
+          ANNOTATION=$(git tag -l --format='%(contents)' "$RELEASE_TAG")
+          if grep -q '^Sub2API-Reviewed-CI-Release-v1: ' <<< "$ANNOTATION"; then
+            echo 'reviewed_ci=true' >> "$GITHUB_OUTPUT"
+          fi
+          TAG_MESSAGE=$(git tag -l --format='%(contents:body)' "$RELEASE_TAG" | sed '/^Sub2API-Devin-Acceptance-v1: /d; /^Sub2API-Reviewed-CI-Release-v1: /d')
           DELIMITER="TAG_MESSAGE_$(openssl rand -hex 16)"
           {
             echo "message<<$DELIMITER"
@@ -267,6 +301,13 @@ jobs:
           args=(publish --output "$RUNNER_TEMP/goreleaser.publisher.yaml")
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" config "${args[@]}"
+      - name: Recheck declared validation and exact-SHA review/security before publishing archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(--ref "$RELEASE_TAG" --repository "${{ github.repository }}")
+          if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
+          python "$RUNNER_TEMP/release-tools/devin-acceptance/release_guard.py" "${args[@]}"
       - name: Publish existing archives and release notes
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -279,7 +320,7 @@ jobs:
           GITHUB_REPO_OWNER: ${{ github.repository_owner }}
           GITHUB_REPO_NAME: ${{ github.event.repository.name }}
           GITHUB_REPO_OWNER_LOWER: ${{ needs.prepare.outputs.owner_lower }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'skip' }}
+          DOCKERHUB_USERNAME: ${{ env.PUBLISH_DOCKERHUB == 'true' && secrets.DOCKERHUB_USERNAME || 'skip' }}
       - name: Upload dry-run checksums and metadata
         if: ${{ env.DRY_RUN == 'true' }}
         uses: actions/upload-artifact@v7
@@ -294,7 +335,7 @@ jobs:
 
       # Update DockerHub description
       - name: Update DockerHub description
-        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}
+        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.PUBLISH_DOCKERHUB == 'true' && env.DOCKERHUB_USERNAME != '' }}
         uses: peter-evans/dockerhub-description@v5
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -307,7 +348,7 @@ jobs:
 
       # Send Telegram notification
       - name: Send Telegram Notification
-        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' }}
+        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && steps.tag_message.outputs.reviewed_ci != 'true' && (github.event.repository.fork != true || vars.PUBLISH_TELEGRAM == 'true') }}
         env:
           TAG_MESSAGE: ${{ steps.tag_message.outputs.message }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -377,7 +418,9 @@ jobs:
 
   sync-version-file:
     needs: [prepare, release]
-    if: ${{ needs.release.result == 'success' && needs.prepare.outputs.dry_run != 'true' }}
+    # Keep main's VERSION aligned with upstream; fork tags set the built VERSION
+    # in prepare. Writing the fork suffix to main would conflict on the next sync.
+    if: ${{ needs.release.result == 'success' && needs.prepare.outputs.dry_run != 'true' && !(github.repository == 'SteinX/sub2api' && contains(needs.prepare.outputs.tag, '-stx.')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

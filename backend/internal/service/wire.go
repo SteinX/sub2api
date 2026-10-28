@@ -11,12 +11,20 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	mc "github.com/Wei-Shaw/sub2api/internal/pkg/managedcontext"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
+
+func ProvideDevinService(repo AccountRepository, proxyRepo ProxyRepository, upstream HTTPUpstream, cfg *config.Config, redisClient *redis.Client, contexts mc.Store) *DevinService {
+	svc := NewDevinService(repo, proxyRepo, upstream, cfg, devin.NewRedisSessionStore(redisClient))
+	svc.contextStore = contexts
+	return svc
+}
 
 func ProvideGrokOAuthService(proxyRepo ProxyRepository, oauthClient GrokOAuthClient, cfg *config.Config, redisClient *redis.Client) *GrokOAuthService {
 	svc := NewGrokOAuthService(proxyRepo, oauthClient, cfg)
@@ -234,6 +242,7 @@ func ProvideAccountUsageService(
 	identityCache IdentityCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
 	openAIGatewayService *OpenAIGatewayService,
+	devinService *DevinService,
 ) *AccountUsageService {
 	service := NewAccountUsageService(
 		accountRepo,
@@ -249,6 +258,7 @@ func ProvideAccountUsageService(
 		tlsFPProfileService,
 	)
 	service.agentIdentityWS = openAIGatewayService
+	service.devinService = devinService
 	return service
 }
 
@@ -264,6 +274,7 @@ func ProvideAccountTestService(
 	openAIGatewayService *OpenAIGatewayService,
 	settingService *SettingService,
 	pluginManager *PluginManager,
+	devinService *DevinService,
 ) *AccountTestService {
 	service := NewAccountTestService(
 		accountRepo,
@@ -279,6 +290,7 @@ func ProvideAccountTestService(
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
+	service.devin = devinService
 	return service
 }
 
@@ -820,6 +832,7 @@ func ProvideSettingService(scopedKeys ScopedAdminKeyRepository, settingRepo Sett
 	claude.SetCLIVersionResolver(func() string {
 		return svc.GetClaudeCodeClientVersion(context.Background())
 	})
+	devin.SetClientIdentityResolver(svc.GetDevinClientIdentity)
 	return svc
 }
 
@@ -857,6 +870,8 @@ func ProvideAPIKeyService(
 
 // ProviderSet is the Wire provider set for all services
 var ProviderSet = wire.NewSet(
+	NewContextMaintenance,
+	ProvideDevinService,
 	// Core services
 	ProvideAuthService,
 	NewPasskeyService,

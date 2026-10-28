@@ -1,0 +1,328 @@
+name: Devin contracts and client regressions
+
+on:
+  pull_request:
+    paths:
+      - 'Makefile'
+      - 'backend/**'
+      - 'deploy/devin-e2e.sh'
+      - 'deploy/docker-compose.devin-e2e.yml'
+      - 'deploy/devin-agent-e2e.sh'
+      - 'deploy/devin-long-e2e.sh'
+      - 'tools/devin-e2e-clients/**'
+      - 'tools/devin-acceptance/**'
+      - 'deploy/devin-user-journeys.sh'
+      - 'frontend/src/components/keys/**'
+      - 'frontend/src/views/user/KeysView.vue'
+      - 'frontend/src/utils/devinClientConfig.ts'
+      - 'frontend/src/i18n/**'
+      - 'frontend/test-support/**'
+      - '.github/workflows/devin-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Makefile'
+      - 'backend/**'
+      - 'deploy/devin-e2e.sh'
+      - 'deploy/docker-compose.devin-e2e.yml'
+      - 'deploy/devin-agent-e2e.sh'
+      - 'deploy/devin-long-e2e.sh'
+      - 'tools/devin-e2e-clients/**'
+      - 'tools/devin-acceptance/**'
+      - 'deploy/devin-user-journeys.sh'
+      - 'frontend/src/components/keys/**'
+      - 'frontend/src/views/user/KeysView.vue'
+      - 'frontend/src/utils/devinClientConfig.ts'
+      - 'frontend/src/i18n/**'
+      - 'frontend/test-support/**'
+      - '.github/workflows/devin-e2e.yml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Plan onboards the PAT without inference; live consumes test-account credits.'
+        type: choice
+        options: [mock, plan, live]
+        default: mock
+      allow_paid:
+        description: 'Authorize selected batch: protocol 6; agent canary at most 3; agent matrix at most 48 gateway requests. No provider spending cap.'
+        type: boolean
+        default: false
+      suite:
+        description: 'Protocol/client contracts only; neither suite certifies product user E2E'
+        type: choice
+        options: [protocol, agents]
+        default: protocol
+      agent_batch:
+        description: 'Canary: one OMP direct read; matrix: 42 client launches, both model kinds'
+        type: choice
+        options: [canary, matrix]
+        default: canary
+
+permissions:
+  contents: read
+
+jobs:
+  mock:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'mock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Exercise the production gateway with synthetic Devin RPCs
+        env:
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-e2e
+        run: make test-devin-contracts-mock
+      - name: Exercise long Fusion tools, compaction and restart with synthetic RPCs
+        env:
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-long
+        run: make test-devin-fusion-contracts-mock
+      - name: Save test results (exclude private backend log and binary)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-e2e-mock
+          path: |
+            ${{ runner.temp }}/devin-e2e/results.jsonl
+            ${{ runner.temp }}/devin-e2e/provenance.txt
+            ${{ runner.temp }}/devin-e2e/smoke-plan.json
+            ${{ runner.temp }}/devin-long/results.jsonl
+            ${{ runner.temp }}/devin-long/provenance.txt
+            ${{ runner.temp }}/devin-long/long-workflow.json
+            ${{ runner.temp }}/devin-long/long-context.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  clients-mock:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'mock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tools/devin-e2e-clients/package-lock.json
+      - name: Install locked Linux clients without lifecycle scripts
+        run: npm ci --prefix tools/devin-e2e-clients --ignore-scripts --omit=optional --no-audit --no-fund
+      - name: Check runner boundaries
+        run: python3 -m unittest discover -s tools/devin-e2e-clients -p 'test_*.py'
+      - name: Real clients through current gateway and synthetic Devin
+        env:
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-agents
+        run: make test-devin-client-contracts-mock
+      - name: Save structural client and role evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-agent-mock
+          path: |
+            ${{ runner.temp }}/devin-agents/results.jsonl
+            ${{ runner.temp }}/devin-agents/provenance.txt
+            ${{ runner.temp }}/devin-agents/agent-*.json
+            ${{ runner.temp }}/devin-agents/fusion-*.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  user-journey-shards:
+    name: user-journeys-${{ matrix.shard }}
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'mock'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [contracts, matrix]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install pinned clients and production UI dependencies
+        run: |
+          npm ci --prefix tools/devin-e2e-clients --ignore-scripts --omit=optional --no-audit --no-fund
+          pnpm --dir frontend install --frozen-lockfile
+      - name: Install the public search executable before client isolation
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
+          rg --version
+      - name: Validate acceptance negative cases and runner boundaries
+        # Docker is already required for the isolated PostgreSQL/Redis fixture.
+        # This adds no privileged mode, host networking or daemon permission.
+        run: python3 tools/devin-e2e-clients/container_sandbox.py prepare
+      - name: Validate admission, filesystem and cleanup boundaries
+        if: matrix.shard == 'contracts'
+        env:
+          DEVIN_SANDBOX_INTEGRATION: 'true'
+        run: |
+          make test-devin-acceptance
+          python3 -m unittest discover -s tools/devin-e2e-clients -p 'test_*.py'
+          cd backend
+          go test -mod=readonly -race -tags=devine2e ./internal/devine2e -run '^Test(JourneyStop|JourneyToolLimit|ApprovedJourney|ClientContractAndProject|ProjectAdmission|FusionAudit)' -count=1
+      - name: Product copy buttons to actual CLI project journeys with synthetic models
+        env:
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-user-journeys
+          DEVIN_JOURNEY_CI_SHARD: ${{ matrix.shard }}
+          DEVIN_JOURNEY_CAPABILITIES: 'true'
+          # Negative cases hard-stop and restart their own isolated preview.
+          # This mock-only suite bound does not change an approved live plan.
+          DEVIN_E2E_TIMEOUT_SECONDS: '1100'
+        run: make test-devin-user-journeys-mock
+      - name: Validate source-bound mock evidence (never release-eligible)
+        if: matrix.shard == 'matrix'
+        env:
+          REPORT: ${{ runner.temp }}/devin-user-journeys/client-journeys.json
+        run: python3 tools/devin-acceptance/acceptance.py verify --mode client_mock --report "$REPORT" --commit "$(git rev-parse HEAD)" --tree "$(git rev-parse HEAD^{tree})"
+      - name: Validate source-bound regression summary
+        if: matrix.shard == 'contracts'
+        env:
+          REPORT: ${{ runner.temp }}/devin-user-journeys/journey-contracts-summary.json
+        run: |
+          python3 - <<'PYTHON'
+          import json,os,subprocess
+          from pathlib import Path
+          report=json.loads(Path(os.environ['REPORT']).read_bytes())
+          assert report['status']=='passed' and report['mock_shard']=='contracts'
+          assert report['real_upstream'] is False and report['eligible_for_real_e2e'] is False
+          assert report['source']['commit']==subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          assert report['source']['tree']==subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip()
+          assert report['billing']['available'] is True
+          print('Synthetic regression source verified; settlement status remains independently reported.')
+          PYTHON
+      - name: Check complete exact-SHA GitHub read snapshot (not acceptance)
+        if: github.event_name == 'pull_request' && matrix.shard == 'matrix'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_HEAD: ${{ github.event.pull_request.head.sha }}
+          SNAPSHOT_BASE: ${{ github.event.pull_request.base.sha }}
+          SNAPSHOT_PR: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib,json,os,subprocess
+          from pathlib import Path
+          head,base=os.environ['SNAPSHOT_HEAD'],os.environ['SNAPSHOT_BASE']
+          digest=hashlib.sha256(subprocess.check_output(['git','diff','--binary','--full-index',base,head])).hexdigest()
+          (Path(os.environ['RUNNER_TEMP']) / 'pending-review.json').write_text(json.dumps({'base':base,'head':head,'status':'pending','patch_sha256':digest}))
+          PYTHON
+          python3 tools/devin-acceptance/github_snapshot.py --repository "$GITHUB_REPOSITORY" --pr "$SNAPSHOT_PR" --commit "$SNAPSHOT_HEAD" --review "$RUNNER_TEMP/pending-review.json" --output "$RUNNER_TEMP/current-check-state.json"
+          rm "$RUNNER_TEMP/pending-review.json" "$RUNNER_TEMP/current-check-state.json"
+      - name: Verify owned test resources were cleaned
+        if: always()
+        env:
+          ARTIFACTS: ${{ runner.temp }}/devin-user-journeys
+        run: |
+          python3 - <<'PYTHON'
+          import json,os,subprocess
+          from pathlib import Path
+          root=Path(os.environ['ARTIFACTS']).resolve(); root.mkdir(parents=True,exist_ok=True)
+          proof={'schema_version':1,'available':True,'remaining':{}}
+          queries={'containers':['ps','-a','--format','{{.Names}}'],
+                   'networks':['network','ls','--format','{{.Name}}'],
+                   'volumes':['volume','ls','--format','{{.Name}}'],
+                   'client_sandboxes':['ps','-aq','--filter','label=com.sub2api.devin-sandbox']}
+          for name,args in queries.items():
+              try:
+                  result=subprocess.run(['docker','--host=unix:///var/run/docker.sock',*args],capture_output=True,text=True,timeout=20)
+                  assert result.returncode==0
+                  proof['remaining'][name]=len(result.stdout.splitlines()) if name=='client_sandboxes' else sum(line.startswith('devin-e2e-') for line in result.stdout.splitlines())
+              except (OSError,AssertionError,subprocess.SubprocessError):
+                  proof['available']=False; proof['remaining'][name]=None
+          backends=0
+          for entry in Path('/proc').iterdir():
+              if not entry.name.isdigit(): continue
+              try: executable=os.readlink(entry/'exe')
+              except OSError: continue
+              backends+=executable in {str(root/'server'),str(root/'server')+' (deleted)'}
+          proof['remaining']['owned_backend_processes']=backends
+          proof['verified']=proof['available'] and all(value==0 for value in proof['remaining'].values())
+          (root/'cleanup-proof.json').write_text(json.dumps(proof,sort_keys=True)+'\n')
+          print(json.dumps(proof,sort_keys=True))
+          raise SystemExit(0 if proof['verified'] else 1)
+          PYTHON
+      - name: Save only structural synthetic journey evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devin-user-journeys-${{ matrix.shard }}-synthetic-upstream
+          path: |
+            ${{ runner.temp }}/devin-user-journeys/client-journeys.json
+            ${{ runner.temp }}/devin-user-journeys/journey-*.json
+            ${{ runner.temp }}/devin-user-journeys/cleanup-proof.json
+            ${{ runner.temp }}/devin-user-journeys/provenance.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  user-journeys-mock:
+    # Preserve the existing required context: it succeeds only after both shards.
+    if: always() && (github.event_name != 'workflow_dispatch' || inputs.mode == 'mock')
+    needs: user-journey-shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require both synthetic journey shards
+        env:
+          SHARD_RESULT: ${{ needs.user-journey-shards.result }}
+        run: test "$SHARD_RESULT" = success
+
+  live:
+    # Never run PR code with a real credential; opt in on the default branch.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'plan' || (inputs.mode == 'live' && inputs.allow_paid)) && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: devin-e2e-live
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v6
+        if: inputs.suite == 'agents' && inputs.mode != 'plan'
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: tools/devin-e2e-clients/package-lock.json
+      - name: Onboard the PAT, discover models, and run the authorized mode
+        env:
+          DEVIN_E2E_PAT: ${{ secrets.DEVIN_E2E_PAT }}
+          DEVIN_E2E_MODE_INPUT: ${{ inputs.mode }}
+          DEVIN_E2E_ALLOW_PAID: ${{ inputs.allow_paid && 'true' || 'false' }}
+          DEVIN_E2E_ARTIFACTS: ${{ runner.temp }}/devin-e2e
+          DEVIN_E2E_SUITE_INPUT: ${{ inputs.suite }}
+          DEVIN_E2E_AGENT_BATCH: ${{ inputs.agent_batch }}
+        run: |
+          if [ "$DEVIN_E2E_SUITE_INPUT" = agents ]; then
+            if [ "$DEVIN_E2E_MODE_INPUT" != plan ]; then
+              npm ci --prefix tools/devin-e2e-clients --ignore-scripts --omit=optional --no-audit --no-fund
+            fi
+            bash deploy/devin-agent-e2e.sh "$DEVIN_E2E_MODE_INPUT"
+          else
+            bash deploy/devin-e2e.sh "$DEVIN_E2E_MODE_INPUT"
+          fi
+      # Real-account plans, usage and session evidence remain private; do not
+      # upload them as artifacts of this public repository.

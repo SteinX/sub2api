@@ -1407,6 +1407,9 @@ func (h *AccountHandler) PreviewFromCRS(c *gin.Context) {
 // refreshSingleAccount refreshes credentials for a single OAuth account.
 // Returns (updatedAccount, warning, error) where warning is used for Antigravity ProjectIDMissing scenario.
 func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *service.Account) (*service.Account, string, error) {
+	if account.Platform == service.PlatformDevin {
+		return nil, "", infraerrors.BadRequest("DEVIN_REAUTH_REQUIRED", "Devin API keys recover sessions automatically; reconnect session-only accounts through Devin reauthorization")
+	}
 	if !account.IsOAuth() {
 		return nil, "", infraerrors.BadRequest("NOT_OAUTH", "cannot refresh non-OAuth account")
 	}
@@ -2820,6 +2823,19 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 
 func (h *AccountHandler) respondAvailableModels(c *gin.Context, account *service.Account) {
 	// Handle OpenAI accounts
+	if account.Platform == service.PlatformDevin {
+		ids, fetchErr := h.accountTestService.FetchUpstreamSupportedModels(c.Request.Context(), account)
+		if fetchErr != nil {
+			response.BadRequest(c, fetchErr.Error())
+			return
+		}
+		rows := make([]gin.H, 0, len(ids))
+		for _, id := range ids {
+			rows = append(rows, gin.H{"id": id, "object": "model", "owned_by": "devin", "name": id, "display_name": id})
+		}
+		response.Success(c, rows)
+		return
+	}
 	if account.IsOpenAI() {
 		// Prefer the shared, account-keyed upstream catalog. If discovery fails,
 		// retain the legacy local catalog below so the test dialog remains usable.

@@ -590,6 +590,34 @@ func setupModelDefaultPricingRouter() *gin.Engine {
 	return router
 }
 
+func TestGetModelDefaultPricing_DistinguishesIdentifiedPricesFromFamilyFallback(t *testing.T) {
+	for _, test := range []struct {
+		model             string
+		found, identified bool
+	}{
+		{"claude-sonnet-4", true, true},
+		{"totally-made-up-haiku-v9", true, false},
+		{"zz-unpriced-response-model", false, false},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			router := setupModelDefaultPricingRouter()
+			req := httptest.NewRequest(http.MethodGet, "/channels/model-pricing?model="+test.model, nil)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			require.Equal(t, http.StatusOK, w.Code)
+			var body struct {
+				Data struct {
+					Found      bool `json:"found"`
+					Identified bool `json:"identified"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+			require.Equal(t, test.found, body.Data.Found)
+			require.Equal(t, test.identified, body.Data.Identified)
+		})
+	}
+}
+
 func TestGetModelDefaultPricing_ReturnsFable51CacheTTLs(t *testing.T) {
 	router := setupModelDefaultPricingRouter()
 	req := httptest.NewRequest(http.MethodGet, "/channels/model-pricing?model=claude-fable-5-1", nil)

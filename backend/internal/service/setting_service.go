@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"golang.org/x/sync/singleflight"
@@ -133,6 +134,12 @@ type SettingService struct {
 	openAICodexVersionSF        singleflight.Group
 	claudeCodeVersionCache      atomic.Value // *cachedClaudeCodeClientVersion
 	claudeCodeVersionSF         singleflight.Group
+	devinIdentityMu             sync.Mutex
+	devinIdentityCache          atomic.Pointer[cachedDevinClientIdentity]
+	devinIdentityRefreshing     atomic.Bool
+	devinIdentitySyncing        atomic.Bool
+	devinIdentitySyncSF         singleflight.Group
+	devinIdentityFetch          func(context.Context, string) (devin.ClientIdentity, error)
 	codexRestrictionPolicyCache atomic.Value // *cachedCodexRestrictionPolicy
 	codexRestrictionPolicySF    singleflight.Group
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 )
 
@@ -58,6 +59,7 @@ type UpstreamModelCatalog struct {
 	Warnings             []UpstreamModelSyncWarning       `json:"warnings,omitempty"`
 	DiscoverySource      string                           `json:"discovery_source,omitempty"`
 	GrokModelDiagnostics *GrokModelDiagnostics            `json:"grok_model_diagnostics,omitempty"`
+	DevinRoutes          []devin.ModelRoutePlan           `json:"devin_routes,omitempty"`
 }
 
 // upstreamModelListFetchResult is the live model list plus an optional Grok
@@ -223,6 +225,32 @@ func (s *AccountTestService) FetchUpstreamSupportedModels(ctx context.Context, a
 // snapshot. When no model is complete, the existing account snapshot is left
 // untouched.
 func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, account *Account) (*UpstreamModelCatalog, error) {
+	if account != nil && account.Platform == PlatformDevin {
+		ctx = devin.WithClientIdentity(ctx)
+		models, err := s.devinClientService().Models(ctx, account, true)
+		if err != nil {
+			return nil, err
+		}
+		if len(models) == 0 {
+			return nil, errors.New("devin returned no usable models; existing catalog was preserved")
+		}
+		extra := devinCatalogExtra(models, devin.ResolveClientIdentity(ctx).Revision, account)
+		if err = s.accountRepo.UpdateExtra(ctx, account.ID, extra); err != nil {
+			return nil, err
+		}
+		snapshot, ok := extra[devinCatalogExtraKey].(*devin.CatalogSnapshot)
+		if !ok || snapshot == nil {
+			return nil, errors.New("invalid Devin catalog snapshot")
+		}
+		catalog := &UpstreamModelCatalog{Models: devinEffectiveModelIDs(models, account), DevinRoutes: snapshot.Routes}
+		for _, route := range snapshot.Routes {
+			if route.Mode == devin.RouteBlocked {
+				catalog.Warnings = []UpstreamModelSyncWarning{{Code: "devin_model_routes_blocked", Message: "Some advertised Devin models require unsupported or unverified execution routes; their metadata was retained for diagnosis."}}
+				break
+			}
+		}
+		return catalog, nil
+	}
 	fetched, err := s.fetchUpstreamModelListWithObservation(ctx, account)
 	var (
 		models          []string
@@ -795,6 +823,25 @@ func (s *AccountTestService) fetchUpstreamModelListWithObservation(ctx context.C
 }
 
 func (s *AccountTestService) fetchUpstreamModelListRequest(ctx context.Context, account *Account) ([]string, []byte, *http.Request, error) {
+	if account != nil && account.Platform == PlatformDevin {
+		d := s.devinClientService()
+		models, err := d.Models(ctx, account)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		body, err := DevinModelsBody(models, account)
+		var result struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(body, &result)
+		ids := make([]string, 0, len(result.Data))
+		for _, m := range result.Data {
+			ids = append(ids, m.ID)
+		}
+		return ids, body, nil, err
+	}
 	if s == nil {
 		return nil, nil, nil, newUpstreamModelSyncConfigError("Account test service is not configured", nil)
 	}

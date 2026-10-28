@@ -35,7 +35,225 @@ function readBlobAsText(blob: Blob): Promise<string> {
 }
 
 describe('UseKeyModal', () => {
+  it('uses live Devin models across Codex, Claude Code, OpenCode and CC Switch', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify({ models: [{ slug: 'fusion-test' }, { slug: 'swe-test' }] })
+    }))
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-devin', baseUrl: 'https://example.com/v1/', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /><slot name="footer" /></div>' }, Icon: true } }
+    })
+    await flushPromises()
+    const code = () => wrapper.findAll('pre code').map(node => node.text()).join('\n')
+    expect(code()).toContain('Sub2API Devin')
+    expect(code()).toContain('model = "fusion-test"')
+    expect(code()).not.toContain('gpt-5.5')
+    expect(code()).not.toContain('/v1/v1')
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('swe-test')
+    await wrapper.get('[data-testid="devin-ccswitch-import"]').trigger('click')
+    expect(wrapper.emitted('ccswitchImport')?.[0]).toEqual([{ clientType: 'codex', model: 'swe-test' }])
+    const tabs = wrapper.get('nav[aria-label="Client"]').findAll('button')
+    await tabs.find(tab => tab.text().includes('claudeCode'))!.trigger('click')
+    expect(code()).toContain('ANTHROPIC_MODEL="swe-test"')
+    expect(code()).toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL')
+    await tabs.find(tab => tab.text().includes('opencode'))!.trigger('click')
+    const config = JSON.parse(wrapper.get('pre code').text())
+    expect(config.model).toBe('devin/swe-test')
+    expect(config.provider.devin.npm).toBe('@ai-sdk/openai-compatible')
+    expect(Object.keys(config.provider.devin.models)).toEqual(['fusion-test', 'swe-test'])
+    wrapper.unmount()
+  })
+
+  it('does not generate guessed Devin models when discovery fails or returns no models', async () => {
+    for (const response of [
+      { ok: false, status: 403 },
+      { ok: true, text: async () => JSON.stringify({ models: [] }) }
+    ]) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+      const wrapper = mount(UseKeyModal, {
+        props: { show: true, apiKey: 'sk-devin', baseUrl: 'https://example.com', platform: 'devin' },
+        global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+      })
+      await flushPromises()
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      expect(wrapper.find('[data-testid="devin-ccswitch-import"]').exists()).toBe(false)
+      wrapper.unmount()
+    }
+  })
+
+  it('loads a 239-model catalog when a real key selection opens the closed modal', async () => {
+    const models = Array.from({ length: 239 }, (_, i) => ({ slug: i === 238 ? 'swe-2-high' : `synthetic-${i}` }))
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = mount(UseKeyModal, {
+      props: { show: false, apiKey: '', baseUrl: '', platform: null },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="devin-client-model"]').exists()).toBe(false)
+    await wrapper.setProps({ show: true, apiKey: 'sk-synthetic', platform: 'devin' })
+    await flushPromises()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, options] = fetchMock.mock.calls[0]!
+    expect(new URL(url).pathname).toBe('/v1/models')
+    expect(new URL(url).searchParams.get('client_version')).toBe('0.158.0')
+    expect(options.signal.aborted).toBe(false)
+    expect(wrapper.get('[data-testid="use-key-modal"]').attributes('data-platform')).toBe('devin')
+    expect(wrapper.findAll('#devin-client-model option')).toHaveLength(240)
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('swe-2-high')
+    expect((wrapper.get('#devin-client-model').element as HTMLSelectElement).value).toBe('swe-2-high')
+    wrapper.unmount()
+  })
+
+  it('generates the bounded OMP compatibility profile with the selected Fusion model', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify({ models: [{ slug: 'direct-test' }, { slug: 'fusion-test', context_window: 16384 }] })
+    }))
+    const apiKey = 'sk-quoted-"-key'
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey, baseUrl: 'https://example.com/v1/', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    await flushPromises()
+    await wrapper.get('[data-testid="devin-client-model"]').setValue('fusion-test')
+    await wrapper.get('nav[aria-label="Client"]').findAll('button').find(tab => tab.text() === 'OMP')!.trigger('click')
+    const blocks = wrapper.findAll('pre code').map(node => JSON.parse(node.text()))
+    const provider = blocks[0].providers.devin
+    expect(provider.api).toBe('openai-completions')
+    expect(provider.baseUrl).toBe('https://example.com/v1')
+    expect(provider.apiKey).toBe(apiKey)
+    expect(provider.models[0].id).toBe('fusion-test')
+    expect(provider.models[0].contextWindow).toBe(16384)
+    expect(provider.models[0]).not.toHaveProperty('cost')
+    expect(provider.models[0].compat.supportsStore).toBe(false)
+    expect(new Set(Object.values(blocks[1].modelRoles))).toEqual(new Set(['devin/fusion-test']))
+    expect(blocks[1].compaction).toEqual({ enabled: false, supersedeReads: false, dropUseless: false })
+    expect(blocks[1].retry.enabled).toBe(false)
+    expect(wrapper.get('[data-testid="devin-instructions"]').text()).toContain('keys.useKeyModal.devin.ompInstructions')
+    expect(wrapper.find('[data-testid="codex-model-catalog"]').exists()).toBe(false)
+    await wrapper.findAll('button').find(tab => tab.text() === 'Windows CMD')!.trigger('click')
+    expect(wrapper.text()).toContain('%USERPROFILE%\\.omp\\agent\\models.yml')
+    wrapper.unmount()
+  })
+
+  it('provides a pinned OMO connection without replacing native approval settings', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, text: async () => JSON.stringify({ models: [{ slug: 'fusion-test' }] })
+    }))
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-devin', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    await flushPromises()
+    const tab = wrapper.get('button[data-client="omo"]')
+    expect(tab.text()).toContain('OpenCode')
+    await tab.trigger('click')
+    const blocks = wrapper.findAll('pre code').map(node => JSON.parse(node.text()))
+    expect(blocks[0].plugin).toEqual(['oh-my-opencode@5.1.44'])
+    expect(blocks[0].model).toBe('devin/fusion-test')
+    expect(blocks[0]).not.toHaveProperty('agent')
+    expect(blocks[0]).not.toHaveProperty('permission')
+    expect(blocks[1]).toMatchObject({ '[opencode]': { model_fallback: false, runtime_fallback: false } })
+    expect(wrapper.get('[data-testid="devin-instructions"]').text()).toContain('keys.useKeyModal.devin.omoInstructions')
+    wrapper.unmount()
+  })
+
+  it('bounds a stalled Devin catalog and requires an explicit refresh', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockImplementationOnce((_url: string, options: RequestInit) => new Promise((_resolve, reject) => {
+        options.signal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+      }))
+      .mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'recovered-model' }] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-synthetic', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    try {
+      await nextTick()
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      expect(wrapper.get('[data-testid="devin-models-refresh"]').attributes('disabled')).toBeDefined()
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(fetchMock.mock.calls[0]![1].signal.aborted).toBe(true)
+      expect(wrapper.get('[data-testid="devin-models-error"]').text()).toContain('keys.useKeyModal.devin.modelsTimeout')
+      expect(wrapper.get('[data-testid="devin-models-refresh"]').attributes('disabled')).toBeUndefined()
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      await wrapper.get('[data-testid="devin-models-refresh"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(0)
+      await nextTick()
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(wrapper.findAll('pre code').map(node => node.text()).join('\n')).toContain('recovered-model')
+    } finally { wrapper.unmount() }
+  })
+
+  it('recovers Devin discovery with an explicit refresh without generating a guessed model', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 403 })
+      .mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'recovered-model' }] }) }))
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-devin', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    await flushPromises()
+    expect(wrapper.findAll('pre code')).toHaveLength(0)
+    await wrapper.get('[data-testid="devin-models-refresh"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('pre code').map(node => node.text()).join('\n')).toContain('recovered-model')
+    wrapper.unmount()
+  })
+
+  it('does not let a late timed-out response replace a refreshed catalog', async () => {
+    vi.useFakeTimers()
+    let finishOld: (value: unknown) => void = () => {}
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+      .mockResolvedValue({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'fresh-model' }] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-synthetic', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      await wrapper.get('[data-testid="devin-models-refresh"]').trigger('click')
+      await vi.advanceTimersByTimeAsync(0)
+      finishOld({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'stale-model' }] }) })
+      await vi.advanceTimersByTimeAsync(0)
+      const options = wrapper.findAll('#devin-client-model option').map(option => option.text())
+      expect(options).toContain('fresh-model')
+      expect(options).not.toContain('stale-model')
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    } finally { wrapper.unmount() }
+  })
+
+  it('hides old configuration exports while a refresh is loading or has timed out', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: true, text: async () => JSON.stringify({ models: [{ slug: 'old-model' }] }) })
+      .mockImplementationOnce(() => new Promise(() => {})))
+    const wrapper = mount(UseKeyModal, {
+      props: { show: true, apiKey: 'sk-synthetic', baseUrl: 'https://example.com', platform: 'devin' },
+      global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, Icon: true } }
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(wrapper.find('[data-testid="devin-ccswitch-import"]').exists()).toBe(true)
+      await wrapper.get('[data-testid="devin-models-refresh"]').trigger('click')
+      expect(wrapper.findAll('pre code')).toHaveLength(0)
+      expect(wrapper.find('[data-testid="devin-ccswitch-import"]').exists()).toBe(false)
+      await vi.advanceTimersByTimeAsync(15000)
+      expect(wrapper.find('[data-testid="devin-models-error"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="devin-ccswitch-import"]').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     saveAsMock.mockClear()
   })

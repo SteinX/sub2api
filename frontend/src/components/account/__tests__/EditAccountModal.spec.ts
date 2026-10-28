@@ -76,6 +76,7 @@ const ModelWhitelistSelectorStub = defineComponent({
   name: 'ModelWhitelistSelector',
   props: {
     modelMappings: { type: Array, default: () => [] },
+    availableModels: { type: Array, default: () => [] },
     modelValue: {
       type: Array,
       default: () => []
@@ -330,6 +331,74 @@ function mountModal(account = buildAccount(), renderGroupSelector = false) {
 }
 
 describe('EditAccountModal', () => {
+  it('loads, saves and reopens account-level Devin compactor switches while preserving runtime data', async () => {
+    const account = {
+      ...buildAccount(), platform: 'devin',
+      extra: { devin_context_enabled: true, devin_context_auto_compaction: false, devin_context_manual_compact: true, runtime_state: 'retain' }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLSelectElement>('[data-testid=devin-context-mode]').element.value).toBe('enabled')
+    expect(wrapper.get<HTMLInputElement>('[data-testid=devin-context-auto]').element.checked).toBe(false)
+    await wrapper.get('[data-testid=devin-context-manual]').setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    const saved = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(saved).toMatchObject({ devin_context_enabled: true, devin_context_auto_compaction: false, devin_context_manual_compact: false, runtime_state: 'retain' })
+    expect(account.extra.devin_context_manual_compact).toBe(true)
+    wrapper.unmount()
+    const reopened = mountModal({ ...account, extra: saved })
+    expect(reopened.get<HTMLInputElement>('[data-testid=devin-context-manual]').element.checked).toBe(false)
+    await reopened.get('[data-testid=devin-context-mode]').setValue('disabled')
+    await reopened.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[1]?.[1]?.extra.devin_context_enabled).toBe(false)
+    reopened.unmount()
+  })
+
+  it('does not expose Devin compactor settings on another platform', () => {
+    const wrapper = mountModal()
+    expect(wrapper.find('[data-testid=devin-context-settings]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each(['apikey', 'oauth'])('edits Devin %s endpoint and model restrictions using its authorized catalog', async (type) => {
+    const account = {
+      ...buildAccount(), platform: 'devin', type,
+      credentials: { model_mapping: { 'public-swe': 'swe-2-max', 'swe-2-high': 'swe-2-high' } },
+      credentials_status: { has_api_key: type === 'apikey' },
+      extra: { devin_models: ['swe-2-max', 'swe-2-high'] }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.find('[data-testid="devin-account-settings"]').exists()).toBe(true)
+    expect(wrapper.find('input[type="password"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.poolMode')
+    expect(wrapper.text()).not.toContain('admin.accounts.customErrorCodes')
+    const selector = wrapper.getComponent(ModelWhitelistSelectorStub)
+    expect(selector.props('availableModels')).toEqual(['swe-2-max', 'swe-2-high'])
+    expect(selector.props('modelMappings')).toEqual([{ from: 'public-swe', to: 'swe-2-max' }])
+    selector.vm.$emit('update:modelValue', ['swe-2-max'])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    const credentials = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(credentials.base_url).toBe('https://server.codeium.com')
+    expect(credentials.model_mapping).toEqual({ 'public-swe': 'swe-2-max', 'swe-2-max': 'swe-2-max' })
+    expect(credentials).not.toHaveProperty('api_key')
+    expect(credentials).not.toHaveProperty('access_token')
+    wrapper.unmount()
+  })
+
+  it('preserves a Devin session account custom endpoint and permits clearing restrictions', async () => {
+    const account = { ...buildAccount(), platform: 'devin', type: 'oauth', credentials: {
+      base_url: 'https://cascade.example', model_mapping: { 'swe-2-max': 'swe-2-max' }
+    } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('input[placeholder="https://server.codeium.com"]').element.value).toBe('https://cascade.example')
+    wrapper.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', [])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toEqual({ base_url: 'https://cascade.example' })
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
     authIsSimpleMode.value = true
   })

@@ -1,0 +1,348 @@
+//go:build devine2e
+
+package devine2e
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
+	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
+)
+
+type approvedJourneyPlan struct {
+	Models struct {
+		Direct   string `json:"direct"`
+		Lead     string `json:"lead"`
+		Sidekick string `json:"sidekick"`
+	} `json:"models"`
+	Clients             []string          `json:"clients"`
+	JourneySet          string            `json:"journey_set"`
+	ReferencePricingSHA string            `json:"reference_pricing_sha256"`
+	GroupPricingSHA     string            `json:"group_pricing_sha256"`
+	ToolBudget          journeyToolLimits `json:"tool_budget"`
+	Limits              struct {
+		Requests    int     `json:"public_requests"`
+		Output      int     `json:"output_tokens"`
+		TurnSeconds int     `json:"turn_seconds"`
+		Calls       int     `json:"internal_calls_per_turn"`
+		Tools       int     `json:"tools_per_turn"`
+		Handoffs    int     `json:"handoffs_per_turn"`
+		LocalUSD    float64 `json:"local_usd"`
+		TurnUSD     float64 `json:"turn_usd"`
+		CLISeconds  int     `json:"cli_seconds"`
+	} `json:"limits"`
+}
+
+func approvedPlan(t *testing.T) approvedJourneyPlan {
+	t.Helper()
+	require.Equal(t, "true", os.Getenv("DEVIN_JOURNEY_REAL"), "use the approved supervisor, never invoke a real journey directly")
+	_, err := journeyPolicy("verify")
+	require.NoError(t, err, "approval, clean source and claimed durable ledger are required before native auth")
+	data, err := os.ReadFile(os.Getenv("DEVIN_JOURNEY_PLAN_FILE"))
+	require.NoError(t, err)
+	var plan approvedJourneyPlan
+	require.NoError(t, json.Unmarshal(data, &plan))
+	return plan
+}
+
+func TestDevinClientUserJourneysAuthorized(t *testing.T) {
+	if os.Getenv("DEVIN_JOURNEY_REAL") != "true" {
+		t.Skip("requires a new explicit plan/approval; never runs in mock CI")
+	}
+	_ = approvedPlan(t)
+	runDevinCloudGatewaySuite(t, os.Getenv("DEVIN_JOURNEY_RUN_MODE"), nil, "journeys")
+}
+
+func approvedGroupPricing(t *testing.T, plan approvedJourneyPlan) []any {
+	t.Helper()
+	name := os.Getenv("DEVIN_JOURNEY_GROUP_PRICING_FILE")
+	if plan.GroupPricingSHA == "" {
+		require.Empty(t, name, "unreviewed pricing input is forbidden")
+		return nil
+	}
+	data, err := os.ReadFile(name)
+	require.NoError(t, err, "provide only the approved non-secret group pricing snapshot")
+	sum := sha256.Sum256(data)
+	require.Equal(t, plan.GroupPricingSHA, hex.EncodeToString(sum[:]))
+	var prices []any
+	require.NoError(t, json.Unmarshal(data, &prices))
+	require.NotEmpty(t, prices)
+	return prices
+}
+
+func journeyPricingProof(t *testing.T, app *application, key string, models []string) []map[string]any {
+	t.Helper()
+	raw := request(t, app, "GET", "/v1/models?pricing_models="+url.QueryEscape(strings.Join(models, ",")), key, nil, 200)
+	require.Equal(t, "devin.pricing_admission", gjson.GetBytes(raw, "object").String())
+	var response struct {
+		Data []map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &response))
+	require.Len(t, response.Data, len(models))
+	for i, entry := range response.Data {
+		require.Equal(t, models[i], entry["model"])
+	}
+	return response.Data
+}
+
+func runAuthorizedUserJourneys(t *testing.T, app *application, mode, admin, key, password string, keyID, accountID int64, catalog devin.CatalogSnapshot) {
+	t.Helper()
+	plan := approvedPlan(t)
+	cliSeconds := plan.Limits.CLISeconds
+	if cliSeconds == 0 {
+		cliSeconds = 150
+	}
+	for _, uid := range []string{plan.Models.Direct, plan.Models.Lead, plan.Models.Sidekick} {
+		_, err := selectSmokeModel(eligibleAgentModels(catalog.Models), uid, plan.Limits.Output)
+		require.NoError(t, err, "every exact approved model must be granted and tool capable; do not silently substitute a model")
+	}
+	profile := fusion.DefaultProfile("fusion-"+plan.Models.Lead+"-sidekick-"+plan.Models.Sidekick, plan.Models.Lead, plan.Models.Sidekick)
+	profile.MaxHandoffs, profile.MaxRequests, profile.MaxTools = plan.Limits.Handoffs, plan.Limits.Calls, plan.Limits.Tools
+	profile.MaxCostUSD, profile.MaxWallSeconds, profile.MaxOutputTokens = plan.Limits.TurnUSD, plan.Limits.TurnSeconds, plan.Limits.Output
+	profile.Keepalive = &fusion.KeepalivePolicy{Enabled: false}
+	current := api(t, app, "GET", fmt.Sprintf("/admin/accounts/%d", accountID), admin, nil)
+	var extra map[string]any
+	require.NoError(t, json.Unmarshal([]byte(current.Get("extra").Raw), &extra))
+	extra["devin_fusion_enabled"], extra["devin_fusion_profiles"] = true, []fusion.Profile{profile}
+	api(t, app, "PUT", fmt.Sprintf("/admin/accounts/%d", accountID), admin, map[string]any{"extra": extra, "concurrency": 1})
+	var proofs []map[string]any
+	reports := []map[string]any{}
+	budget := &authorizedJourneyBudget{db: agentDatabase(t, app), keyID: keyID}
+	budget.app, budget.key, budget.outputLimit = app, key, plan.Limits.Output
+	for _, model := range catalog.Models {
+		if devin.ModelID(model) == plan.Models.Direct {
+			budget.contextLimit = int(model.GetMaxTokens())
+		}
+	}
+	require.Positive(t, budget.contextLimit, "bounded direct context required for conservative price admission")
+	defer func() {
+		cost, err := budget.cost()
+		writeAgentArtifact(t, "private-product-live.json", map[string]any{
+			"schema_version": 1, "tier": "product_live_partial", "real_upstream": true, "eligible_for_real_e2e": false,
+			"source": journeySource(t, app), "mode": mode, "cases": reports, "physical_pricing": proofs,
+			"pricing_scope": "isolated preview public key/group/channel; no claim about deployed production configuration",
+			"billing":       map[string]any{"local_cost_available": err == nil, "observed_local_cost_usd": cost, "provider_spending_hard_cap": false},
+			"unverified":    []string{"deployed existing group/channel", "OMO Senpi identity", "in-flight disconnect", "client workers", "non-OMP compact/fork"},
+		})
+	}()
+	proofs = journeyPricingProof(t, app, key, []string{plan.Models.Direct, plan.Models.Lead, plan.Models.Sidekick})
+	for _, entry := range proofs {
+		require.Equal(t, true, entry["identified"], "physical UID %v has no identified price in this public key's group/channel; stop before inference", entry["model"])
+		require.Equal(t, true, entry["calculable"], "physical UID %v price cannot be calculated; stop before inference", entry["model"])
+	}
+	fence := newJourneyFence(app, budget)
+	if mode == "live" {
+		require.NoError(t, fence.installToolLimits(plan.ToolBudget))
+	}
+	defer func() {
+		if fence.deadline != nil {
+			fence.deadline.Stop()
+		}
+	}()
+	for _, client := range plan.Clients {
+		for _, kind := range []string{"direct", "fusion"} {
+			profiles := []string{"project"}
+			if client == "opencode" && kind == "fusion" && plan.JourneySet == "core_with_long_v1" {
+				profiles = append(profiles, "long")
+			}
+			if client == "omp" {
+				profiles = []string{"default", "compatibility"}
+			}
+			for _, configProfile := range profiles {
+				id := client + "/" + kind + "/" + configProfile
+				if !t.Run(id, func(t *testing.T) {
+					model := plan.Models.Direct
+					if kind == "fusion" {
+						model = profile.PublicModel
+					}
+					directory, err := os.MkdirTemp("", "devin-approved-project-")
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = os.RemoveAll(directory) })
+					admission := newJourneyAdmission(t, app, model, plan.Limits.Requests)
+					admission.toolCase = id
+					admission.runBudget, admission.outputLimit = budget, plan.Limits.Output
+					admission.turnTimeout = time.Duration(plan.Limits.TurnSeconds) * time.Second
+					budget.direct = kind == "direct"
+					budget.model = model
+					ui := journeyUIServer(t, app.base, admission.server.URL)
+					script, err := filepath.Abs("../../../tools/devin-e2e-clients/journey.py")
+					require.NoError(t, err)
+					ctx, cancel := context.WithTimeout(context.Background(), time.Duration(2*cliSeconds+60)*time.Second)
+					defer cancel()
+					stage := "task"
+					if mode == "plan" {
+						stage = "handoff"
+					}
+					uiProfile, projectKind := configProfile, "short"
+					if configProfile == "long" {
+						uiProfile, projectKind = "project", "long"
+					}
+					cmd := exec.CommandContext(ctx, "python3", script, "--directory", directory, "--client", client, "--model", model, "--ui-url", ui.URL, "--profile", uiProfile, "--stage", stage, "--upstream", "real", "--project-kind", projectKind, "--cli-seconds", fmt.Sprint(cliSeconds))
+					gracefulJourneyCommand(cmd)
+					for _, variable := range os.Environ() {
+						name, _, _ := strings.Cut(variable, "=")
+						if strings.Contains(" DEVIN_E2E_PAT DEVIN_E2E_CREDENTIAL DEVIN_PAT DEVIN_API_KEY SUB2API_API_KEY SUB2API_USER_TOKEN DEVIN_JOURNEY_PLAN_FILE DEVIN_JOURNEY_APPROVAL_FILE DEVIN_JOURNEY_RUN_LEDGER ", " "+name+" ") {
+							continue
+						}
+						cmd.Env = append(cmd.Env, variable)
+					}
+					cmd.Env = append(cmd.Env, "DEVIN_JOURNEY_GATEWAY_KEY="+key, "DEVIN_JOURNEY_UI_PASSWORD="+password)
+					var directRowsBefore int
+					require.NoError(t, budget.db.QueryRow(`SELECT count(*) FROM usage_logs WHERE api_key_id=$1 AND coalesce(nullif(upstream_model,''),model)=$2`, keyID, plan.Models.Direct).Scan(&directRowsBefore))
+					output, runErr := runGuardedJourney(t, cmd, app, admission, fence)
+					cleanupErr := cleanupJourneyProcesses()
+					report := map[string]any{"status": "failed", "stage": "runner_output"}
+					parseErr := json.Unmarshal(output, &report)
+					if report == nil {
+						report = map[string]any{"status": "failed", "stage": "runner_output"}
+					}
+					report["batch_guard"] = fence.snapshot()
+					forwarded, records := admission.snapshot()
+					report["id"], report["model_kind"], report["public_model_uid"] = id, kind, model
+					report["physical_lead_uid"], report["physical_sidekick_uid"] = plan.Models.Direct, ""
+					if kind == "fusion" {
+						report["physical_lead_uid"], report["physical_sidekick_uid"] = plan.Models.Lead, plan.Models.Sidekick
+					}
+					report["public_requests"], report["reasoning_scope"] = forwarded, "exact approved physical UIDs; OMP thinking off, OpenCode/OMO client default"
+					usageModels := map[string]int{}
+					rows, dbErr := budget.db.Query(`SELECT coalesce(nullif(upstream_model,''),model),count(*) FROM usage_logs WHERE api_key_id=$1 GROUP BY 1`, keyID)
+					if dbErr == nil {
+						for rows.Next() {
+							var uid string
+							var count int
+							if rows.Scan(&uid, &count) != nil {
+								dbErr = fmt.Errorf("usage scan unavailable")
+								break
+							}
+							usageModels[uid] = count
+						}
+						if err := rows.Err(); err != nil {
+							dbErr = err
+						}
+						_ = rows.Close()
+					}
+					report["observed_physical_models_cumulative"] = usageModels
+					report["usage_scope"] = "persisted local public-key execution records, cumulative; not a provider invoice"
+					reports = append(reports, report)
+					report["client_process_cleanup_verified"] = cleanupErr == nil
+					if mode == "live" && kind == "fusion" && forwarded > 0 {
+						report["fusion_execution"] = snapshotFusionAudit(budget.db, keyID, records, true)
+					}
+					if configProfile == "long" && mode == "live" {
+						witness := longPublicContext(directory, records, report)
+						report["public_context_witness"] = witness
+						report["context_pressure"] = "not_observed"
+						if witness["complete"] == true {
+							report["context_pressure"] = "passed"
+						}
+					}
+					savePrivateAgentUsage(t, app, keyID, client, kind)
+					require.NoError(t, parseErr, "retain private structural evidence; never repeat an unknown send")
+					require.NoError(t, cleanupErr, "client cleanup not verified; stop this batch")
+					require.NoError(t, runErr, "first client failure stops this approved batch")
+					require.True(t, budget.healthy(), "global request accounting failed or an earlier send is uncertain; stop")
+					require.NoError(t, dbErr, "physical-model execution evidence unavailable")
+					if report["status"] == "unsupported_by_product" {
+						require.Zero(t, forwarded)
+						return
+					}
+					if mode == "plan" {
+						require.Equal(t, "handoff_only", report["status"])
+						require.Zero(t, forwarded)
+						return
+					}
+					require.Equal(t, "passed", report["status"])
+					if kind == "direct" {
+						require.Eventually(t, func() bool {
+							var current int
+							return budget.db.QueryRow(`SELECT count(*) FROM usage_logs WHERE api_key_id=$1 AND coalesce(nullif(upstream_model,''),model)=$2`, keyID, plan.Models.Direct).Scan(&current) == nil && current == directRowsBefore+forwarded
+						}, 10*time.Second, 100*time.Millisecond, "each direct public inference must add its own physical-model usage row; earlier cases cannot supply this evidence")
+					}
+					if kind == "fusion" {
+						require.Equal(t, true, report["fusion_execution"].(map[string]any)["complete"], "Fusion collaboration or per-attempt settlement is not proven")
+					}
+					if client == "omp" && kind == "direct" && configProfile == "compatibility" && os.Getenv("DEVIN_JOURNEY_CAPABILITIES") == "true" {
+						capabilities, ok := report["capability_evidence"].(map[string]any)
+						require.True(t, ok)
+						require.Equal(t, "passed", capabilities["status"])
+					}
+				}) {
+					t.Fatal("approved real journey stopped at first failure; no automatic batch retry")
+				}
+			}
+		}
+	}
+}
+
+func gracefulJourneyCommand(cmd *exec.Cmd) {
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 15 * time.Second
+}
+
+func cleanupJourneyProcesses() error {
+	return cleanupJourneyProcessesAt(os.Getenv("DEVIN_JOURNEY_PROCESS_REGISTRY"), os.Getenv("DEVIN_JOURNEY_CONTAINER_REGISTRY"))
+}
+
+func cleanupJourneyProcessesAt(processRegistry, containerRegistry string) error {
+	path, err := filepath.Abs("../../../tools/devin-e2e-clients/process_cleanup.py")
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", path, processRegistry)
+	cmd.Env = append(os.Environ(), "DEVIN_JOURNEY_CONTAINER_REGISTRY="+containerRegistry)
+	output, runErr := cmd.Output()
+	var proof struct {
+		Schema    int  `json:"schema_version"`
+		Process   bool `json:"process_cleanup_verified"`
+		Container bool `json:"container_cleanup_verified"`
+	}
+	if json.Unmarshal(output, &proof) != nil || proof.Schema != 1 {
+		return fmt.Errorf("cleanup diagnostic unavailable (exit_ok=%t)", runErr == nil)
+	}
+	if runErr != nil || !proof.Process || !proof.Container {
+		return fmt.Errorf("child cleanup unverified (process=%t containers=%t exit_ok=%t)", proof.Process, proof.Container, runErr == nil)
+	}
+	return nil
+}
+
+func journeyRegistryEnvironment(t *testing.T, app *application) (string, string) {
+	t.Helper()
+	process, containers := os.Getenv("DEVIN_JOURNEY_PROCESS_REGISTRY"), os.Getenv("DEVIN_JOURNEY_CONTAINER_REGISTRY")
+	if process == "" {
+		process = filepath.Join(app.dir, "private-processes.jsonl")
+	}
+	if containers == "" {
+		containers = filepath.Join(app.dir, "private-containers.jsonl")
+	}
+	for _, path := range []string{process, containers} {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+		require.NoError(t, err)
+		info, err := file.Stat()
+		require.NoError(t, err)
+		require.True(t, info.Mode().IsRegular())
+		require.Zero(t, info.Mode().Perm()&0077)
+		require.NoError(t, file.Close())
+	}
+	t.Cleanup(func() {
+		if err := cleanupJourneyProcessesAt(process, containers); err != nil {
+			t.Error("child process/container cleanup not verified")
+		}
+	})
+	return process, containers
+}

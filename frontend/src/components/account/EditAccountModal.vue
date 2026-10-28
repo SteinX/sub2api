@@ -26,6 +26,18 @@
         <p class="input-hint">{{ t('admin.accounts.notesHint') }}</p>
       </div>
 
+      <div v-if="account.platform === 'devin'" class="space-y-3 rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20" data-testid="devin-account-settings">
+        <p class="text-sm text-gray-600 dark:text-gray-300">{{ t(account.type === 'apikey' ? 'admin.accounts.devin.autoRecover' : 'admin.accounts.devin.reloginRequired') }}</p>
+        <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.devin.credentialsEditHint') }}</p>
+        <DevinModelRoutes :routes="devinModelRoutes" :model-mappings="modelMappings" />
+        <DevinContextSettings v-model="devinContextSettings" />
+        <DevinFusionProfiles v-model="devinFusionProfiles" v-model:enabled="devinFusionEnabled" :models="devinConcreteModels" :inferred-profiles="devinInferredProfiles" />
+        <div v-if="account.type === 'oauth'">
+          <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
+          <input v-model="editBaseUrl" type="text" class="input" placeholder="https://server.codeium.com" />
+        </div>
+      </div>
+
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey'" class="space-y-4">
         <div v-if="!isCNApiKeyAccount || editApiProtocol !== 'adaptive'">
@@ -35,7 +47,9 @@
             type="text"
             class="input"
             :placeholder="
-              account.platform === 'openai'
+              account.platform === 'devin'
+                ? 'https://server.codeium.com'
+                : account.platform === 'openai'
                 ? 'https://api.openai.com'
                 : account.platform === 'gemini'
                   ? 'https://generativelanguage.googleapis.com'
@@ -225,7 +239,7 @@
           </div>
           <p class="input-hint mt-2">{{ t('admin.accounts.cnProviders.zhipuTeam.hint') }}</p>
         </div>
-        <div>
+        <div v-if="account.platform !== 'devin'">
           <label class="input-label">{{ t('admin.accounts.apiKey') }}</label>
           <input
             v-model="editApiKey"
@@ -364,6 +378,8 @@
               :model-mappings="modelMappings"
               :platform="account?.platform || 'anthropic'"
               :account-id="account?.id"
+              :available-models="devinAvailableModels"
+              :fusion-models="devinFusionEnabled ? devinFusionProfiles.filter(profile => profile.enabled).map(profile => profile.public_model) : []"
               :show-sync-button="account.platform !== 'grok' || !account.id"
               @upstream-sync-finished="refreshGrokDiagnostics"
             />
@@ -516,7 +532,7 @@
         </div>
 
         <!-- Pool Mode Section -->
-        <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div v-if="account.platform !== 'devin'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <div class="mb-3 flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.poolMode') }}</label>
@@ -622,7 +638,7 @@
         </div>
 
         <!-- Custom Error Codes Section -->
-        <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div v-if="account.platform !== 'devin'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <div class="mb-3 flex items-center justify-between">
             <div>
               <label class="input-label mb-0">{{ t('admin.accounts.customErrorCodes') }}</label>
@@ -876,7 +892,7 @@
 
       <!-- OpenAI/Grok OAuth Model Mapping (OAuth 类型没有 apikey 容器，需要独立的模型映射区域) -->
       <div
-        v-if="(account.platform === 'openai' || account.platform === 'grok') && account.type === 'oauth'"
+        v-if="(account.platform === 'openai' || account.platform === 'grok' || account.platform === 'devin') && account.type === 'oauth'"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
         :data-testid="account.platform === 'grok' ? 'grok-model-settings' : undefined"
       >
@@ -960,6 +976,8 @@
             :model-mappings="modelMappings"
             :platform="account?.platform || 'anthropic'"
             :account-id="account?.id"
+            :available-models="devinAvailableModels"
+            :fusion-models="devinFusionEnabled ? devinFusionProfiles.filter(profile => profile.enabled).map(profile => profile.public_model) : []"
             :show-sync-button="account.platform !== 'grok' || !account.id"
             @upstream-sync-finished="refreshGrokDiagnostics"
           />
@@ -1228,7 +1246,7 @@
 
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
-            <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id" />
+            <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id" :available-models="devinAvailableModels" :fusion-models="devinFusionEnabled ? devinFusionProfiles.filter(profile => profile.enabled).map(profile => profile.public_model) : []" />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
               <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
@@ -3414,6 +3432,12 @@ import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import ModelWhitelistSelector from '@/components/account/ModelWhitelistSelector.vue'
 import GrokModelDiagnosticsPanel from '@/components/account/GrokModelDiagnosticsPanel.vue'
+import DevinModelRoutes from '@/components/account/DevinModelRoutes.vue'
+import DevinFusionProfiles from '@/components/account/DevinFusionProfiles.vue'
+import DevinContextSettings from '@/components/account/DevinContextSettings.vue'
+import { devinContextExtra, readDevinContextSettings } from '@/utils/devinContext'
+import { readDevinFusionProfiles, inferredDevinFusionProfile, type DevinFusionProfile } from '@/utils/devinFusion'
+import { readDevinModelRoutes, isDevinFusionCandidate } from '@/utils/devinModelRoutes'
 import QuotaLimitCard from '@/components/account/QuotaLimitCard.vue'
 import GrokBaseUrlPresets from '@/components/account/GrokBaseUrlPresets.vue'
 import CnBaseUrlPresets from '@/components/account/CnBaseUrlPresets.vue'
@@ -4466,6 +4490,7 @@ const tempUnschedPresets = computed(() => [
 
 // Computed: default base URL based on platform
 const defaultBaseUrl = computed(() => {
+  if (props.account?.platform === 'devin') return 'https://server.codeium.com'
   if (props.account?.platform === 'openai') return 'https://api.openai.com'
   if (props.account?.platform === 'gemini') return 'https://generativelanguage.googleapis.com'
   if (props.account?.platform === 'grok') return 'https://api.x.ai/v1'
@@ -4476,6 +4501,22 @@ const defaultBaseUrl = computed(() => {
     return defaultCNBaseUrl(props.account.platform, currentOpenCodeOrCNMode(), editApiProtocol.value)
   }
   return 'https://api.anthropic.com'
+})
+
+const devinModelRoutes = computed(() => readDevinModelRoutes(props.account?.extra?.devin_model_catalog))
+const devinFusionProfiles = ref<DevinFusionProfile[]>([])
+const devinFusionEnabled = ref(true)
+const devinContextSettings = ref(readDevinContextSettings())
+const devinInferredProfiles = computed(() => devinModelRoutes.value
+  .filter(route => route.route_mode === 'gateway_fusion' && route.pair_source === 'model_id' && route.lead_model_uid && route.sidekick_model_uid && !devinFusionProfiles.value.some(profile => profile.public_model === route.model_uid))
+  .map(route => inferredDevinFusionProfile(route.model_uid, route.lead_model_uid!, route.sidekick_model_uid!)))
+const devinConcreteModels = computed(() => devinModelRoutes.value.filter(route => route.route_mode === 'direct_chat').map(route => route.model_uid))
+const devinAvailableModels = computed(() => {
+  if (props.account?.platform !== 'devin') return undefined
+  const models = props.account.extra?.devin_models
+  const blocked = new Set(devinModelRoutes.value.filter(route => route.route_mode === 'blocked').map(route => route.model_uid))
+  const direct = Array.isArray(models) ? models.filter((model): model is string => typeof model === 'string' && !!model.trim() && (!isDevinFusionCandidate(model) || devinFusionEnabled.value && devinModelRoutes.value.some(route => route.model_uid === model && route.route_mode === 'gateway_fusion')) && !blocked.has(model)) : []
+  return [...direct, ...(devinFusionEnabled.value ? devinFusionProfiles.value.filter(profile => profile.enabled).map(profile => profile.public_model) : [])]
 })
 
 const mixedChannelWarningMessageText = computed(() => {
@@ -4626,6 +4667,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   mixedScheduling.value = false
   allowOverages.value = false
 	const extra = newAccount.extra as Record<string, unknown> | undefined
+  devinFusionProfiles.value = readDevinFusionProfiles(extra?.devin_fusion_profiles)
+  devinFusionEnabled.value = extra?.devin_fusion_enabled !== false
+  devinContextSettings.value = readDevinContextSettings(extra)
 	mixedScheduling.value = extra?.mixed_scheduling === true
 	allowOverages.value = extra?.allow_overages === true
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
@@ -4913,7 +4957,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
       }
     }
     const platformDefaultUrl =
-      newAccount.platform === 'openai'
+      newAccount.platform === 'devin'
+        ? 'https://server.codeium.com'
+        : newAccount.platform === 'openai'
         ? 'https://api.openai.com'
         : newAccount.platform === 'gemini'
           ? 'https://generativelanguage.googleapis.com'
@@ -5004,8 +5050,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
             : 'https://api.anthropic.com'
     editBaseUrl.value = platformDefaultUrl
 
-    // Load model mappings for OpenAI/Grok OAuth accounts
-    if ((newAccount.platform === 'openai' || newAccount.platform === 'grok') && newAccount.credentials) {
+    if (newAccount.platform === 'devin') {
+      editBaseUrl.value = (newAccount.credentials?.base_url as string) || 'https://server.codeium.com'
+    }
+
+    // Load model mappings for accounts with a native OAuth model catalog.
+    if (['openai', 'grok', 'devin'].includes(newAccount.platform) && newAccount.credentials) {
       const oauthCredentials = newAccount.credentials as Record<string, unknown>
       loadModelRestrictionFromMapping(oauthCredentials.model_mapping as Record<string, unknown> | undefined)
     } else {
@@ -5717,7 +5767,7 @@ const handleSubmit = async () => {
         props.account.credentials_status?.has_api_key ?? Boolean(currentCredentials.api_key)
       if (editApiKey.value.trim()) {
         newCredentials.api_key = editApiKey.value.trim()
-      } else if (!hasExistingApiKey) {
+      } else if (!hasExistingApiKey && props.account.platform !== 'devin') {
         appStore.showError(t('admin.accounts.apiKeyIsRequired'))
         return
       }
@@ -5979,6 +6029,24 @@ const handleSubmit = async () => {
       }
 
       updatePayload.credentials = newCredentials
+    }
+
+    if (props.account.platform === 'devin') {
+      updatePayload.extra = {
+        ...props.account.extra,
+        ...(updatePayload.extra as Record<string, unknown> | undefined),
+        ...devinContextExtra(devinContextSettings.value),
+        devin_fusion_profiles: devinFusionProfiles.value,
+        devin_fusion_enabled: devinFusionEnabled.value
+      }
+      const credentials: Record<string, unknown> = {
+        ...props.account.credentials,
+        base_url: editBaseUrl.value.trim() || defaultBaseUrl.value
+      }
+      const mapping = buildModelRestrictionMapping()
+      if (mapping) credentials.model_mapping = mapping
+      else delete credentials.model_mapping
+      updatePayload.credentials = credentials
     }
 
     // Grok OAuth: 自定义上游地址 + 请求头覆写。base_url 仅改写转发端点，

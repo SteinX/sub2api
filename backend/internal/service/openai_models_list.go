@@ -17,6 +17,14 @@ import (
 // API keys use the standard endpoint; OAuth reuses the authenticated, cached
 // Codex source. Account mappings and group policy are applied after this cache.
 func (s *OpenAIGatewayService) FetchOpenAIModelsList(ctx context.Context, account *Account) (*OpenAIModelsResponse, error) {
+	if s != nil && account != nil && account.Platform == PlatformDevin && s.devin != nil {
+		models, err := s.devin.Models(ctx, account)
+		if err != nil {
+			return nil, err
+		}
+		body, err := DevinModelsBody(models, account)
+		return &OpenAIModelsResponse{Body: body, ETag: codexModelsManifestBodyETag(body)}, err
+	}
 	if s == nil || account == nil {
 		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_MODELS_ACCOUNT_REQUIRED", "OpenAI account is required")
 	}

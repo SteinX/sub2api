@@ -121,6 +121,7 @@
     </div>
 
     <!-- Custom Model Input -->
+    <DevinModelRoutes v-if="syncedDevinRoutes.length" :routes="syncedDevinRoutes" :model-mappings="modelMappings" />
     <div class="mb-3">
       <label class="mb-1.5 block text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('admin.accounts.customModelName') }}</label>
       <div class="flex gap-2">
@@ -157,6 +158,8 @@ import Icon from '@/components/icons/Icon.vue'
 import { allModels, getModelsByPlatform } from '@/composables/useModelWhitelist'
 import { supportsUpstreamModelSync } from '@/constants/platformCatalog'
 import { extractApiErrorMessage } from '@/utils/apiError'
+import type { DevinModelRoute } from '@/api/admin/devin'
+import DevinModelRoutes from './DevinModelRoutes.vue'
 
 const { t } = useI18n()
 
@@ -166,6 +169,8 @@ const props = withDefaults(defineProps<{
   platform?: string
   platforms?: string[]
   accountId?: number
+  availableModels?: string[]
+  fusionModels?: string[]
   syncCredentials?: {
     platform: string
     type: string
@@ -203,6 +208,9 @@ onUnmounted(() => {
   upstreamSyncVersion += 1
 })
 
+const syncedModels = ref<string[]>([])
+const syncedDevinRoutes = ref<DevinModelRoute[]>([])
+watch(() => [props.accountId, props.platform, props.platforms, props.availableModels], () => { syncedModels.value = []; syncedDevinRoutes.value = [] })
 const normalizedPlatforms = computed(() => {
   const rawPlatforms =
     props.platforms && props.platforms.length > 0
@@ -232,10 +240,6 @@ const canSyncUpstream = computed(() => {
 })
 
 const availableOptions = computed(() => {
-  if (normalizedPlatforms.value.length === 0) {
-    return allModels
-  }
-
   const allowedModels = new Set<string>()
   for (const platform of normalizedPlatforms.value) {
     for (const model of getModelsByPlatform(platform)) {
@@ -243,7 +247,16 @@ const availableOptions = computed(() => {
     }
   }
 
-  return allModels.filter(model => allowedModels.has(model.value))
+  const builtins = normalizedPlatforms.value.length === 0 ? allModels : allModels.filter(model => allowedModels.has(model.value))
+  const options = new Map(builtins.map(model => [model.value, model]))
+  const discoveredModels = syncedDevinRoutes.value.length > 0
+    ? [...syncedModels.value, ...(props.fusionModels ?? [])]
+    : [...(props.availableModels ?? []), ...syncedModels.value, ...(props.fusionModels ?? [])]
+  for (const raw of discoveredModels) {
+    const id = raw.trim()
+    if (id && !options.has(id)) options.set(id, { value: id, label: id })
+  }
+  return [...options.values()]
 })
 
 const filteredModels = computed(() => {
@@ -297,6 +310,13 @@ const handleEnter = () => {
 
 const fillRelated = () => {
   const newModels = [...props.modelValue]
+  if (props.availableModels !== undefined || syncedModels.value.length > 0) {
+    for (const model of availableOptions.value) {
+      if (!newModels.includes(model.value)) newModels.push(model.value)
+    }
+    emit('update:modelValue', newModels)
+    return
+  }
   for (const platform of normalizedPlatforms.value) {
     for (const model of getModelsByPlatform(platform)) {
       if (!newModels.includes(model)) {
@@ -314,6 +334,7 @@ const syncUpstreamModels = async () => {
   const accountId = props.accountId
   const previewCredentials = props.syncCredentials
   const isCurrentSync = () => syncVersion === upstreamSyncVersion
+  const platform = props.platform
   isSyncingUpstream.value = true
   try {
     let result
@@ -331,9 +352,16 @@ const syncUpstreamModels = async () => {
       return
     }
 
+    if (props.accountId !== accountId || props.platform !== platform) return
     const upstreamModels = result.models.map(model => model.trim()).filter(Boolean)
+    syncedModels.value = upstreamModels
+    syncedDevinRoutes.value = result.devin_routes ?? []
     if (upstreamModels.length === 0) {
-      appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
+      if (syncedDevinRoutes.value.some(route => route.route_mode === 'blocked')) {
+        appStore.showWarning(t('admin.accounts.devin.routesBlocked'))
+      } else {
+        appStore.showInfo(t('admin.accounts.syncUpstreamModelsEmpty'))
+      }
       return
     }
 
@@ -369,6 +397,9 @@ const syncUpstreamModels = async () => {
     }
     if (hasPartialMetadata) {
       appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataPartial'))
+    }
+    if (warnings.some(warning => warning.code === 'devin_model_routes_blocked')) {
+      appStore.showWarning(t('admin.accounts.devin.routesBlocked'))
     }
   } catch (error) {
     if (!isCurrentSync()) return

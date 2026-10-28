@@ -217,6 +217,35 @@ security:
 # 网关配置
 # =============================================================================
 gateway:
+  # Platform-owned Devin contexts: per-account GUI opt-in or allowlisted rollout.
+  # 平台托管压缩：默认关闭。接口和运维说明见 docs/DEVIN_CONTEXT.md。
+  devin_context:
+    enabled: false # Legacy rollout default for accounts without a GUI override.
+    force_disabled: false # Emergency stop for both account overrides and rollout.
+    manual_compact: false
+    auto_compaction: true
+    api_key_ids: [] # Required for legacy rollout; optional restriction for GUI opt-in.
+    model_uids: [] # Required for legacy rollout; optional restriction for GUI opt-in.
+    account_ids: [] # Empty permits any otherwise authorized Devin account.
+    ttl_seconds: 86400
+    max_history_bytes: 67108864
+    max_user_history_bytes: 268435456
+    max_sessions_per_key: 8
+    max_sessions_per_user: 32
+    max_requests: 4096
+    max_turn_requests: 4
+    max_turn_cost_usd: 5
+    max_maintenance_cost_usd: 10
+    max_user_maintenance_cost_usd: 50 # Rolling 24 hours, all API keys combined.
+    max_context_bytes: 2097152
+    max_output_tokens: 4096
+    wall_seconds: 180
+    summary_seconds: 30
+    summary_output_tokens: 1024
+    summary_attempts: 2
+  # Paid Fusion Lead cache warming defaults on; false stops new warm requests.
+  # Fusion Lead 缓存预热默认开启；可在 profile 中单独关闭，费用和并发限制始终生效。
+  devin_fusion_cache_warm_enabled: true
   # Minimum max_output_tokens when converting Chat Completions or Anthropic requests to Responses (minimum 16, default 128)
   # Chat Completions 或 Anthropic 请求转换为 Responses 时的最小 max_output_tokens（最小 16，默认 128）
   min_output_tokens: 128

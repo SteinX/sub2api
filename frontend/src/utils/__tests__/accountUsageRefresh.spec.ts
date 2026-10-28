@@ -1,5 +1,29 @@
 import { describe, expect, it } from 'vitest'
-import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey } from '../accountUsageRefresh'
+import { buildGrokUsageRefreshKey, buildOpenAIUsageRefreshKey, isAccountUsageCacheFresh } from '../accountUsageRefresh'
+import type { AccountUsageInfo } from '@/types'
+
+describe('Devin usage cache expiry', () => {
+  const start = Date.parse('2026-10-22T12:00:00Z')
+  const usage: AccountUsageInfo = { five_hour: null, seven_day: null, seven_day_sonnet: null, updated_at: new Date(start).toISOString() }
+
+  it.each(['daily', 'seven_day'] as const)('expires at the %s reset', (window) => {
+    const entry = { ts: start, data: { ...usage, [window]: { utilization: 100, resets_at: new Date(start + 60_000).toISOString(), remaining_seconds: 60 } } }
+    expect(isAccountUsageCacheFresh({ platform: 'devin' }, entry, 300_000, start + 59_999)).toBe(true)
+    expect(isAccountUsageCacheFresh({ platform: 'devin' }, entry, 300_000, start + 60_000)).toBe(false)
+  })
+
+  it('keeps the backend observation lifetime when received from its cache', () => {
+    const entry = { ts: start + 120_000, data: usage }
+    expect(isAccountUsageCacheFresh({ platform: 'devin' }, entry, 300_000, start + 179_999)).toBe(true)
+    expect(isAccountUsageCacheFresh({ platform: 'devin' }, entry, 300_000, start + 180_000)).toBe(false)
+    expect(isAccountUsageCacheFresh({ platform: 'openai' }, entry, 300_000, start + 180_000)).toBe(true)
+  })
+
+  it('allows retrying failed probes after one minute', () => {
+    const entry = { ts: start, data: { ...usage, updated_at: null, error_code: 'network_error', error: 'query failed' } }
+    expect(isAccountUsageCacheFresh({ platform: 'devin' }, entry, 300_000, start + 60_000)).toBe(false)
+  })
+})
 
 describe('buildOpenAIUsageRefreshKey', () => {
   it('会在 codex 快照变化时生成不同 key', () => {

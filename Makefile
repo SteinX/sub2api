@@ -1,4 +1,4 @@
-.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
+.PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical test-devin-e2e test-devin-plan test-devin-live
 
 FRONTEND_CRITICAL_VITEST := \
 	src/i18n/__tests__/localeKeyCompleteness.spec.ts \
@@ -6,16 +6,26 @@ FRONTEND_CRITICAL_VITEST := \
 	src/api/__tests__/tokenRefresh.spec.ts \
 	src/api/__tests__/keys.bulkUpdate.spec.ts \
 	src/composables/__tests__/useModelWhitelist.spec.ts \
+	src/utils/__tests__/accountUsageRefresh.spec.ts \
 	src/components/account/__tests__/OpenAIReferralCell.spec.ts \
 	src/components/account/__tests__/OpenAIReferralCell.transport.spec.ts \
 	src/components/account/__tests__/OpenAIQuotaResetCell.spark_shadow.spec.ts \
 	src/constants/__tests__/platforms.spec.ts \
 	src/components/account/__tests__/credentialsBuilder.platformCatalog.spec.ts \
 	src/components/account/__tests__/CreateAccountModal.spec.ts \
+	src/components/account/__tests__/DevinConnectionFlow.spec.ts \
+	src/components/account/__tests__/DevinModelRoutes.spec.ts \
+	src/components/account/__tests__/DevinFusionProfiles.spec.ts \
+	src/components/account/__tests__/DevinContextSettings.spec.ts \
+	src/components/account/__tests__/AccountUsageCell.spec.ts \
+	src/components/account/__tests__/ModelWhitelistSelector.spec.ts \
+	src/components/admin/account/__tests__/ReAuthAccountModal.devin.spec.ts \
 	src/components/account/__tests__/EditAccountModal.spec.ts \
 	src/components/account/__tests__/credentialsBuilder.spec.ts \
 	src/components/account/__tests__/OpenCodeGoProtocolRulesEditor.spec.ts \
 	src/components/keys/__tests__/BulkEditKeysModal.spec.ts \
+	src/components/keys/__tests__/UseKeyModal.spec.ts \
+	src/components/keys/__tests__/DevinHandoffConfig.spec.ts \
 	src/components/admin/user/__tests__/UserPlatformQuotaModal.spec.ts \
 	src/views/user/__tests__/KeysView.spec.ts \
 	src/api/__tests__/channelMonitorV2.spec.ts \
@@ -27,6 +37,8 @@ FRONTEND_CRITICAL_VITEST := \
 	src/components/user/profile/__tests__/ProfileInfoCard.spec.ts \
 	src/components/user/profile/__tests__/ProfileIdentityBindingsSection.spec.ts \
 	src/views/admin/__tests__/SettingsView.spec.ts \
+	src/views/admin/settings/__tests__/DevinClientIdentitySettings.spec.ts \
+	src/views/admin/__tests__/AccountsView.sparkShadow.spec.ts \
 	src/features/channel-monitor-v2/__tests__/designSystem.structure.spec.ts \
 	src/features/channel-monitor-v2/__tests__/monitorFormat.spec.ts \
 	src/features/channel-monitor-v2/__tests__/monitorZoom.spec.ts \
@@ -56,3 +68,54 @@ test-frontend:
 
 test-frontend-critical:
 	@pnpm --dir frontend exec vitest run $(FRONTEND_CRITICAL_VITEST)
+
+# Protocol contracts: production binary and synthetic native RPCs; no client journey.
+.PHONY: test-devin-contracts-mock test-devin-client-contracts-mock test-devin-fusion-contracts-mock test-devin-user-journeys-mock test-devin-acceptance
+test-devin-contracts-mock:
+	@bash deploy/devin-e2e.sh mock
+
+test-devin-e2e: test-devin-contracts-mock
+	@echo "Deprecated name: protocol contracts are not user E2E."
+
+# Validate PAT onboarding and public model grants without inference.
+test-devin-plan:
+	@bash deploy/devin-e2e.sh plan
+
+# Explicit opt-in: uses a dedicated Devin account and consumes upstream credits.
+test-devin-live:
+	@bash deploy/devin-e2e.sh live
+
+.PHONY: test-devin-agent-e2e test-devin-agent-plan test-devin-agent-live
+test-devin-client-contracts-mock:
+	@bash deploy/devin-agent-e2e.sh mock
+
+test-devin-agent-e2e: test-devin-client-contracts-mock
+	@echo "Deprecated name: hand-authored client contracts are not product E2E."
+
+test-devin-agent-plan:
+	@bash deploy/devin-agent-e2e.sh plan
+
+test-devin-agent-live:
+	@bash deploy/devin-agent-e2e.sh live
+
+.PHONY: test-devin-long-e2e test-devin-long-plan test-devin-long-live
+test-devin-fusion-contracts-mock:
+	@bash deploy/devin-long-e2e.sh mock
+
+test-devin-long-e2e: test-devin-fusion-contracts-mock
+	@echo "Deprecated name: internal Fusion orchestration contracts are not client E2E."
+
+test-devin-long-plan:
+	@bash deploy/devin-long-e2e.sh plan
+
+test-devin-long-live:
+	@bash deploy/devin-long-e2e.sh live
+
+# Actual product modal copy -> pinned CLI -> public Key -> project artifacts.
+# Synthetic model decisions; this target cannot certify real-upstream E2E.
+test-devin-user-journeys-mock:
+	@bash deploy/devin-user-journeys.sh mock
+
+test-devin-acceptance:
+	@python3 -m unittest discover -s tools/devin-acceptance -p 'test_*.py'
+	@node --test tools/devin-e2e-clients/test_ui_model_diagnostics.mjs

@@ -19,6 +19,13 @@ import (
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	if account.Platform == PlatformDevin {
+		if isOpenAIResponsesCompactPath(c) {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Devin does not support the compact endpoint"}})
+			return nil, errors.New("unsupported Devin compact endpoint")
+		}
+		return s.forwardDevin(ctx, c, account, body, "responses", "", "")
+	}
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {

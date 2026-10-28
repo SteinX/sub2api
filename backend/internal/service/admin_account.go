@@ -495,6 +495,9 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		return nil, err
 	}
 
+	if err := ValidateDevinAccountExtra(input.Platform, accountExtra); err != nil {
+		return nil, err
+	}
 	// 绑定分组
 	groupIDs := input.GroupIDs
 	// 如果没有指定分组,自动绑定对应平台的默认分组
@@ -662,6 +665,11 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		// Strip SSO/password residue that must never sit next to OAuth tokens.
 		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
+	}
+	if input.Extra != nil {
+		if err := ValidateDevinAccountExtra(account.Platform, normalizedExtra); err != nil {
+			return nil, err
+		}
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。
@@ -952,6 +960,24 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 			return err
 		}
 	}
+	_, profilesChanged := updates["devin_fusion_profiles"]
+	_, fusionEnabledChanged := updates["devin_fusion_enabled"]
+	if profilesChanged || fusionEnabledChanged || hasDevinContextExtra(updates) {
+		account, err := s.accountRepo.GetByID(ctx, id)
+		if err != nil {
+			return err
+		}
+		merged := maps.Clone(account.Extra)
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		for key, value := range updates {
+			merged[key] = value
+		}
+		if err := ValidateDevinAccountExtra(account.Platform, merged); err != nil {
+			return err
+		}
+	}
 	if len(updates) == 0 {
 		return nil
 	}
@@ -1003,11 +1029,14 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		return nil, err
 	}
 
+	_, fusionProfilesChanged := input.Extra["devin_fusion_profiles"]
+	_, fusionEnabledChanged := input.Extra["devin_fusion_enabled"]
+	devinSettingsChanged := fusionProfilesChanged || fusionEnabledChanged || hasDevinContextExtra(input.Extra)
 	needMixedChannelCheck := input.GroupIDs != nil && !input.SkipMixedChannelCheck
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
+	if devinSettingsChanged || len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1018,6 +1047,23 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	for _, account := range cachedTargets {
 		if account != nil {
 			targetsByID[account.ID] = account
+		}
+	}
+	if devinSettingsChanged {
+		for _, account := range cachedTargets {
+			if account == nil {
+				continue
+			}
+			merged := maps.Clone(account.Extra)
+			if merged == nil {
+				merged = map[string]any{}
+			}
+			for key, value := range input.Extra {
+				merged[key] = value
+			}
+			if err := ValidateDevinAccountExtra(account.Platform, merged); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if openAISettings.any() {

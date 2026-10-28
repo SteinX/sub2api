@@ -242,8 +242,11 @@ func chatUserToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 func chatAssistantToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 	var items []ResponsesInputItem
 	content := ""
+	if m.ReasoningSignature != "" {
+		items = append(items, ResponsesInputItem{Type: "reasoning", EncryptedContent: m.ReasoningSignature})
+	}
 
-	if m.ReasoningContent != "" {
+	if m.ReasoningContent != "" && m.ReasoningSignature == "" {
 		content = "<thinking>" + m.ReasoningContent + "</thinking>"
 	}
 
