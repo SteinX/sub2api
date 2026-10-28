@@ -253,6 +253,30 @@ func TestDevinCatalogPriceOrdinaryForwardUsesSnapshot(t *testing.T) {
 	}
 }
 
+func TestDevinCatalogPriceOrdinaryMissingPriceDoesNotReprice(t *testing.T) {
+	f := newCatalogPricingFixture(t)
+	f.models[1].ModelCostTier = pb.ModelCostTier_MODEL_COST_TIER_UNSPECIFIED
+	f.models[1].PromoStatus = nil
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	c.Set("api_key", f.key)
+	body := []byte(`{"model":"` + futureFreeUID + `","input":"hello","max_output_tokens":128}`)
+	result, err := f.service.forwardDevin(c.Request.Context(), c, f.account, body, "responses", "test", "")
+	require.NoError(t, err)
+	require.NotNil(t, result.devinPricing)
+	require.False(t, result.devinPricing.Prices[futureFreeUID].Identified)
+	require.Nil(t, result.devinPricing.Prices[futureFreeUID].Resolved.BasePricing)
+	// The ordinary missing-price path remains a zero-cost record. A card
+	// published after inference must not silently add a retrospective charge.
+	f.service.billingService.fallbackPrices[futureFreeUID] = &ModelPricing{InputPricePerToken: .5, OutputPricePerToken: .5}
+	require.NoError(t, f.service.RecordUsage(context.Background(), &OpenAIRecordUsageInput{Result: result, APIKey: f.key, User: f.key.User, Account: f.account}))
+	require.Zero(t, f.logs.lastLog.TotalCost)
+	require.Zero(t, f.logs.lastLog.ActualCost)
+	// Missing remains distinct from explicitly identified catalog FREE.
+	require.False(t, result.devinPricing.Prices[futureFreeUID].Identified)
+}
+
 func TestDevinCatalogPriceFusionFullFlowAndRecovery(t *testing.T) {
 	f := newCatalogPricingFixture(t)
 	x := f.executor()
@@ -414,4 +438,125 @@ func TestDevinCatalogPriceInspectionAcrossAccounts(t *testing.T) {
 			require.Empty(t, f.bills.commands)
 		})
 	}
+}
+
+func (f *catalogPricingFixture) toolTurnBody(callID string) []byte {
+	input := any("hello")
+	if callID != "" {
+		input = []any{map[string]any{"type": "function_call_output", "call_id": callID, "output": "verified"}}
+	}
+	b, _ := json.Marshal(map[string]any{"model": "fusion-team", "input": input, "max_output_tokens": 128, "tools": []any{map[string]any{"type": "function", "name": "read_file", "parameters": map[string]any{"type": "object"}}}})
+	return b
+}
+
+func (f *catalogPricingFixture) fusionRequest(body []byte, session string) (*httptest.ResponseRecorder, error) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	c.Request.Header.Set(fusion.HeaderSession, session)
+	c.Set("api_key", f.key)
+	_, err := f.service.BindDevinFusionRequest(c, f.key, "fusion-team", body, "responses", nil)
+	if err == nil {
+		_, err = f.service.forwardDevin(c.Request.Context(), c, f.account, body, "responses", "", "")
+	}
+	return w, err
+}
+
+func (f *catalogPricingFixture) scriptedToolTurn(sideEffect func()) {
+	f.account.Extra[fusion.ExtraProfiles] = []fusion.Profile{f.executor().profile}
+	f.chat = func(wire *pb.GetChatMessageRequest) *pb.GetChatMessageResponse {
+		switch f.chatCalls {
+		case 1:
+			return &pb.GetChatMessageResponse{DeltaToolCalls: []*pb.ChatToolCall{{Id: "delegate", Name: fusion.DelegateTool, ArgumentsJson: `{"task":"inspect","acceptance_criteria":"verify"}`}}}
+		case 2:
+			if sideEffect != nil {
+				sideEffect()
+			}
+			return &pb.GetChatMessageResponse{DeltaToolCalls: []*pb.ChatToolCall{{Id: "private-read", Name: "read_file", ArgumentsJson: `{}`}}}
+		default:
+			return &pb.GetChatMessageResponse{DeltaText: "complete"}
+		}
+	}
+}
+
+func TestDevinCatalogPriceFusionRechecksEachHTTPRound(t *testing.T) {
+	for _, mode := range []string{"still-free", "promotion-ended", "explicit-price-added-during-generation"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCatalogPricingFixture(t)
+			f.scriptedToolTurn(func() {
+				if mode == "explicit-price-added-during-generation" {
+					f.key.Group.ModelPricing = []ChannelModelPricing{{Models: []string{futureFreeUID}, Platform: PlatformDevin, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(.001), OutputPrice: testPtrFloat64(.002)}}
+				}
+			})
+			first, err := f.fusionRequest(f.toolTurnBody(""), "")
+			require.NoError(t, err)
+			require.Equal(t, 2, f.chatCalls)
+			var response apicompat.ResponsesResponse
+			require.NoError(t, json.Unmarshal(first.Body.Bytes(), &response))
+			require.NotEmpty(t, response.Output)
+			callID := response.Output[0].CallID
+			require.NotEmpty(t, callID)
+			sessionID := first.Header().Get(fusion.HeaderSession)
+			sess, _, err := f.service.devin.fusionEngine().Load(context.Background(), fusion.Scope(f.key.UserID, f.key.ID), sessionID)
+			require.NoError(t, err)
+			require.Len(t, sess.Attempts, 2)
+			require.Equal(t, futureFreeUID, sess.Attempts[1].Model)
+			require.Zero(t, sess.Attempts[1].CostUSD, "the first physical Sidekick call must retain its pre-send FREE snapshot, including after an admin edit inside generation")
+			if mode == "promotion-ended" {
+				f.models[1].PromoStatus.EndDate = timestamppb.New(time.Now().Add(-time.Second))
+			}
+			f.expireCatalog()
+			_, err = f.fusionRequest(f.toolTurnBody(callID), sessionID)
+			if mode == "promotion-ended" {
+				require.ErrorContains(t, err, futureFreeUID)
+				require.Equal(t, 2, f.chatCalls, "an expired first-round promotion must not authorize any second-round generation")
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 4, f.chatCalls)
+			sess, _, err = f.service.devin.fusionEngine().Load(context.Background(), fusion.Scope(f.key.UserID, f.key.ID), sessionID)
+			require.NoError(t, err)
+			require.Len(t, sess.Attempts, 4)
+			require.Equal(t, futureFreeUID, sess.Attempts[2].Model)
+			if mode == "still-free" {
+				require.Zero(t, sess.Attempts[2].CostUSD)
+			} else {
+				require.Positive(t, sess.Attempts[2].CostUSD, "a new call must adopt the newly explicit scoped rate")
+			}
+			require.Equal(t, 2, f.modelCalls)
+		})
+	}
+}
+
+func TestDevinCatalogPriceIngressRecoveryUsesPersistedSnapshot(t *testing.T) {
+	f := newCatalogPricingFixture(t)
+	f.scriptedToolTurn(func() { f.bills.fail = true })
+	first, err := f.fusionRequest(f.toolTurnBody(""), "")
+	require.Error(t, err)
+	sessionID := first.Header().Get(fusion.HeaderSession)
+	scope := fusion.Scope(f.key.UserID, f.key.ID)
+	sess, _, err := f.service.devin.fusionEngine().Load(context.Background(), scope, sessionID)
+	require.NoError(t, err)
+	require.Len(t, sess.Attempts, 2)
+	require.False(t, sess.Attempts[1].Settled)
+	require.NotEmpty(t, sess.Attempts[1].PricingSnapshot)
+	f.bills.fail = false
+	f.failCatalog = true
+	f.expireCatalog()
+	// A new ingress creates a new settlement executor in Bind, before account
+	// scheduling or catalog refresh. It must recover from the stored receipt.
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	c.Request.Header.Set(fusion.HeaderSession, sessionID)
+	c.Set("api_key", f.key)
+	_, err = f.service.BindDevinFusionRequest(c, f.key, "fusion-team", f.toolTurnBody(""), "responses", nil)
+	require.NoError(t, err)
+	sess, _, err = f.service.devin.fusionEngine().Load(context.Background(), scope, sessionID)
+	require.NoError(t, err)
+	require.True(t, sess.Attempts[1].Settled)
+	require.Zero(t, sess.Attempts[1].CostUSD)
+	require.Equal(t, 2, f.chatCalls)
+	require.Equal(t, 1, f.modelCalls, "ingress settlement must not fetch the current catalog")
+	require.Len(t, f.bills.commands, 2)
 }
