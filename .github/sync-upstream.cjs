@@ -22,6 +22,14 @@ function releaseTag(release) {
   return `${release.tag_name}-stx.1`;
 }
 
+// Any published -stx.N release fulfils the upstream version; a maintainer may
+// publish a later revision when an automated -stx.1 publication cannot finish.
+async function publishedForkRelease(github, upstreamTag) {
+  const pattern = new RegExp(`^${upstreamTag.replace(/\./g, '\\.')}-stx\\.[1-9]\\d*$`);
+  const releases = (await github.rest.repos.listReleases({ ...FORK, per_page: 100 })).data;
+  return releases.find(release => !release.draft && !release.prerelease && pattern.test(release.tag_name)) || null;
+}
+
 function checkedSha(sha) {
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Invalid source commit SHA');
   return sha;
@@ -65,8 +73,8 @@ async function plan({ github, context, core }) {
   const release = await optional(() => github.rest.repos.getLatestRelease(UPSTREAM));
   if (!release) { core.info('No stable upstream release yet'); return; }
   const tag = releaseTag(release);
-  const published = await optional(() => github.rest.repos.getReleaseByTag({ ...FORK, tag }));
-  if (published && !published.draft) { core.info(`${tag} is already published`); return; }
+  const published = await publishedForkRelease(github, release.tag_name);
+  if (published) { core.info(`${published.tag_name} is already published for upstream ${release.tag_name}`); return; }
 
   // GITHUB_TOKEN tag pushes do not trigger another workflow. Dispatch explicitly,
   // and use the release run name to avoid retrying a failed publication blindly.
@@ -164,4 +172,4 @@ async function publishOrWait(dependencies, request) {
   }
 }
 
-module.exports = { plan, publish, publishOrWait, releaseTag };
+module.exports = { plan, publish, publishOrWait, releaseTag, publishedForkRelease };

@@ -32,9 +32,10 @@ publisher updates `latest` after a successful build.
 The fork suffix is written into the built artifact, while main's tracked VERSION
 stays aligned with upstream to avoid a version-file conflict on the next sync.
 
-One fork release is made per upstream stable version. Existing completed releases
-are skipped, in-progress releases are allowed to finish, and existing tags are
-never moved. If main changes during validation, publication stops and the next
+One fork release is made per upstream stable version. A published stable
+`-stx.N` release of that version, including a later maintainer revision that
+replaces a failed `-stx.1` publication, counts as complete and is skipped;
+in-progress releases are allowed to finish, and existing tags are never moved. If main changes during validation, publication stops and the next
 run validates the new commit. If dispatch was interrupted after tag creation, the
 next run validates that frozen tag and resumes publication. Failed release runs
 require inspection and rerunning the failed jobs in GitHub Actions; scheduled
