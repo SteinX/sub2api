@@ -292,7 +292,7 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if err != nil {
 		return result, err
 	}
-	estimate, err := x.Estimate(ctx, fusion.Call{Purpose: fusion.CacheRefresh, Role: fusion.Lead, Request: priced, PricingAt: attempt.StartedAt})
+	estimate, err := x.Estimate(ctx, fusion.Call{AttemptID: id, Purpose: fusion.CacheRefresh, Role: fusion.Lead, Request: priced, PricingAt: attempt.StartedAt})
 	if err != nil {
 		return result, err
 	}

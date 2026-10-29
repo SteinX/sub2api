@@ -363,6 +363,7 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		trace.BillingSource = "mapped_request_fallback"
 	}
 	pricing.pinModel(billingModel)
+	pricing.pinModel(decoder.ActualModel)
 	trace.BillingModel, trace.Evidence = devin.DiagnosticModelID(billingModel), decoder.Evidence
 	if decoder.Response.Usage == nil {
 		trace.BillingModel, trace.BillingSource = "", ""

@@ -121,7 +121,9 @@ func (x *devinFusionExecutor) cost(ctx context.Context, model string, u UsageTok
 		return nil, fusion.E("billing_unavailable", "physical model pricing is unavailable", 503)
 	}
 	if _, pinned := devinPriceFromContext(ctx, x.key, model); !pinned {
-		if x.pricing == nil {
+		// Read-only quotes have no physical attempt whose price must remain
+		// pinned. Actual estimates/executions carry a stable attempt ID.
+		if x.pricing == nil || x.pricingAttempt == "" {
 			x.refreshPricing(ctx, "", model)
 		}
 		ctx = withDevinPricing(ctx, x.pricing)

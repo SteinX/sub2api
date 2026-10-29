@@ -38,6 +38,7 @@ type catalogPricingFixture struct {
 	modelCalls  int
 	chatCalls   int
 	billingUID  string
+	actualUID   string
 	failCatalog bool
 	chat        func(*pb.GetChatMessageRequest) *pb.GetChatMessageResponse
 	logs        *openAIRecordUsageLogRepoStub
@@ -96,6 +97,9 @@ func newCatalogPricingFixture(t *testing.T) *catalogPricingFixture {
 			reply := &pb.GetChatMessageResponse{MessageId: fmt.Sprint(f.chatCalls), DeltaText: "done", StopReason: pb.StopReason_STOP_REASON_STOP_PATTERN, ActualModelUid: proto.String(request.ChatModelUid), Usage: &pb.ModelUsageStats{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 40, CacheWriteTokens: 10, BillingModelUid: request.ChatModelUid}}
 			if f.billingUID != "" {
 				reply.Usage.BillingModelUid = f.billingUID
+			}
+			if f.actualUID != "" {
+				reply.ActualModelUid = proto.String(f.actualUID)
 			}
 			if f.chat != nil {
 				custom := f.chat(&request)
@@ -298,6 +302,31 @@ func TestDevinCatalogPriceOrdinaryRequestedAliasUsesSnapshot(t *testing.T) {
 			require.Equal(t, 1, f.modelCalls, "settlement must never refetch the catalog")
 		})
 	}
+}
+
+func TestDevinCatalogPriceResponseModelUsesSnapshot(t *testing.T) {
+	f := newCatalogPricingFixture(t)
+	f.actualUID = futureFreeUID
+	base := ChannelModelPricing{Models: []string{"gpt-5.5"}, Platform: PlatformDevin, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(2e-6), OutputPrice: testPtrFloat64(4e-6), CacheReadPrice: testPtrFloat64(1e-6), CacheWritePrice: testPtrFloat64(3e-6)}
+	response := ChannelModelPricing{Models: []string{futureFreeUID}, Platform: PlatformDevin, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(1e-6), OutputPrice: testPtrFloat64(2e-6), CacheReadPrice: testPtrFloat64(.5e-6), CacheWritePrice: testPtrFloat64(1.5e-6)}
+	f.key.Group.ModelPricing = []ChannelModelPricing{base, response}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	c.Set("api_key", f.key)
+	result, err := f.service.forwardDevin(c.Request.Context(), c, f.account, []byte(`{"model":"gpt-5.5","input":"hello","max_output_tokens":128}`), "responses", "test", "")
+	require.NoError(t, err)
+	require.Equal(t, futureFreeUID, result.UpstreamResponseModel)
+	// Preserve the existing opt-in response-model discount after an admin edit.
+	response.InputPrice = testPtrFloat64(.5)
+	f.key.Group.ModelPricing = []ChannelModelPricing{base, response}
+	f.expireCatalog()
+	f.failCatalog = true
+	err = f.service.RecordUsage(context.Background(), &OpenAIRecordUsageInput{Result: result, APIKey: f.key, User: f.key.User, Account: f.account, ChannelUsageFields: ChannelUsageFields{OriginalModel: "gpt-5.5", BillingModelSource: BillingModelSourceResponse}})
+	require.NoError(t, err)
+	want := 100*1e-6 + 20*2e-6 + 40*.5e-6 + 10*1.5e-6
+	require.InDelta(t, want, f.logs.lastLog.TotalCost, 1e-12)
+	require.Equal(t, 1, f.modelCalls)
 }
 
 func reportedBillingFixture(t *testing.T, price string) (*catalogPricingFixture, float64) {
