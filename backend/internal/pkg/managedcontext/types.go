@@ -128,26 +128,27 @@ type ModelLimits struct {
 
 type Attempt struct {
 	Owner
-	ID             string                    `json:"id"`
-	OperationID    string                    `json:"operation_id"`
-	SessionID      string                    `json:"session_id,omitempty"`
-	Model          string                    `json:"model"`
-	BillingModel   string                    `json:"billing_model,omitempty"`
-	Purpose        string                    `json:"purpose"`
-	State          string                    `json:"state"`
-	Settled        bool                      `json:"settled"`
-	CostUSD        float64                   `json:"cost_usd"`
-	EstimateUSD    float64                   `json:"estimate_usd"`
-	ResponseRef    string                    `json:"response_ref,omitempty"`
-	Usage          *apicompat.ResponsesUsage `json:"usage,omitempty"`
-	ResponseID     string                    `json:"response_id,omitempty"`
-	ResponseModel  string                    `json:"response_model,omitempty"`
-	ResponseStatus string                    `json:"response_status,omitempty"`
-	Error          *cc.Error                 `json:"error,omitempty"`
-	StartedAt      time.Time                 `json:"started_at"`
-	Deadline       time.Time                 `json:"deadline"`
-	Policy         Policy                    `json:"policy"`
-	ReservationID  string                    `json:"reservation_id,omitempty"`
+	ID              string                    `json:"id"`
+	OperationID     string                    `json:"operation_id"`
+	SessionID       string                    `json:"session_id,omitempty"`
+	Model           string                    `json:"model"`
+	BillingModel    string                    `json:"billing_model,omitempty"`
+	PricingSnapshot json.RawMessage           `json:"pricing_snapshot,omitempty"`
+	Purpose         string                    `json:"purpose"`
+	State           string                    `json:"state"`
+	Settled         bool                      `json:"settled"`
+	CostUSD         float64                   `json:"cost_usd"`
+	EstimateUSD     float64                   `json:"estimate_usd"`
+	ResponseRef     string                    `json:"response_ref,omitempty"`
+	Usage           *apicompat.ResponsesUsage `json:"usage,omitempty"`
+	ResponseID      string                    `json:"response_id,omitempty"`
+	ResponseModel   string                    `json:"response_model,omitempty"`
+	ResponseStatus  string                    `json:"response_status,omitempty"`
+	Error           *cc.Error                 `json:"error,omitempty"`
+	StartedAt       time.Time                 `json:"started_at"`
+	Deadline        time.Time                 `json:"deadline"`
+	Policy          Policy                    `json:"policy"`
+	ReservationID   string                    `json:"reservation_id,omitempty"`
 }
 type Job struct {
 	Model string                    `json:"model"`
@@ -243,6 +244,7 @@ type Call struct {
 type Outcome struct {
 	Response                 *apicompat.ResponsesResponse
 	BillingModel             string
+	PricingSnapshot          json.RawMessage
 	KnownFailure, NotStarted bool
 }
 type Executor interface {

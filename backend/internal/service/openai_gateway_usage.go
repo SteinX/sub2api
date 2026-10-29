@@ -163,6 +163,9 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if result.FusionUsageSettled {
 		return nil
 	}
+	if result.devinPricing != nil && input.Account != nil && input.Account.Platform == PlatformDevin && result.devinPricing.AccountID == input.Account.ID {
+		ctx = withDevinPricing(ctx, result.devinPricing)
+	}
 	if s.rateLimitService != nil && input.Account != nil && input.Account.Platform == PlatformOpenAI {
 		s.rateLimitService.ResetOpenAI403Counter(ctx, input.Account.ID)
 	}
@@ -545,6 +548,9 @@ func (s *OpenAIGatewayService) hasIdentifiedOpenAIResponsePricing(ctx context.Co
 	if model == "" {
 		return false, false
 	}
+	if price, ok := devinPriceFromContext(ctx, apiKey, model); ok {
+		return price.Identified, price.Resolved != nil && (price.Resolved.Source == PricingSourceGroup || price.Resolved.Source == PricingSourceChannel)
+	}
 	if s.resolveOpenAIChannelPricing(ctx, model, apiKey) != nil {
 		return true, true
 	}
@@ -748,6 +754,18 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageTokenCost(
 	longContextBillingGate *bool,
 	modelLongContextExempt bool,
 ) (*CostBreakdown, error) {
+	if price, ok := devinPriceFromContext(ctx, apiKey, billingModel); ok && price.Resolved != nil {
+		resolver := s.resolver
+		if resolver == nil {
+			resolver = NewModelPricingResolver(nil, s.billingService)
+		}
+		return s.billingService.CalculateCostUnified(CostInput{
+			Ctx: ctx, Model: billingModel, Tokens: tokens, RequestCount: 1,
+			RateMultiplier: multiplier, PricingAt: pricingAt, ServiceTier: serviceTier,
+			ReasoningEffort: reasoningEffort, Resolver: resolver, Resolved: price.resolved(),
+			LongContextBillingEnabled: longContextBillingGate, DisableModelLongContextPricing: modelLongContextExempt,
+		})
+	}
 	if s.resolver != nil && apiKey.Group != nil {
 		gid := apiKey.Group.ID
 		return s.billingService.CalculateCostUnified(CostInput{
@@ -978,6 +996,12 @@ func (s *OpenAIGatewayService) filterCNProviderBillingModelCandidates(ctx contex
 }
 
 func (s *OpenAIGatewayService) resolveOpenAIChannelPricing(ctx context.Context, billingModel string, apiKey *APIKey) *ResolvedPricing {
+	if price, ok := devinPriceFromContext(ctx, apiKey, billingModel); ok {
+		if r := price.resolved(); r != nil && (r.Source == PricingSourceGroup || r.Source == PricingSourceChannel) {
+			return r
+		}
+		return nil
+	}
 	if s.resolver == nil || apiKey == nil || apiKey.Group == nil {
 		return nil
 	}

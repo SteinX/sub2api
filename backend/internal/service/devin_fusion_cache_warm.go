@@ -292,7 +292,7 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if err != nil {
 		return result, err
 	}
-	estimate, err := x.Estimate(ctx, fusion.Call{Purpose: fusion.CacheRefresh, Role: fusion.Lead, Request: priced, PricingAt: attempt.StartedAt})
+	estimate, err := x.Estimate(ctx, fusion.Call{AttemptID: id, Purpose: fusion.CacheRefresh, Role: fusion.Lead, Request: priced, PricingAt: attempt.StartedAt})
 	if err != nil {
 		return result, err
 	}
@@ -333,6 +333,9 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if err = ctx.Err(); err != nil {
 		return result, err
 	}
+	if !x.pricing.readyForInference(time.Now()) {
+		return result, fusion.E("pricing_unavailable", "account catalog price expired before cache refresh", 400)
+	}
 	d := devin.NewEventDecoder(snapshot.Model, func(apicompat.ResponsesStreamEvent) error { return nil }, wire.Tools...)
 	stop := pb.StopReason_STOP_REASON_UNSPECIFIED
 	visible := false
@@ -357,7 +360,8 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if billingModel == "" {
 		billingModel = snapshot.Model
 	}
-	result.Outcome = fusion.Outcome{Response: &d.Response, BillingModel: billingModel}
+	x.pricing.pinModel(billingModel)
+	result.Outcome = fusion.Outcome{Response: &d.Response, BillingModel: billingModel, PricingSnapshot: x.pricing.marshal()}
 	if err != nil {
 		var upstream *devin.Error
 		if errors.As(err, &upstream) && !visible && d.Response.Usage == nil {

@@ -206,11 +206,11 @@ func (x *contextExecutor) Execute(ctx context.Context, c mc.Call) (mc.Outcome, e
 		return mc.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
 	o, err := x.physical.Execute(ctx, physicalCall(c))
-	return mc.Outcome{Response: o.Response, BillingModel: o.BillingModel, KnownFailure: o.KnownFailure, NotStarted: o.NotStarted}, contextError(err)
+	return mc.Outcome{Response: o.Response, BillingModel: o.BillingModel, PricingSnapshot: o.PricingSnapshot, KnownFailure: o.KnownFailure, NotStarted: o.NotStarted}, contextError(err)
 }
 func (x *contextExecutor) Settle(ctx context.Context, a mc.Attempt) (float64, error) {
 	response := &apicompat.ResponsesResponse{ID: a.ResponseID, Model: a.ResponseModel, Status: a.ResponseStatus, Usage: a.Usage}
-	cost, err := x.physical.Settle(ctx, fusion.Attempt{ID: a.ID, Purpose: fusion.Purpose(contextBillingPurpose(a.Purpose)), Role: fusion.Role("main"), Model: a.Model, BillingModel: a.BillingModel, StartedAt: a.StartedAt, Response: response, EstimateUSD: a.EstimateUSD})
+	cost, err := x.physical.Settle(ctx, fusion.Attempt{ID: a.ID, Purpose: fusion.Purpose(contextBillingPurpose(a.Purpose)), Role: fusion.Role("main"), Model: a.Model, BillingModel: a.BillingModel, PricingSnapshot: a.PricingSnapshot, StartedAt: a.StartedAt, Response: response, EstimateUSD: a.EstimateUSD})
 	return cost, contextError(err)
 }
 func (x *contextExecutor) Auxiliary(ctx context.Context) (mc.Executor, func(), bool) {

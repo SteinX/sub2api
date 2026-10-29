@@ -514,6 +514,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		a := &s.Attempts[len(s.Attempts)-1]
 		a.Response = outcome.Response
 		a.BillingModel = outcome.BillingModel
+		a.PricingSnapshot = outcome.PricingSnapshot
 		if outcome.Response != nil && outcome.Response.Usage != nil {
 			a.Status = "completed"
 		} else if outcome.KnownFailure {

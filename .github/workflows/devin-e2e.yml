@@ -140,7 +140,9 @@ jobs:
     name: user-journeys-${{ matrix.shard }}
     if: github.event_name != 'workflow_dispatch' || inputs.mode == 'mock'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # The 1100-second mock suite starts after dependency, UI and Go builds.
+    # Leave time for that setup and verified cleanup without changing its bound.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

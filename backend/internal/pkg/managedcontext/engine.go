@@ -483,6 +483,7 @@ func (e *Engine) executeCall(ctx context.Context, a *Attempt, ar *Record, call C
 	}
 	outcome, executeErr := x.Execute(ctx, call)
 	a.BillingModel = outcome.BillingModel
+	a.PricingSnapshot = outcome.PricingSnapshot
 	if a.BillingModel == "" {
 		a.BillingModel = a.Model
 	}

@@ -258,6 +258,7 @@ type OpenAIForwardResult struct {
 	// FusionUsageSettled suppresses billing of the public aggregate. Each physical
 	// inference has already been settled with its own durable fusion: attempt ID.
 	FusionUsageSettled bool
+	devinPricing       *devinPricingSnapshot
 	// UpstreamResponseServiceTier is the tier the upstream reports having used
 	// (response service_tier: "priority" / "default" / "flex" / ...); "" when not declared.
 	UpstreamResponseServiceTier string
