@@ -41,6 +41,7 @@ type application struct {
 	redactor                    *redactedLog
 	trustFile                   string
 	database                    string
+	redisDB                     int
 }
 
 func randomID() string {
@@ -51,7 +52,7 @@ func randomID() string {
 	return hex.EncodeToString(b)
 }
 
-func newApplication(t *testing.T, fixture *nativeFixture) *application {
+func newApplication(t *testing.T, fixture *nativeFixture, redisDB ...int) *application {
 	t.Helper()
 	binary := os.Getenv("DEVIN_E2E_BINARY")
 	require.NotEmpty(t, binary, "run bash deploy/devin-e2e.sh")
@@ -64,6 +65,9 @@ func newApplication(t *testing.T, fixture *nativeFixture) *application {
 	require.NoError(t, listener.Close())
 	dir := t.TempDir()
 	a := &application{binary: binary, base: base, dir: dir, password: randomID()}
+	if len(redisDB) > 0 {
+		a.redisDB = redisDB[0]
+	}
 	// Each scenario owns a database inside this runner's disposable PostgreSQL.
 	db, err := sql.Open("postgres", fmt.Sprintf("host=127.0.0.1 port=%s user=devin_e2e dbname=devin_e2e password=%s sslmode=disable", os.Getenv("DEVIN_E2E_PG_PORT"), os.Getenv("DEVIN_E2E_DB_PASSWORD")))
 	require.NoError(t, err)
@@ -131,7 +135,7 @@ func (a *application) start(t *testing.T) {
 		"DATABASE_HOST=127.0.0.1", "DATABASE_PORT="+os.Getenv("DEVIN_E2E_PG_PORT"),
 		"DATABASE_USER=devin_e2e", "DATABASE_DBNAME="+a.database, "DATABASE_SSLMODE=disable",
 		"DATABASE_PASSWORD="+os.Getenv("DEVIN_E2E_DB_PASSWORD"),
-		"REDIS_HOST=127.0.0.1", "REDIS_PORT="+os.Getenv("DEVIN_E2E_REDIS_PORT"), "REDIS_PASSWORD="+os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), "REDIS_DB=0",
+		"REDIS_HOST=127.0.0.1", "REDIS_PORT="+os.Getenv("DEVIN_E2E_REDIS_PORT"), "REDIS_PASSWORD="+os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), "REDIS_DB="+strconv.Itoa(a.redisDB),
 		"ADMIN_EMAIL=admin@devin-e2e.invalid", "ADMIN_PASSWORD="+a.password,
 		"SECURITY_URL_ALLOWLIST_ENABLED=false", "SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=true",
 		"SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true", "BATCH_IMAGE_ENABLED=false",

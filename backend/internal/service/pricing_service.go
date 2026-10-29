@@ -1385,12 +1385,15 @@ func normalizeModelNameForPricing(model string) string {
 	return normalizeAntigravityClaudeTierAlias(normalizeGeminiThinkingTierAlias(model))
 }
 
-// normalizeAntigravityClaudeTierAlias maps Antigravity's Claude 5.5 thinking-tier
-// model IDs (claude-opus-5-5-high, claude-sonnet-5-5-low, ...) to the public base
-// model. Like the Gemini tiers, the suffix selects reasoning depth rather than a
-// separate token rate; without this the IDs fall into substring family matching
-// and are billed as claude-opus-5 / claude-sonnet-4-5.
+// normalizeAntigravityClaudeTierAlias maps verified Claude effort UIDs to their
+// price-card identity. Keep this shared by identified lookup and billing, with
+// exact UID prices taking precedence. Unknown effort/Fast variants stay unchanged.
 func normalizeAntigravityClaudeTierAlias(model string) string {
+	// The native Devin CLI advertises this concrete UID at the Opus 5 base
+	// input/cache-read/output rates. This does not rewrite its execution UID.
+	if model == "claude-opus-5-xhigh" {
+		return "claude-opus-5"
+	}
 	for _, baseModel := range []string{"claude-opus-5-5", "claude-sonnet-5-5"} {
 		for _, tier := range []string{"-high", "-low", "-medium"} {
 			if model == baseModel+tier {

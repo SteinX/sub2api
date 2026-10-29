@@ -46,6 +46,9 @@ type nativeFixture struct {
 	longWorkflow        *longNativeWorkflow // configured before serving inference
 	journey             *projectJourney     // configured before serving inference
 	largeCatalog        atomic.Bool         // synthetic discovery stress, set before the suite starts
+
+	catalog      []*pb.ClientModelConfig // optional catalog, configured before requests
+	catalogCalls atomic.Int32
 }
 
 func newNativeFixture(t *testing.T) *nativeFixture {
@@ -130,6 +133,10 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 					ModelInfo: &pb.ModelInfo{ModelUid: uid, MaxOutputTokens: 32000, ModelFeatures: &pb.ModelFeatures{SupportsToolCalls: true}}})
 			}
 		}
+		if f.catalog != nil {
+			f.catalogCalls.Add(1)
+			models = f.catalog
+		}
 		writeProto(&pb.GetCliModelConfigsResponse{ClientModelConfigs: models})
 	case devin.UserJWTPath:
 		if f.rejectJWT.Swap(false) {
@@ -142,7 +149,7 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case devin.ChatPath:
 		_, body, err := devin.ReadFrame(r.Body)
 		var request pb.GetChatMessageRequest
-		if err != nil || proto.Unmarshal(body, &request) != nil || request.GetMetadata().GetUserJwt() != "fixture-user-jwt" || (request.ChatModelUid != fixtureModel && !(f.agentMode.Load() && request.ChatModelUid == fixtureSidekick)) {
+		if err != nil || proto.Unmarshal(body, &request) != nil || request.GetMetadata().GetUserJwt() != "fixture-user-jwt" || !f.acceptsModel(request.ChatModelUid) {
 			http.Error(w, "invalid native request", 400)
 			return
 		}
@@ -216,6 +223,13 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "unexpected RPC", 404)
 	}
+}
+
+func (f *nativeFixture) acceptsModel(uid string) bool {
+	if f.catalog != nil {
+		return devin.FindModel(f.catalog, uid) != nil
+	}
+	return uid == fixtureModel || f.agentMode.Load() && uid == fixtureSidekick
 }
 
 func writeFrame(w io.Writer, flags byte, body []byte) {
