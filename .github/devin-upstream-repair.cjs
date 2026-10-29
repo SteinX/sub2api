@@ -2,7 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const { readFileSync } = require('node:fs');
-const { releaseTag } = require('./sync-upstream.cjs');
+const { releaseTag, publishedForkRelease } = require('./sync-upstream.cjs');
 
 const FORK = { owner: 'SteinX', repo: 'sub2api' };
 const REPOSITORY = 'SteinX/sub2api';
@@ -137,8 +137,9 @@ async function sourceWork({ github, core, context }, id, imageCheck) {
   if (!FAILURES.has(run.conclusion) && run.conclusion !== 'success') return null;
   if (!isRelease && run.conclusion === 'success') return null;
 
-  const result = await publication(github, tag, imageCheck);
-  if (result.complete) return { completed: true, tag, upstreamTag: upstream.tag_name, url: result.url };
+  const publishedTag = (await publishedForkRelease(github, upstream.tag_name))?.tag_name || tag;
+  const result = await publication(github, publishedTag, imageCheck);
+  if (result.complete) return { completed: true, tag: publishedTag, upstreamTag: upstream.tag_name, url: result.url };
   const main = (await github.rest.repos.getBranch({ ...FORK, branch: 'main' })).data.commit.sha;
   const prs = (await github.rest.pulls.list({ ...FORK, base: 'main', head: `SteinX:sync/upstream-${upstream.tag_name}`, state: 'open' })).data;
   let pr;
@@ -290,10 +291,11 @@ async function monitor({ github, core }, api, imageCheck) {
     if (!match || issue.pull_request || issue.user?.login !== BOT) continue;
     const state = readState(issue);
     const upstreamTag = match[1];
-    const result = await publication(github, `${upstreamTag}-stx.1`, imageCheck);
+    const publishedTag = (await publishedForkRelease(github, upstreamTag))?.tag_name || `${upstreamTag}-stx.1`;
+    const result = await publication(github, publishedTag, imageCheck);
     if (result.complete) {
       await saveState(github, issue, upstreamTag, { ...state, phase: 'complete' },
-        `Publication verified: [${upstreamTag}-stx.1](${result.url}), five binary archives, checksums.txt and the versioned GHCR amd64/arm64 manifest.`);
+        `Publication verified: [${publishedTag}](${result.url}), five binary archives, checksums.txt and the versioned GHCR amd64/arm64 manifest.`);
       continue;
     }
     if (!state.sessionId || state.phase !== 'active') continue;
