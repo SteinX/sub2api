@@ -11,6 +11,37 @@ import process_cleanup
 
 
 class ProcessIdentityTests(unittest.TestCase):
+    def test_reaped_proc_stat_read_does_not_invalidate_an_empty_owned_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            registry=Path(temporary)/'registry'; registry.touch(mode=0o600)
+            tracked=subprocess.Popen(['python3','-c','import time;time.sleep(30)'],start_new_session=True)
+            foreign=subprocess.Popen(['python3','-c','import time;time.sleep(30)'],start_new_session=True)
+            observed=[]
+            try:
+                with patch.dict(os.environ,{'DEVIN_JOURNEY_PROCESS_REGISTRY':str(registry)}): process_cleanup.register(tracked)
+                tracked.terminate(); tracked.wait(timeout=3)
+                original=Path.read_text
+                target=Path(f'/proc/{foreign.pid}/stat')
+                def exit_after_open(path,*args,**kwargs):
+                    if path==target and not observed:
+                        with path.open() as stream:
+                            foreign.terminate(); foreign.wait(timeout=3)
+                            try: return stream.read()
+                            except ProcessLookupError as error:
+                                observed.append(error.errno)
+                                raise
+                    return original(path,*args,**kwargs)
+                # Control scheduling only: the kernel supplies the real ESRCH
+                # after open/reap/read, rather than a mocked cleanup outcome.
+                with patch.object(Path,'read_text',exit_after_open):
+                    self.assertTrue(process_cleanup.cleanup_processes(registry))
+                self.assertEqual([3],observed)
+                self.assertEqual({},process_cleanup.group_members(tracked.pid))
+            finally:
+                for proc in [tracked,foreign]:
+                    if proc.poll() is None: proc.kill()
+                    proc.wait(timeout=3)
+
     def test_diagnostics_separate_process_and_container_proof_without_exposing_identity(self):
         for process_ok,container_ok in [(False,True),(True,False),(True,True)]:
             evidence={}

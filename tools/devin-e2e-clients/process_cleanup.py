@@ -19,7 +19,9 @@ def group_members(pgid):
         try:
             values=(path/'stat').read_text().rsplit(')',1)[1].split()
             if int(values[2])==pgid and values[0]!='Z': members[int(path.name)]=int(values[19])
-        except FileNotFoundError:
+        except (FileNotFoundError,ProcessLookupError):
+            # A task reaped after opening stat yields ESRCH when read. It is
+            # already gone, just as when its proc entry disappeared at open.
             continue
     return members
 
