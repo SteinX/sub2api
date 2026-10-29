@@ -123,6 +123,13 @@ func (s *OpenAIGatewayService) devinInspectionPricing(ctx context.Context, key *
 		if a.Platform != PlatformDevin || !a.IsSchedulable() || a.GetMappedModel(model) != model || !a.supportsDevinModel(model) {
 			continue
 		}
+		// Scheduler candidates are metadata projections, without the full proxy
+		// and credential fields required to read this account's live catalog.
+		full, err := s.accountRepo.GetByID(ctx, a.ID)
+		if err != nil || full == nil || full.ID != a.ID || full.Platform != PlatformDevin {
+			return nil, true
+		}
+		a = full
 		models, until, _ := s.devin.pricingModels(ctx, a)
 		p := s.captureDevinPricing(ctx, a, key, models, until, model)
 		if p == nil {

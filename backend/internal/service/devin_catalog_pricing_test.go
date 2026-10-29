@@ -668,6 +668,15 @@ type catalogPricingAccounts struct {
 	accounts []Account
 }
 
+func (r *catalogPricingAccounts) GetByID(_ context.Context, id int64) (*Account, error) {
+	for i := range r.accounts {
+		if r.accounts[i].ID == id {
+			return &r.accounts[i], nil
+		}
+	}
+	return nil, errors.New("synthetic account not found")
+}
+
 func (r *catalogPricingAccounts) ListSchedulableByGroupID(context.Context, int64) ([]Account, error) {
 	return r.accounts, nil
 }
