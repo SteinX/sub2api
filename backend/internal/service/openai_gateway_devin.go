@@ -187,7 +187,7 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	if v, ok := c.Get("api_key"); ok {
 		pricingKey, _ = v.(*APIKey)
 	}
-	pricing := s.captureDevinPricing(ctx, a, pricingKey, models, catalogUntil, original, req.Model)
+	pricing := s.captureDevinPricing(ctx, a, pricingKey, models, catalogUntil, inboundModel, original, req.Model)
 	anthState := apicompat.NewResponsesEventToAnthropicState()
 	chatState := apicompat.NewResponsesEventToChatState()
 	chatState.IncludeUsage = inbound.StreamOptions != nil && inbound.StreamOptions.IncludeUsage
@@ -318,8 +318,9 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 			attemptTrace.WireModel = devin.DiagnosticModelID(wire.ChatModelUid)
 			if pricing != nil {
 				if _, exists := pricing.Prices[wire.ChatModelUid]; !exists {
-					assigned := s.captureDevinPricing(ctx, a, pricingKey, models, catalogUntil, wire.ChatModelUid)
-					if assigned != nil {
+					if _, known := pricing.candidates[wire.ChatModelUid]; known {
+						pricing.pinModel(wire.ChatModelUid)
+					} else if assigned := s.captureDevinPricing(ctx, a, pricingKey, models, catalogUntil, wire.ChatModelUid); assigned != nil {
 						pricing.Prices[wire.ChatModelUid] = assigned.Prices[wire.ChatModelUid]
 						if !assigned.ValidUntil.IsZero() && (pricing.ValidUntil.IsZero() || assigned.ValidUntil.Before(pricing.ValidUntil)) {
 							pricing.ValidUntil = assigned.ValidUntil
@@ -332,8 +333,11 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 				priceModels, until, priceErr := s.devin.pricingModels(ctx, a)
 				err = priceErr
 				if err == nil {
-					pricing = s.captureDevinPricing(ctx, a, pricingKey, priceModels, until, original, req.Model, wire.ChatModelUid)
+					pricing = s.captureDevinPricing(ctx, a, pricingKey, priceModels, until, inboundModel, original, req.Model, wire.ChatModelUid)
 				}
+			}
+			if err == nil && !pricing.readyForInference(time.Now()) {
+				err = fusion.E("pricing_unavailable", "account catalog price expired before inference; retry with refreshed pricing", 400)
 			}
 			if err == nil {
 				attemptTrace.GenerationAttempted = ctx.Err() == nil
@@ -358,6 +362,7 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		billingModel = req.Model
 		trace.BillingSource = "mapped_request_fallback"
 	}
+	pricing.pinModel(billingModel)
 	trace.BillingModel, trace.Evidence = devin.DiagnosticModelID(billingModel), decoder.Evidence
 	if decoder.Response.Usage == nil {
 		trace.BillingModel, trace.BillingSource = "", ""

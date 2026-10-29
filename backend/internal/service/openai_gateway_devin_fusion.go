@@ -209,7 +209,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 	if x.pricing == nil || x.pricingAttempt != call.AttemptID {
 		x.refreshPricing(ctx, call.AttemptID, x.profile.LeadModel, x.profile.SidekickModel, call.Request.Model)
 	}
-	if x.pricing.expired() {
+	if !x.pricing.readyForInference(time.Now()) {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, fusion.E("pricing_unavailable", "account catalog price expired before inference; retry with refreshed pricing", 400)
 	}
 	reservation, err := x.reserve(ctx, call.EstimateUSD, call.AttemptID)
@@ -255,7 +255,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 	if err := ctx.Err(); err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
-	if x.pricing.expired() {
+	if !x.pricing.readyForInference(time.Now()) {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, fusion.E("pricing_unavailable", "account catalog price expired before inference; retry with refreshed pricing", 400)
 	}
 	err = consumeDevinFusionChat(ctx, x.c, x.client, prepared.BaseURL, token, wire, decoder, x.stream, &x.clientDisconnected)
@@ -266,6 +266,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 	if billingModel == "" {
 		billingModel = wire.ChatModelUid
 	}
+	x.pricing.pinModel(billingModel)
 	// Profile members are concrete. A changed execution identity is never a
 	// silent lane/model switch, but any terminal usage is still settled.
 	if decoder.ActualModel != "" && decoder.ActualModel != wire.ChatModelUid || len(decoder.Evidence.ActualModels) > 1 {

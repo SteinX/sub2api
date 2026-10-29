@@ -15,6 +15,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb"
@@ -36,6 +37,7 @@ type catalogPricingFixture struct {
 	modelsFor   map[string][]*pb.ClientModelConfig
 	modelCalls  int
 	chatCalls   int
+	billingUID  string
 	failCatalog bool
 	chat        func(*pb.GetChatMessageRequest) *pb.GetChatMessageResponse
 	logs        *openAIRecordUsageLogRepoStub
@@ -92,6 +94,9 @@ func newCatalogPricingFixture(t *testing.T) *catalogPricingFixture {
 			var request pb.GetChatMessageRequest
 			require.NoError(t, proto.Unmarshal(b, &request))
 			reply := &pb.GetChatMessageResponse{MessageId: fmt.Sprint(f.chatCalls), DeltaText: "done", StopReason: pb.StopReason_STOP_REASON_STOP_PATTERN, ActualModelUid: proto.String(request.ChatModelUid), Usage: &pb.ModelUsageStats{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 40, CacheWriteTokens: 10, BillingModelUid: request.ChatModelUid}}
+			if f.billingUID != "" {
+				reply.Usage.BillingModelUid = f.billingUID
+			}
 			if f.chat != nil {
 				custom := f.chat(&request)
 				custom.MessageId, custom.Usage, custom.ActualModelUid, custom.StopReason = reply.MessageId, reply.Usage, reply.ActualModelUid, reply.StopReason
@@ -249,6 +254,205 @@ func TestDevinCatalogPriceOrdinaryForwardUsesSnapshot(t *testing.T) {
 				require.InDelta(t, want, f.logs.lastLog.TotalCost, 1e-12)
 			}
 			require.Equal(t, 1, f.modelCalls, "settlement must never refetch the catalog")
+		})
+	}
+}
+
+func TestDevinCatalogPriceOrdinaryRequestedAliasUsesSnapshot(t *testing.T) {
+	for _, override := range []string{"group", "channel"} {
+		t.Run(override, func(t *testing.T) {
+			f := newCatalogPricingFixture(t)
+			const alias = "public-promoted-alias"
+			card := ChannelModelPricing{Models: []string{alias}, Platform: PlatformDevin, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(2e-6), OutputPrice: testPtrFloat64(4e-6), CacheReadPrice: testPtrFloat64(1e-6), CacheWritePrice: testPtrFloat64(3e-6)}
+			setCard := func(card ChannelModelPricing) {
+				if override == "group" {
+					f.key.Group.ModelPricing = []ChannelModelPricing{card}
+					return
+				}
+				ch := &ChannelService{}
+				ch.cache.Store(populateChannelCache([]Channel{{ID: 4, Status: StatusActive, GroupIDs: []int64{f.key.Group.ID}, ModelPricing: []ChannelModelPricing{card}}}, map[int64]string{f.key.Group.ID: PlatformDevin}))
+				f.service.resolver = NewModelPricingResolver(ch, f.service.billingService)
+			}
+			setCard(card)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			// HTTP handlers preserve the inbound public alias in context before
+			// replacing the request body model with the channel's physical UID.
+			c.Request = httptest.NewRequest("POST", "/v1/responses", nil).WithContext(context.WithValue(context.Background(), ctxkey.InboundModel, alias))
+			c.Set("api_key", f.key)
+			body := []byte(`{"model":"` + futureFreeUID + `","input":"hello","max_output_tokens":128}`)
+			result, err := f.service.forwardDevin(c.Request.Context(), c, f.account, body, "responses", "test", "")
+			require.NoError(t, err)
+			require.Equal(t, 200, w.Code)
+			// A later administrator edit must not change this completed request's
+			// explicit alias price, even though its physical model was free.
+			card.InputPrice, card.OutputPrice = testPtrFloat64(20e-6), testPtrFloat64(40e-6)
+			card.CacheReadPrice, card.CacheWritePrice = testPtrFloat64(10e-6), testPtrFloat64(30e-6)
+			setCard(card)
+			f.expireCatalog()
+			f.failCatalog = true
+			err = f.service.RecordUsage(context.Background(), &OpenAIRecordUsageInput{Result: result, APIKey: f.key, User: f.key.User, Account: f.account, ChannelUsageFields: ChannelUsageFields{OriginalModel: alias, ChannelMappedModel: futureFreeUID, BillingModelSource: BillingModelSourceRequested}})
+			require.NoError(t, err)
+			want := 100*2e-6 + 20*4e-6 + 40*1e-6 + 10*3e-6
+			require.InDelta(t, want, f.logs.lastLog.TotalCost, 1e-12)
+			require.Equal(t, 1, f.modelCalls, "settlement must never refetch the catalog")
+		})
+	}
+}
+
+func reportedBillingFixture(t *testing.T, price string) (*catalogPricingFixture, float64) {
+	t.Helper()
+	f := newCatalogPricingFixture(t)
+	f.billingUID = "future-billing-v88"
+	unused := proto.Clone(f.models[1]).(*pb.ClientModelConfig)
+	unused.ModelUid = "unused-catalog-v77"
+	f.models = append(f.models, unused)
+	if price != "unknown" {
+		model := proto.Clone(f.models[1]).(*pb.ClientModelConfig)
+		model.ModelUid = f.billingUID
+		f.models = append(f.models, model)
+		// FREE must also supersede an identified generic paid card for a
+		// reported billing identity different from the executed model.
+		f.service.billingService.fallbackPrices[f.billingUID] = &ModelPricing{InputPricePerToken: .5, OutputPricePerToken: .5}
+	}
+	card := ChannelModelPricing{Models: []string{f.billingUID}, Platform: PlatformDevin, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(2e-6), OutputPrice: testPtrFloat64(4e-6), CacheReadPrice: testPtrFloat64(1e-6), CacheWritePrice: testPtrFloat64(3e-6)}
+	want := 0.0
+	if price == "configured" {
+		f.key.Group.ModelPricing = []ChannelModelPricing{card}
+		want = 100*2e-6 + 20*4e-6 + 40*1e-6 + 10*3e-6
+	}
+	f.chat = func(*pb.GetChatMessageRequest) *pb.GetChatMessageResponse {
+		// These changes occur during the inference, before its terminal usage.
+		// They must affect only later requests, including a previously unknown
+		// billing UID gaining its first explicit price.
+		card.InputPrice, card.OutputPrice = testPtrFloat64(20e-6), testPtrFloat64(40e-6)
+		card.CacheReadPrice, card.CacheWritePrice = testPtrFloat64(10e-6), testPtrFloat64(30e-6)
+		f.key.Group.ModelPricing = []ChannelModelPricing{card}
+		for _, model := range f.models {
+			if model.ModelUid == f.billingUID {
+				model.ModelCostTier = pb.ModelCostTier_MODEL_COST_TIER_HIGH
+				model.PromoStatus.EndDate = timestamppb.New(time.Now().Add(-time.Second))
+			}
+		}
+		return &pb.GetChatMessageResponse{DeltaText: "complete"}
+	}
+	return f, want
+}
+
+func TestDevinCatalogPriceOrdinaryReportedBillingUIDUsesSnapshot(t *testing.T) {
+	for _, price := range []string{"free", "configured", "unknown"} {
+		t.Run(price, func(t *testing.T) {
+			f, want := reportedBillingFixture(t, price)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+			c.Set("api_key", f.key)
+			body := []byte(`{"model":"` + futureFreeUID + `","input":"hello","max_output_tokens":128}`)
+			result, err := f.service.forwardDevin(c.Request.Context(), c, f.account, body, "responses", "test", "")
+			require.NoError(t, err)
+			require.Equal(t, f.billingUID, result.BillingModel)
+			f.expireCatalog()
+			f.failCatalog = true
+			require.NoError(t, f.service.RecordUsage(context.Background(), &OpenAIRecordUsageInput{Result: result, APIKey: f.key, User: f.key.User, Account: f.account}))
+			require.InDelta(t, want, f.logs.lastLog.TotalCost, 1e-12)
+			if price == "unknown" {
+				require.False(t, result.devinPricing.Prices[f.billingUID].Identified)
+			}
+			require.Equal(t, 1, f.modelCalls)
+		})
+	}
+}
+
+func TestDevinCatalogPriceFusionReportedBillingUIDAndRecovery(t *testing.T) {
+	for _, price := range []string{"free", "configured", "unknown"} {
+		t.Run(price, func(t *testing.T) {
+			f, want := reportedBillingFixture(t, price)
+			x := f.executor()
+			f.account.Extra[fusion.ExtraProfiles] = []fusion.Profile{x.profile}
+			mutate := f.chat
+			f.chat = func(wire *pb.GetChatMessageRequest) *pb.GetChatMessageResponse {
+				reply := mutate(wire)
+				if f.chatCalls == 1 {
+					reply.DeltaText = ""
+					reply.DeltaToolCalls = []*pb.ChatToolCall{{Id: "delegate", Name: fusion.DelegateTool, ArgumentsJson: `{"task":"inspect","acceptance_criteria":"report the result"}`}}
+				}
+				return reply
+			}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+			c.Set("api_key", f.key)
+			body := []byte(`{"model":"fusion-team","input":"hello","max_output_tokens":128}`)
+			_, err := f.service.BindDevinFusionRequest(c, f.key, "fusion-team", body, "responses", nil)
+			require.NoError(t, err)
+			_, err = f.service.forwardDevin(c.Request.Context(), c, f.account, body, "responses", "", "")
+			if price == "unknown" {
+				require.Error(t, err, "an unknown reported UID cannot acquire a new post-inference price")
+			} else {
+				require.NoError(t, err)
+			}
+			engine := f.service.devin.fusionEngine()
+			sess, _, err := engine.Load(context.Background(), fusion.Scope(f.key.UserID, f.key.ID), w.Header().Get(fusion.HeaderSession))
+			require.NoError(t, err)
+			calls := 3
+			if price == "unknown" {
+				calls = 1
+			}
+			require.Len(t, sess.Attempts, calls)
+			a := sess.Attempts[0]
+			require.Equal(t, f.billingUID, a.BillingModel)
+			require.NotEmpty(t, a.PricingSnapshot)
+			frozen, err := restoreDevinPricing(a.PricingSnapshot, f.account, f.key)
+			require.NoError(t, err)
+			require.NotContains(t, frozen.Prices, "unused-catalog-v77", "durable receipts must not retain the entire catalog")
+			f.expireCatalog()
+			f.failCatalog = true
+			recovered := f.executor()
+			cost, err := recovered.Settle(context.Background(), a)
+			if price == "unknown" {
+				require.ErrorContains(t, err, f.billingUID)
+				require.False(t, a.Settled)
+				require.Empty(t, f.bills.commands)
+			} else {
+				require.NoError(t, err)
+				require.True(t, a.Settled)
+				require.InDelta(t, want, a.CostUSD, 1e-12)
+				require.InDelta(t, want, cost, 1e-12)
+				require.Len(t, f.bills.commands, calls, "recovery retains the idempotent attempt ID")
+			}
+			require.Equal(t, calls, f.chatCalls)
+			require.Equal(t, 1, f.modelCalls, "recovery cannot re-read the account catalog")
+		})
+	}
+}
+
+func TestDevinCatalogPriceReportedCandidateExpiryAtSend(t *testing.T) {
+	for _, beforeSend := range []bool{true, false} {
+		t.Run(fmt.Sprint(beforeSend), func(t *testing.T) {
+			f := newCatalogPricingFixture(t)
+			now := time.Now()
+			// A paid selected model must not inherit an unrelated candidate's
+			// expiry. That candidate may become the terminal billing identity.
+			p := f.service.captureDevinPricing(context.Background(), f.account, f.key, f.models, now.Add(time.Hour), "gpt-5.5")
+			require.Zero(t, p.ValidUntil)
+			p.candidateFreeUntil[futureFreeUID] = now
+			sendAt := now.Add(-time.Nanosecond)
+			if beforeSend {
+				sendAt = now
+			}
+			require.True(t, p.readyForInference(sendAt))
+			// pinModel observes terminal usage after the send boundary without
+			// revalidating or looking up today's price.
+			p.pinModel(futureFreeUID)
+			f.key.Group.ModelPricing = []ChannelModelPricing{{Models: []string{futureFreeUID}, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(.5)}}
+			x := f.executor()
+			cost, err := x.cost(withDevinPricing(context.Background(), p), futureFreeUID, UsageTokens{InputTokens: 100}, now.Add(time.Second))
+			if beforeSend {
+				require.ErrorContains(t, err, futureFreeUID)
+			} else {
+				require.NoError(t, err)
+				require.Zero(t, cost.TotalCost, "expiry during generation retains the send-time price")
+			}
 		})
 	}
 }

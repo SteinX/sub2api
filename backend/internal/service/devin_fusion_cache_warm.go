@@ -333,7 +333,7 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if err = ctx.Err(); err != nil {
 		return result, err
 	}
-	if x.pricing.expired() {
+	if !x.pricing.readyForInference(time.Now()) {
 		return result, fusion.E("pricing_unavailable", "account catalog price expired before cache refresh", 400)
 	}
 	d := devin.NewEventDecoder(snapshot.Model, func(apicompat.ResponsesStreamEvent) error { return nil }, wire.Tools...)
@@ -360,6 +360,7 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if billingModel == "" {
 		billingModel = snapshot.Model
 	}
+	x.pricing.pinModel(billingModel)
 	result.Outcome = fusion.Outcome{Response: &d.Response, BillingModel: billingModel, PricingSnapshot: x.pricing.marshal()}
 	if err != nil {
 		var upstream *devin.Error

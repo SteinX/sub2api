@@ -22,6 +22,11 @@ type devinPricingSnapshot struct {
 	GroupID    int64                      `json:"group_id"`
 	ValidUntil time.Time                  `json:"valid_until"`
 	Prices     map[string]devinModelPrice `json:"prices"`
+
+	// Freeze possible terminal billing identities before inference, but persist
+	// only the selected and actually reported prices in the physical receipt.
+	candidates         map[string]devinModelPrice
+	candidateFreeUntil map[string]time.Time
 }
 
 type devinModelPrice struct {
@@ -56,7 +61,53 @@ func devinPriceFromContext(ctx context.Context, key *APIKey, model string) (devi
 		return devinModelPrice{}, false
 	}
 	price, ok := p.Prices[strings.TrimSpace(model)]
-	return price, ok
+	if !ok {
+		// A snapshot miss is historical unknown evidence, never permission to
+		// consult prices published after this inference.
+		price = unknownDevinModelPrice()
+	}
+	return price, true
+}
+
+func unknownDevinModelPrice() devinModelPrice {
+	return devinModelPrice{Resolved: &ResolvedPricing{Mode: BillingModeToken}}
+}
+
+func (p *devinPricingSnapshot) pinModel(uid string) {
+	uid = strings.TrimSpace(uid)
+	if p == nil || uid == "" {
+		return
+	}
+	if _, exists := p.Prices[uid]; exists {
+		return
+	}
+	price, known := p.candidates[uid]
+	if !known {
+		price = unknownDevinModelPrice()
+	}
+	p.Prices[uid] = price
+	if until := p.candidateFreeUntil[uid]; !until.IsZero() && (p.ValidUntil.IsZero() || until.Before(p.ValidUntil)) {
+		p.ValidUntil = until
+	}
+}
+
+// Candidate promotions may expire while routing/authentication is in progress.
+// Check them at the send boundary; expiry during generation must not reprice
+// that already-started inference or its later durable settlement.
+func (p *devinPricingSnapshot) readyForInference(now time.Time) bool {
+	if p == nil {
+		return true
+	}
+	if !p.ValidUntil.IsZero() && !now.Before(p.ValidUntil) {
+		return false
+	}
+	for uid, until := range p.candidateFreeUntil {
+		if !now.Before(until) {
+			p.candidates[uid] = unknownDevinModelPrice()
+			delete(p.candidateFreeUntil, uid)
+		}
+	}
+	return true
 }
 
 func devinPricingGroupID(key *APIKey) int64 {
@@ -78,9 +129,17 @@ func (s *OpenAIGatewayService) captureDevinPricing(ctx context.Context, a *Accou
 	if a != nil {
 		p.AccountID = a.ID
 	}
-	for _, uid := range uids {
+	candidateUIDs := append([]string(nil), uids...)
+	for _, model := range models {
+		candidateUIDs = append(candidateUIDs, devin.ModelID(model))
+	}
+	freeUntil := map[string]time.Time{}
+	for _, uid := range candidateUIDs {
 		uid = strings.TrimSpace(uid)
 		if uid == "" {
+			continue
+		}
+		if _, exists := p.Prices[uid]; exists {
 			continue
 		}
 		var resolved *ResolvedPricing
@@ -100,9 +159,7 @@ func (s *OpenAIGatewayService) captureDevinPricing(ctx context.Context, a *Accou
 		if until, free := devin.ModelFreeUntil(devin.FindModel(models, uid), time.Now(), catalogUntil); !configured && free && a != nil && a.Platform == PlatformDevin {
 			resolved = &ResolvedPricing{Mode: BillingModeToken, Source: PricingSourceDevinFree, BasePricing: &ModelPricing{CacheCreationPriceExplicit: true, ImageOutputPriceExplicit: true, SupportsCacheBreakdown: true}, SupportsCacheBreakdown: true}
 			identified = true
-			if p.ValidUntil.IsZero() || until.Before(p.ValidUntil) {
-				p.ValidUntil = until
-			}
+			freeUntil[uid] = until
 		}
 		price := devinModelPrice{Identified: identified, Resolved: resolved}
 		if resolved != nil {
@@ -119,6 +176,11 @@ func (s *OpenAIGatewayService) captureDevinPricing(ctx context.Context, a *Accou
 	var frozen devinPricingSnapshot
 	if json.Unmarshal(b, &frozen) != nil {
 		return nil
+	}
+	frozen.candidates, frozen.candidateFreeUntil = frozen.Prices, freeUntil
+	frozen.Prices = map[string]devinModelPrice{}
+	for _, uid := range uids {
+		frozen.pinModel(uid)
 	}
 	return &frozen
 }
