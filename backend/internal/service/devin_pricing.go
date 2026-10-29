@@ -27,6 +27,7 @@ type devinPricingSnapshot struct {
 	// only the selected and actually reported prices in the physical receipt.
 	candidates         map[string]devinModelPrice
 	candidateFreeUntil map[string]time.Time
+	candidateAfterFree map[string]devinModelPrice
 }
 
 type devinModelPrice struct {
@@ -103,8 +104,13 @@ func (p *devinPricingSnapshot) readyForInference(now time.Time) bool {
 	}
 	for uid, until := range p.candidateFreeUntil {
 		if !now.Before(until) {
-			p.candidates[uid] = unknownDevinModelPrice()
+			price, known := p.candidateAfterFree[uid]
+			if !known {
+				price = unknownDevinModelPrice()
+			}
+			p.candidates[uid] = price
 			delete(p.candidateFreeUntil, uid)
+			delete(p.candidateAfterFree, uid)
 		}
 	}
 	return true
@@ -134,6 +140,7 @@ func (s *OpenAIGatewayService) captureDevinPricing(ctx context.Context, a *Accou
 		candidateUIDs = append(candidateUIDs, devin.ModelID(model))
 	}
 	freeUntil := map[string]time.Time{}
+	afterFree := map[string]devinModelPrice{}
 	for _, uid := range candidateUIDs {
 		uid = strings.TrimSpace(uid)
 		if uid == "" {
@@ -154,35 +161,42 @@ func (s *OpenAIGatewayService) captureDevinPricing(ctx context.Context, a *Accou
 		}
 		configured := resolved != nil && (resolved.Source == PricingSourceGroup || resolved.Source == PricingSourceChannel)
 		identified := configured || s.billingService != nil && s.billingService.HasIdentifiedTokenPricing(uid)
-		// Explicit sale prices retain their precedence. Account FREE evidence
-		// overrides only the generic price catalog/fallback, including paid ones.
-		if until, free := devin.ModelFreeUntil(devin.FindModel(models, uid), time.Now(), catalogUntil); !configured && free && a != nil && a.Platform == PlatformDevin {
-			resolved = &ResolvedPricing{Mode: BillingModeToken, Source: PricingSourceDevinFree, BasePricing: &ModelPricing{CacheCreationPriceExplicit: true, ImageOutputPriceExplicit: true, SupportsCacheBreakdown: true}, SupportsCacheBreakdown: true}
-			identified = true
-			freeUntil[uid] = until
-		}
 		price := devinModelPrice{Identified: identified, Resolved: resolved}
 		if resolved != nil {
 			price.Configured, price.LongContext = resolved.channelPricing, resolved.longContextPricingEnabled
+		}
+		// Explicit sale prices retain their precedence. Account FREE evidence
+		// overrides only the generic price catalog/fallback, including paid ones.
+		if until, free := devin.ModelFreeUntil(devin.FindModel(models, uid), time.Now(), catalogUntil); !configured && free && a != nil && a.Platform == PlatformDevin {
+			afterFree[uid] = price
+			resolved = &ResolvedPricing{Mode: BillingModeToken, Source: PricingSourceDevinFree, BasePricing: &ModelPricing{CacheCreationPriceExplicit: true, ImageOutputPriceExplicit: true, SupportsCacheBreakdown: true}, SupportsCacheBreakdown: true}
+			price = devinModelPrice{Identified: true, Resolved: resolved}
+			freeUntil[uid] = until
 		}
 		p.Prices[uid] = price
 	}
 	// Detach nested rate/configuration maps from mutable service state. The
 	// same serializable representation is carried by durable physical attempts.
-	b, err := json.Marshal(p)
+	type capturedPrices struct {
+		Pricing   *devinPricingSnapshot
+		AfterFree map[string]devinModelPrice
+	}
+	b, err := json.Marshal(capturedPrices{Pricing: p, AfterFree: afterFree})
 	if err != nil {
 		return nil
 	}
-	var frozen devinPricingSnapshot
-	if json.Unmarshal(b, &frozen) != nil {
+	var detached capturedPrices
+	if json.Unmarshal(b, &detached) != nil || detached.Pricing == nil {
 		return nil
 	}
+	frozen := detached.Pricing
 	frozen.candidates, frozen.candidateFreeUntil = frozen.Prices, freeUntil
+	frozen.candidateAfterFree = detached.AfterFree
 	frozen.Prices = map[string]devinModelPrice{}
 	for _, uid := range uids {
 		frozen.pinModel(uid)
 	}
-	return &frozen
+	return frozen
 }
 
 func (p *devinPricingSnapshot) marshal() json.RawMessage {

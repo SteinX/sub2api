@@ -229,7 +229,7 @@ func TestDevinCatalogPriceOrdinaryForwardUsesSnapshot(t *testing.T) {
 				f.service.resolver = NewModelPricingResolver(ch, f.service.billingService)
 			}
 			// Even an identified generic paid card is superseded by account FREE.
-			f.service.billingService.fallbackPrices[futureFreeUID] = &ModelPricing{InputPricePerToken: .5, OutputPricePerToken: .5}
+			f.service.billingService.pricingService = &PricingService{pricingData: map[string]*LiteLLMModelPricing{futureFreeUID: {InputCostPerToken: .5, OutputCostPerToken: .5}}}
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
@@ -342,7 +342,7 @@ func reportedBillingFixture(t *testing.T, price string) (*catalogPricingFixture,
 		f.models = append(f.models, model)
 		// FREE must also supersede an identified generic paid card for a
 		// reported billing identity different from the executed model.
-		f.service.billingService.fallbackPrices[f.billingUID] = &ModelPricing{InputPricePerToken: .5, OutputPricePerToken: .5}
+		f.service.billingService.pricingService = &PricingService{pricingData: map[string]*LiteLLMModelPricing{f.billingUID: {InputCostPerToken: .5, OutputCostPerToken: .5}}}
 	}
 	card := ChannelModelPricing{Models: []string{f.billingUID}, Platform: PlatformDevin, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(2e-6), OutputPrice: testPtrFloat64(4e-6), CacheReadPrice: testPtrFloat64(1e-6), CacheWritePrice: testPtrFloat64(3e-6)}
 	want := 0.0
@@ -486,6 +486,34 @@ func TestDevinCatalogPriceReportedCandidateExpiryAtSend(t *testing.T) {
 	}
 }
 
+func TestDevinCatalogPriceExpiredCandidateKeepsFrozenFallback(t *testing.T) {
+	f := newCatalogPricingFixture(t)
+	now := time.Now()
+	f.service.billingService.pricingService = &PricingService{pricingData: map[string]*LiteLLMModelPricing{futureFreeUID: {InputCostPerToken: 2e-6}}}
+	p := f.service.captureDevinPricing(context.Background(), f.account, f.key, f.models, now.Add(time.Hour), "gpt-5.5")
+	p.candidateFreeUntil[futureFreeUID] = now
+	require.True(t, p.readyForInference(now), "an unrelated promotion must not expire the paid selected model")
+	p.pinModel(futureFreeUID)
+	// Both a new explicit sale price and a changed generic rate arrive after
+	// send. The candidate must use its already known pre-send paid fallback.
+	f.service.billingService.pricingService.pricingData[futureFreeUID].InputCostPerToken = .5
+	f.key.Group.ModelPricing = []ChannelModelPricing{{Models: []string{futureFreeUID}, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(.5)}}
+	f.failCatalog = true
+	x := f.executor()
+	cost, err := x.cost(withDevinPricing(context.Background(), p), futureFreeUID, UsageTokens{InputTokens: 100}, now)
+	require.NoError(t, err)
+	require.InDelta(t, 100*2e-6, cost.TotalCost, 1e-12)
+	result := &OpenAIForwardResult{RequestID: "expired-candidate-ordinary", Model: "gpt-5.5", BillingModel: futureFreeUID, UpstreamModel: "gpt-5.5", Usage: OpenAIUsage{InputTokens: 100}, devinPricing: p}
+	require.NoError(t, f.service.RecordUsage(context.Background(), &OpenAIRecordUsageInput{Result: result, APIKey: f.key, User: f.key.User, Account: f.account}))
+	require.InDelta(t, 100*2e-6, f.logs.lastLog.TotalCost, 1e-12)
+	a := fusion.Attempt{ID: "expired-candidate-fusion", Model: "gpt-5.5", BillingModel: futureFreeUID, StartedAt: now, PricingSnapshot: p.marshal(), Response: &apicompat.ResponsesResponse{Usage: &apicompat.ResponsesUsage{InputTokens: 100}}}
+	recovered := f.executor()
+	paid, err := recovered.Settle(context.Background(), a)
+	require.NoError(t, err)
+	require.InDelta(t, 100*2e-6, paid, 1e-12)
+	require.Zero(t, f.modelCalls)
+}
+
 func TestDevinCatalogPriceOrdinaryMissingPriceDoesNotReprice(t *testing.T) {
 	f := newCatalogPricingFixture(t)
 	f.models[1].ModelCostTier = pb.ModelCostTier_MODEL_COST_TIER_UNSPECIFIED
@@ -502,7 +530,7 @@ func TestDevinCatalogPriceOrdinaryMissingPriceDoesNotReprice(t *testing.T) {
 	require.Nil(t, result.devinPricing.Prices[futureFreeUID].Resolved.BasePricing)
 	// The ordinary missing-price path remains a zero-cost record. A card
 	// published after inference must not silently add a retrospective charge.
-	f.service.billingService.fallbackPrices[futureFreeUID] = &ModelPricing{InputPricePerToken: .5, OutputPricePerToken: .5}
+	f.service.billingService.pricingService = &PricingService{pricingData: map[string]*LiteLLMModelPricing{futureFreeUID: {InputCostPerToken: .5, OutputCostPerToken: .5}}}
 	require.NoError(t, f.service.RecordUsage(context.Background(), &OpenAIRecordUsageInput{Result: result, APIKey: f.key, User: f.key.User, Account: f.account}))
 	require.Zero(t, f.logs.lastLog.TotalCost)
 	require.Zero(t, f.logs.lastLog.ActualCost)
