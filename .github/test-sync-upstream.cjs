@@ -38,6 +38,8 @@ function fixture(options = {}) {
             if (args.owner === 'Wei-Shaw') return { data: upstream };
             return options.published ? { data: { draft: false } } : missing();
           },
+          listReleases: record('releases', options.releases
+            || (options.published ? [{ tag_name: 'v0.2.17-stx.1', draft: false, prerelease: false }] : [])),
           getBranch: async args => {
             calls.push({ name: 'branch', args });
             return { data: { commit: { sha: args.owner === 'Wei-Shaw' ? OTHER : args.branch === 'main' ? head : CANDIDATE } } };
@@ -87,6 +89,27 @@ test('missing or already published upstream releases do no work', async () => {
     await plan(f);
     assert.deepEqual(f.output, {});
     assert.equal(f.calls.some(call => call.name === 'merge'), false);
+  }
+});
+
+test('a later published fork revision fulfils the upstream version', async () => {
+  const f = fixture({ releases: [
+    { tag_name: 'v0.2.17-stx.2', draft: false, prerelease: false },
+    { tag_name: 'v0.2.16-stx.1', draft: false, prerelease: false },
+  ] });
+  await plan(f);
+  assert.deepEqual(f.output, {});
+  assert.equal(f.calls.some(call => call.name === 'merge'), false);
+});
+
+test('draft, prerelease or other-version fork releases do not fulfil the upstream version', async () => {
+  for (const release of [{ tag_name: 'v0.2.17-stx.2', draft: true, prerelease: false },
+    { tag_name: 'v0.2.17-stx.2', draft: false, prerelease: true },
+    { tag_name: 'v0.2.17-stx.0', draft: false, prerelease: false },
+    { tag_name: 'v0.2.170-stx.1', draft: false, prerelease: false }]) {
+    const f = fixture({ upstreamChanged: true, releases: [release] });
+    await plan(f);
+    assert.equal(f.calls.some(call => call.name === 'merge'), true, release.tag_name);
   }
 });
 
