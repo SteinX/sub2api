@@ -1,0 +1,11 @@
+{
+  "scope": "real OpenCode process -> current gateway -> synthetic Devin",
+  "client": "opencode-ai@1.19.4",
+  "observed_tool_status": "error",
+  "cause": "external_directory permission denied for the owned synthetic workspace",
+  "original_policy": {"*": "deny", "read": "allow"},
+  "compatibility_policy": {"*": "deny", "read": "allow", "external_directory": {"<this-run>/workspace/*": "allow"}},
+  "max_forwarded_requests_before_and_after": 8,
+  "production_protocol_conversion_changed": false,
+  "regression": "TestDevinAgentClients/opencode/direct/client_read_and_result"
+}

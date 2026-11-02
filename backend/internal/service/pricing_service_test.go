@@ -1354,3 +1354,38 @@ func TestBillingService_AntigravityClaude55TierFallbacksUseBaseRates(t *testing.
 		}
 	}
 }
+
+func TestClaudeOpus5XhighPricingIdentity(t *testing.T) {
+	const uid = "claude-opus-5-xhigh"
+	base := &LiteLLMModelPricing{InputCostPerToken: 5e-6, OutputCostPerToken: 25e-6, CacheReadInputTokenCost: .5e-6, CacheCreationInputTokenCost: 6.25e-6}
+	for _, dynamic := range []bool{false, true} {
+		t.Run(map[bool]string{false: "builtin", true: "dynamic"}[dynamic], func(t *testing.T) {
+			var prices *PricingService
+			if dynamic {
+				prices = &PricingService{pricingData: map[string]*LiteLLMModelPricing{"claude-opus-5": base}}
+				require.Same(t, base, prices.GetIdentifiedModelPricing(uid))
+				require.Same(t, base, prices.GetModelPricing(uid))
+			}
+			billing := NewBillingService(&config.Config{}, prices)
+			require.True(t, billing.HasIdentifiedTokenPricing(uid))
+			price, err := billing.GetModelPricing(uid)
+			require.NoError(t, err)
+			require.InDelta(t, 5e-6, price.InputPricePerToken, 1e-12)
+			require.InDelta(t, .5e-6, price.CacheReadPricePerToken, 1e-12)
+			require.InDelta(t, 25e-6, price.OutputPricePerToken, 1e-12)
+			for _, unknown := range []string{"claude-opus-5-unknown", uid + "-priority", uid + "-fast", "invented-" + uid} {
+				require.False(t, billing.HasIdentifiedTokenPricing(unknown), unknown)
+			}
+		})
+	}
+
+	t.Run("exact UID price wins", func(t *testing.T) {
+		exact := &LiteLLMModelPricing{InputCostPerToken: 9e-6, OutputCostPerToken: 31e-6}
+		prices := &PricingService{pricingData: map[string]*LiteLLMModelPricing{"claude-opus-5": base, uid: exact}}
+		require.Same(t, exact, prices.GetIdentifiedModelPricing(uid))
+		require.Same(t, exact, prices.GetModelPricing(uid))
+		price, err := NewBillingService(&config.Config{}, prices).GetModelPricing(uid)
+		require.NoError(t, err)
+		require.InDelta(t, exact.InputCostPerToken, price.InputPricePerToken, 1e-12)
+	})
+}

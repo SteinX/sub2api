@@ -607,7 +607,7 @@ func (h *ChannelHandler) GetModelDefaultPricing(c *gin.Context) {
 	pricing, err := h.billingService.GetModelPricing(model)
 	if err != nil {
 		// 模型不在定价列表中
-		response.Success(c, gin.H{"found": false})
+		response.Success(c, gin.H{"found": false, "identified": false})
 		return
 	}
 	cacheWritePrice := pricing.CacheCreationPricePerToken
@@ -621,6 +621,7 @@ func (h *ChannelHandler) GetModelDefaultPricing(c *gin.Context) {
 
 	response.Success(c, gin.H{
 		"found":                        true,
+		"identified":                   h.billingService.HasIdentifiedTokenPricing(model),
 		"input_price":                  pricing.InputPricePerToken,
 		"output_price":                 pricing.OutputPricePerToken,
 		"cache_write_price":            cacheWritePrice,

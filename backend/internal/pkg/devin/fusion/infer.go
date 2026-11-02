@@ -100,6 +100,11 @@ func InferProfile(public string, models []*pb.ClientModelConfig) (*Profile, erro
 				for _, w := range workers {
 					p := DefaultProfile(public, l, w)
 					pairs[l+"\x00"+w] = p
+					// Further candidates cannot remove an existing ambiguity. Stop
+					// before expanding the remaining alias Cartesian product.
+					if len(pairs) > 1 {
+						return nil, E("pair_ambiguous", "Fusion model ID matches multiple concrete pairs; configure an explicit override", 400)
+					}
 				}
 			}
 		}
@@ -107,9 +112,6 @@ func InferProfile(public string, models []*pb.ClientModelConfig) (*Profile, erro
 	}
 	if len(pairs) == 0 {
 		return nil, E("pair_unresolved", "Fusion ID members are missing, disabled or not directly callable; sync models or add a pair override", 400)
-	}
-	if len(pairs) > 1 {
-		return nil, E("pair_ambiguous", "Fusion model ID matches multiple concrete pairs; configure an explicit override", 400)
 	}
 	for _, p := range pairs {
 		if err := p.Validate(); err != nil {

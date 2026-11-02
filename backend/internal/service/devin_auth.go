@@ -238,6 +238,22 @@ func (s *DevinService) ImportAuth(ctx context.Context, owner int64, content stri
 	if err != nil {
 		return DevinAuthView{}, err
 	}
+	return s.importCredentials(ctx, owner, creds, proxyID, target)
+}
+
+// ImportAPIKey honors the explicitly selected key mode. A domain-scoped proxy
+// may supply an opaque credential reference instead of exposing the actual key;
+// do not infer its type or normalize it as a CLI JWT from its prefix or dots.
+// The native session exchange still validates access before any account commit.
+func (s *DevinService) ImportAPIKey(ctx context.Context, owner int64, content string, proxyID *int64, target int64) (DevinAuthView, error) {
+	key := strings.TrimSpace(content)
+	if key == "" || len(key) > 1<<20 || strings.ContainsAny(content, "\r\n") {
+		return DevinAuthView{}, errors.New("provide a Devin API key or configured credential reference")
+	}
+	return s.importCredentials(ctx, owner, map[string]any{"api_key": key, "auth_mode": "api_key"}, proxyID, target)
+}
+
+func (s *DevinService) importCredentials(ctx context.Context, owner int64, creds map[string]any, proxyID *int64, target int64) (DevinAuthView, error) {
 	id, err := oauth.GenerateSessionID()
 	if err != nil {
 		return DevinAuthView{}, err

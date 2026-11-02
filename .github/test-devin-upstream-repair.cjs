@@ -31,6 +31,8 @@ function fixture(options = {}) {
     listJobsForWorkflowRun: async () => ({ data: options.jobs || jobs }),
     getLatestRelease: async () => ({ data: { tag_name: 'v0.2.17', draft: false, prerelease: false } }),
     getReleaseByTag: options.published ? async () => ({ data: { id: 5, draft: false, prerelease: !!options.prerelease } }) : missing,
+    listReleases: async () => ({ data: options.releases
+      || (options.published ? [{ tag_name: TAG, draft: false, prerelease: !!options.prerelease }] : []) }),
     listReleaseAssets: async () => ({ data: options.assets || assets }),
     getBranch: async () => ({ data: { commit: { sha: options.main || SHA } } }),
     getCommit: async args => args.ref === TAG ? missing() : ({ data: { sha: HEAD,
@@ -388,6 +390,32 @@ test('monitor independently closes a published repair without reading or waking 
   await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
   assert.equal(readState(f.issue).phase, 'complete');
   assert.equal(f.calls.some(call => call.name === 'api'), false);
+});
+
+test('monitor verifies and closes on a later published fork revision', async () => {
+  const first = fixture();
+  await execute(first);
+  const later = 'v0.2.17-stx.2';
+  const assets = ['checksums.txt', ...['linux_amd64.tar.gz', 'linux_arm64.tar.gz', 'darwin_amd64.tar.gz', 'darwin_arm64.tar.gz', 'windows_amd64.zip']
+    .map(target => `sub2api_${later.slice(1)}_${target}`)].map(name => ({ name, size: 1024, state: 'uploaded' }));
+  const f = fixture({ issue: first.issue, published: true, assets,
+    releases: [{ tag_name: later, draft: false, prerelease: false }] });
+  const checked = [];
+  f.imageCheck = async tag => { checked.push(tag); return true; };
+  await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
+  assert.equal(readState(f.issue).phase, 'complete');
+  assert.deepEqual(checked, [later]);
+  assert.ok(f.issue.body.includes(`[${later}]`));
+  assert.equal(f.calls.some(call => call.name === 'api'), false);
+});
+
+test('a later fork revision missing assets does not close the repair', async () => {
+  const first = fixture();
+  await execute(first);
+  const f = fixture({ issue: first.issue, published: true,
+    releases: [{ tag_name: 'v0.2.17-stx.2', draft: false, prerelease: false }] });
+  await execute(f, { REPAIR_MODE: 'monitor', SOURCE_RUN_ID: '' });
+  assert.equal(readState(f.issue).phase, 'active');
 });
 
 test('a finished session without verified publication raises attention only once', async () => {

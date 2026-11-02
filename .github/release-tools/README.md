@@ -8,6 +8,8 @@ Go caches are isolated by target and refreshed on each source commit, with fallb
 
 All build jobs use the commit resolved by `prepare`, including a manual release's selected tag. Helper scripts come from the workflow revision and are passed as a run-local artifact, so older application tags do not need to contain the new scripts. The workflow serializes release runs to prevent simultaneous updates to moving image tags.
 
+An annotated tag can declare either full user E2E acceptance (`Sub2API-Devin-Acceptance-v1`) or a maintainer-authorized release based on CI and independent review (`Sub2API-Reviewed-CI-Release-v1`). The latter explicitly sets `real_user_e2e_certified` to false and retains `real_upstream_acceptance_not_certified`; it does not turn synthetic-model tests into real-upstream evidence. Both modes re-query exact-source CI, unresolved review findings and the independently reviewed patch before publication. The prepare/publish jobs need only read access to Actions, checks and PR state in addition to their existing release permissions. The limited mode skips Telegram notifications.
+
 ## Validate without publication
 
 From a branch containing this workflow:

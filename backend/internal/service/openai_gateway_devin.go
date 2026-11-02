@@ -153,7 +153,7 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		writeError(400, err.Error())
 		return nil, err
 	}
-	models, err := s.devin.Models(ctx, a)
+	models, catalogUntil, err := s.devin.pricingModels(ctx, a)
 	if err != nil {
 		return nil, s.devinForwardFailure(c, a, err)
 	}
@@ -183,6 +183,11 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 	if err != nil {
 		return nil, s.devinForwardFailure(c, a, err)
 	}
+	var pricingKey *APIKey
+	if v, ok := c.Get("api_key"); ok {
+		pricingKey, _ = v.(*APIKey)
+	}
+	pricing := s.captureDevinPricing(ctx, a, pricingKey, models, catalogUntil, inboundModel, original, req.Model)
 	anthState := apicompat.NewResponsesEventToAnthropicState()
 	chatState := apicompat.NewResponsesEventToChatState()
 	chatState.IncludeUsage = inbound.StreamOptions != nil && inbound.StreamOptions.IncludeUsage
@@ -311,9 +316,33 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		}
 		if err == nil {
 			attemptTrace.WireModel = devin.DiagnosticModelID(wire.ChatModelUid)
+			if pricing != nil {
+				if _, exists := pricing.Prices[wire.ChatModelUid]; !exists {
+					if _, known := pricing.candidates[wire.ChatModelUid]; known {
+						pricing.pinModel(wire.ChatModelUid)
+					} else if assigned := s.captureDevinPricing(ctx, a, pricingKey, models, catalogUntil, wire.ChatModelUid); assigned != nil {
+						pricing.Prices[wire.ChatModelUid] = assigned.Prices[wire.ChatModelUid]
+						if !assigned.ValidUntil.IsZero() && (pricing.ValidUntil.IsZero() || assigned.ValidUntil.Before(pricing.ValidUntil)) {
+							pricing.ValidUntil = assigned.ValidUntil
+						}
+					}
+				}
+			}
 			trace.DecisionPhase = "generation"
-			attemptTrace.GenerationAttempted = ctx.Err() == nil
-			err = consumeDevinChat(ctx, c, client, prepared.BaseURL, token, wire, decoder, req.Stream, &firstToken, &clientDisconnected, drainInterval, started)
+			if pricing.expired() {
+				priceModels, until, priceErr := s.devin.pricingModels(ctx, a)
+				err = priceErr
+				if err == nil {
+					pricing = s.captureDevinPricing(ctx, a, pricingKey, priceModels, until, inboundModel, original, req.Model, wire.ChatModelUid)
+				}
+			}
+			if err == nil && !pricing.readyForInference(time.Now()) {
+				err = fusion.E("pricing_unavailable", "account catalog price expired before inference; retry with refreshed pricing", 400)
+			}
+			if err == nil {
+				attemptTrace.GenerationAttempted = ctx.Err() == nil
+				err = consumeDevinChat(ctx, c, client, prepared.BaseURL, token, wire, decoder, req.Stream, &firstToken, &clientDisconnected, drainInterval, started)
+			}
 		}
 		trace.Attempts = append(trace.Attempts, attemptTrace)
 		if err == nil {
@@ -333,11 +362,14 @@ func (s *OpenAIGatewayService) forwardDevin(ctx context.Context, c *gin.Context,
 		billingModel = req.Model
 		trace.BillingSource = "mapped_request_fallback"
 	}
+	pricing.pinModel(billingModel)
+	pricing.pinModel(decoder.ActualModel)
 	trace.BillingModel, trace.Evidence = devin.DiagnosticModelID(billingModel), decoder.Evidence
 	if decoder.Response.Usage == nil {
 		trace.BillingModel, trace.BillingSource = "", ""
 	}
 	result := &OpenAIForwardResult{RequestID: traceID, Model: original, BillingModel: billingModel, UpstreamModel: wire.ChatModelUid, UpstreamResponseModel: decoder.ActualModel, UpstreamResponseModelConflict: len(decoder.Evidence.ActualModels) > 1, ResponseID: decoder.Response.ID, Stream: req.Stream, Duration: time.Since(started), FirstTokenMs: firstToken, ClientDisconnect: clientDisconnected || ctx.Err() != nil, UpstreamEndpoint: devin.ChatPath, DevinRoute: trace}
+	result.devinPricing = pricing
 	if u := decoder.Response.Usage; u != nil {
 		result.Usage = OpenAIUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheCreationInputTokens: u.CacheCreationInputTokens}
 		if u.InputTokensDetails != nil {

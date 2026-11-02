@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,18 +22,19 @@ import (
 )
 
 const (
-	schedulerBucketSetKey          = "sched:buckets"
-	schedulerOutboxWatermarkKey    = "sched:outbox:watermark"
-	schedulerAccountPrefix         = "sched:acc:"
-	schedulerAccountMetaPrefix     = "sched:meta:"
-	schedulerAccountLastUsedPrefix = "sched:acc:last_used:"
-	schedulerActivePrefix          = "sched:active:"
-	schedulerReadyPrefix           = "sched:ready:"
-	schedulerVersionPrefix         = "sched:ver:"
-	schedulerEpochPrefix           = "sched:epoch:"
-	schedulerRetiredPrefix         = "sched:retired:"
-	schedulerSnapshotPrefix        = "sched:"
-	schedulerLockPrefix            = "sched:lock:"
+	schedulerBucketSetKey            = "sched:buckets"
+	schedulerOutboxWatermarkKey      = "sched:outbox:watermark"
+	schedulerAccountPrefix           = "sched:acc:"
+	schedulerAccountMetaPrefix       = "sched:meta:"
+	schedulerAccountLastUsedPrefix   = "sched:acc:last_used:"
+	schedulerAccountWriteStampPrefix = "sched:acc:write_stamp:"
+	schedulerActivePrefix            = "sched:active:"
+	schedulerReadyPrefix             = "sched:ready:"
+	schedulerVersionPrefix           = "sched:ver:"
+	schedulerEpochPrefix             = "sched:epoch:"
+	schedulerRetiredPrefix           = "sched:retired:"
+	schedulerSnapshotPrefix          = "sched:"
+	schedulerLockPrefix              = "sched:lock:"
 	// 账号精简记录（sched:meta:<id>）的修订号：全局修订号与按平台划分的修订号（前缀后接平台名）。
 	// 改写精简记录后写入所涉平台的修订号；删除记录、改写平台为空或平台发生变化的记录、写入出错时写入全局修订号。
 	// 取值都是新的随机串，读侧只比较是否相等，键丢失后重建也不会与旧取值相同；
@@ -57,6 +60,73 @@ const (
 	schedulerAccountMetaRevisionBytes        = 16
 	schedulerAccountMetaRevisionWriteTimeout = 3 * time.Second
 )
+
+// Account row timestamps are strictly advanced by the database (migration
+// 248). Fixed-width UTC strings preserve microsecond ordering without Lua's
+// floating-point integer precision limit. Full/meta/stamp and invalidation are
+// published together; a delayed rebuild cannot overwrite a newer mutation.
+const schedulerAccountRowGuardLua = `
+local current = redis.call('GET', KEYS[3])
+if current == 'deleted' then return redis.error_reply('SCHEDULER_ACCOUNT_WRITE_FENCED') end
+local current_stamp, current_digest = '', ''
+if current and current ~= '' then
+    current_stamp, current_digest = string.sub(current, 1, 24), string.sub(current, 26)
+end
+-- The independent stamp key may have been evicted or lost. Marked payloads
+-- retain the same version so key loss cannot reopen an older write.
+for index = 1, 2 do
+    local raw = redis.call('GET', KEYS[index])
+    if raw then
+        local ok, decoded = pcall(cjson.decode, raw)
+        if ok and type(decoded) == 'table' and decoded._scheduler_cache_format == 2
+           and type(decoded._scheduler_row_stamp) == 'string'
+           and decoded._scheduler_row_stamp > current_stamp then
+            current_stamp = decoded._scheduler_row_stamp
+            current_digest = decoded._scheduler_row_digest or ''
+        end
+    end
+end
+`
+
+var writeSchedulerAccountScript = redis.NewScript(schedulerAccountRowGuardLua + `
+local candidate = ARGV[3]
+if current_stamp ~= '' then
+    if candidate == '' or candidate < current_stamp then
+        return redis.error_reply('SCHEDULER_ACCOUNT_WRITE_FENCED')
+    end
+    if candidate == current_stamp and current_digest ~= '' and current_digest ~= ARGV[6] then
+        return redis.error_reply('SCHEDULER_ACCOUNT_WRITE_FENCED')
+    end
+end
+local previous = redis.call('GET', KEYS[2]) or ''
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SET', KEYS[2], ARGV[2])
+redis.call('SET', KEYS[3], candidate == '' and '' or candidate .. '|' .. ARGV[6])
+redis.call('SET', KEYS[4], ARGV[4])
+if previous ~= '' then
+    local ok, decoded = pcall(cjson.decode, previous)
+    if not ok or type(decoded) ~= 'table' or decoded.Platform ~= ARGV[5] then
+        redis.call('SET', KEYS[5], ARGV[4])
+    end
+end
+return previous
+`)
+
+var evictUnencodableSchedulerAccountScript = redis.NewScript(schedulerAccountRowGuardLua + `
+local candidate = ARGV[1]
+if current_stamp ~= '' and (candidate == '' or candidate <= current_stamp) then return 0 end
+redis.call('DEL', KEYS[1], KEYS[2])
+if candidate ~= '' then redis.call('SET', KEYS[3], candidate .. '|') end
+redis.call('SET', KEYS[4], ARGV[2])
+return 1
+`)
+
+var deleteSchedulerAccountScript = redis.NewScript(`
+redis.call('SET', KEYS[4], 'deleted')
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+redis.call('SET', KEYS[5], ARGV[1])
+return 1
+`)
 
 const (
 	schedulerGroupLifecycleLockPrefix      = "sched:group:lifecycle-lock:"
@@ -776,7 +846,13 @@ func (c *schedulerCache) SetAccount(ctx context.Context, account *service.Accoun
 		return err
 	}
 	if len(accountIDs) == 0 {
-		return c.DeleteAccount(ctx, account.ID)
+		// An encoding failure is not proof of database deletion. Evict the
+		// unreadable projection without permanently tombstoning this live ID.
+		id := strconv.FormatInt(account.ID, 10)
+		return evictUnencodableSchedulerAccountScript.Run(ctx, c.rdb, []string{
+			schedulerAccountKey(id), schedulerAccountMetaKey(id), schedulerAccountWriteStampPrefix + id,
+			schedulerAccountMetaRevisionKey,
+		}, schedulerAccountRowStamp(*account), newSchedulerAccountMetaRevision()).Err()
 	}
 	return nil
 }
@@ -788,11 +864,10 @@ func (c *schedulerCache) DeleteAccount(ctx context.Context, accountID int64) err
 	id := strconv.FormatInt(accountID, 10)
 	// 删除精简记录与推进全局修订号在同一个 MULTI 中原子执行：读到删除结果的读者也读到新修订号，
 	// 进程内快照缓存不会给出已删除的账号。
-	pipe := c.rdb.TxPipeline()
-	pipe.Del(ctx, schedulerAccountKey(id), schedulerAccountMetaKey(id), schedulerLastUsedKey(id))
-	pipe.Set(ctx, schedulerAccountMetaRevisionKey, newSchedulerAccountMetaRevision(), 0)
-	_, err := pipe.Exec(ctx)
-	return err
+	return deleteSchedulerAccountScript.Run(ctx, c.rdb, []string{
+		schedulerAccountKey(id), schedulerAccountMetaKey(id), schedulerLastUsedKey(id),
+		schedulerAccountWriteStampPrefix + id, schedulerAccountMetaRevisionKey,
+	}, newSchedulerAccountMetaRevision()).Err()
 }
 
 func (c *schedulerCache) UpdateLastUsed(ctx context.Context, updates map[int64]time.Time) error {
@@ -963,11 +1038,14 @@ func decodeCachedAccount(val any) (*service.Account, error) {
 	default:
 		return nil, fmt.Errorf("unexpected account cache type: %T", val)
 	}
-	var account service.Account
+	var account schedulerAccountPayload
 	if err := json.Unmarshal(payload, &account); err != nil {
 		return nil, err
 	}
-	return &account, nil
+	if account.CacheFormat != 2 || account.Account == nil || account.RowStamp != schedulerAccountRowStamp(*account.Account) {
+		return nil, errors.New("unfenced scheduler account cache format")
+	}
+	return account.Account, nil
 }
 
 // writeAccountIDs 分块写入整账号与精简记录，返回成功编码并写入的有序账号 ID。
@@ -984,7 +1062,7 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 
 	type metaWrite struct {
 		platform string
-		previous *redis.StatusCmd
+		previous *redis.Cmd
 	}
 	pipe := c.rdb.Pipeline()
 	accountIDs := make([]int64, 0, len(accounts))
@@ -1002,6 +1080,9 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 		cmds, err := pipe.Exec(ctx)
 		if err != nil && !errors.Is(err, redis.Nil) {
 			execFailed = true
+			if strings.Contains(err.Error(), "SCHEDULER_ACCOUNT_WRITE_FENCED") {
+				return fmt.Errorf("%w: newer account row already published", service.ErrSchedulerBucketWriteFenced)
+			}
 			return err
 		}
 		// SET ... GET 在键原本不存在时返回 redis.Nil，不算失败；其余命令的错误逐条检查。
@@ -1038,10 +1119,14 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 		}
 
 		id := strconv.FormatInt(account.ID, 10)
-		pipe.Set(ctx, schedulerAccountKey(id), fullPayload, 0)
+		stamp := gjson.GetBytes(metaPayload, "_scheduler_row_stamp").String()
+		digest := gjson.GetBytes(metaPayload, "_scheduler_row_digest").String()
 		writes = append(writes, metaWrite{
 			platform: account.Platform,
-			previous: pipe.SetArgs(ctx, schedulerAccountMetaKey(id), metaPayload, redis.SetArgs{Get: true}),
+			previous: writeSchedulerAccountScript.Eval(ctx, pipe, []string{
+				schedulerAccountKey(id), schedulerAccountMetaKey(id), schedulerAccountWriteStampPrefix + id,
+				schedulerAccountMetaRevisionKeyForPlatform(account.Platform), schedulerAccountMetaRevisionKey,
+			}, fullPayload, metaPayload, stamp, newSchedulerAccountMetaRevision(), account.Platform, digest),
 		})
 		// Keep the hot LastUsedAt side key untouched: a lagging snapshot rebuild
 		// must not overwrite a newer scheduler update.
@@ -1069,9 +1154,13 @@ func (c *schedulerCache) writeAccountIDs(ctx context.Context, accounts []service
 
 // schedulerMetaPlatformChanged 判断 SET ... GET 取回的旧精简记录是否属于另一个平台；
 // 旧值不是合法 JSON 或缺少字符串类型的顶层 Platform 时按已变化处理。
-func schedulerMetaPlatformChanged(previous *redis.StatusCmd, platform string) bool {
-	raw, err := previous.Result()
+func schedulerMetaPlatformChanged(previous *redis.Cmd, platform string) bool {
+	value, err := previous.Result()
 	if err != nil {
+		return false
+	}
+	raw, ok := value.(string)
+	if !ok || raw == "" {
 		return false
 	}
 	if !gjson.Valid(raw) {
@@ -1118,12 +1207,41 @@ func newSchedulerAccountMetaRevision() string {
 	return hex.EncodeToString(raw)
 }
 
+type schedulerAccountPayload struct {
+	*service.Account
+	CacheFormat int    `json:"_scheduler_cache_format"`
+	RowStamp    string `json:"_scheduler_row_stamp"`
+	RowDigest   string `json:"_scheduler_row_digest"`
+}
+
+func schedulerAccountRowStamp(account service.Account) string {
+	if account.UpdatedAt.IsZero() || account.UpdatedAt.Year() < 0 || account.UpdatedAt.Year() > 9999 {
+		return ""
+	}
+	return account.UpdatedAt.UTC().Format("20060102150405.000000000")
+}
+
 func marshalSchedulerCacheAccount(account service.Account) ([]byte, []byte, error) {
-	fullPayload, err := json.Marshal(account)
+	stamp, digest := schedulerAccountRowStamp(account), ""
+	if stamp != "" {
+		// Related entities and the hot last-used lane have their own lifecycle;
+		// only the accounts row is versioned by the database trigger.
+		row := account
+		row.LastUsedAt, row.Proxy, row.ProxyFallbackOriginName = nil, nil, nil
+		row.AccountGroups, row.GroupIDs, row.Groups = nil, nil, nil
+		payload, err := json.Marshal(row)
+		if err != nil {
+			return nil, nil, err
+		}
+		checksum := sha256.Sum256(payload)
+		digest = hex.EncodeToString(checksum[:])
+	}
+	fullPayload, err := json.Marshal(schedulerAccountPayload{Account: &account, CacheFormat: 2, RowStamp: stamp, RowDigest: digest})
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal account: %w", err)
 	}
-	metaPayload, err := json.Marshal(buildSchedulerMetadataAccount(account))
+	metadata := buildSchedulerMetadataAccount(account)
+	metaPayload, err := json.Marshal(schedulerAccountPayload{Account: &metadata, CacheFormat: 2, RowStamp: stamp, RowDigest: digest})
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal account metadata: %w", err)
 	}
@@ -1157,6 +1275,7 @@ func (c *schedulerCache) mgetChunked(ctx context.Context, keys []string) ([]any,
 func buildSchedulerMetadataAccount(account service.Account) service.Account {
 	return service.Account{
 		ID:                      account.ID,
+		UpdatedAt:               account.UpdatedAt,
 		Name:                    account.Name,
 		Platform:                account.Platform,
 		Type:                    account.Type,
@@ -1301,6 +1420,10 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"rpm_sticky_buffer",
 		"max_sessions",
 		"session_idle_timeout_minutes",
+		"devin_models",
+		"devin_model_catalog",
+		"devin_fusion_enabled",
+		"devin_fusion_profiles",
 		"openai_oauth_responses_websockets_v2_enabled",
 		"openai_oauth_responses_websockets_v2_mode",
 		"openai_apikey_responses_websockets_v2_enabled",

@@ -11,6 +11,8 @@ syntax = "proto3";
 package exa.api_server_pb;
 option go_package = "github.com/Wei-Shaw/sub2api/internal/pkg/devin/pb";
 
+import "google/protobuf/timestamp.proto";
+
 // exa.chat_pb.CacheControlType
 enum CacheControlType {
   CACHE_CONTROL_TYPE_UNSPECIFIED = 0;
@@ -304,6 +306,32 @@ message ModelFamilyMetadata {
   bool is_default_model_in_family = 3;
 }
 
+// exa.codeium_common_pb.ModelPricingType
+enum ModelPricingType {
+  MODEL_PRICING_TYPE_UNSPECIFIED = 0;
+  MODEL_PRICING_TYPE_STATIC_CREDIT = 1;
+  MODEL_PRICING_TYPE_API = 2;
+  MODEL_PRICING_TYPE_BYOK = 3;
+  MODEL_PRICING_TYPE_ACU_TOKEN = 4;
+  MODEL_PRICING_TYPE_ACU_CREDIT = 5;
+}
+
+// exa.codeium_common_pb.ModelCostTier
+enum ModelCostTier {
+  MODEL_COST_TIER_UNSPECIFIED = 0;
+  MODEL_COST_TIER_LOW = 1;
+  MODEL_COST_TIER_MEDIUM = 2;
+  MODEL_COST_TIER_HIGH = 3;
+  MODEL_COST_TIER_FREE = 4;
+}
+
+// exa.codeium_common_pb.PromoStatus
+message PromoStatus {
+  bool is_active = 1;
+  google.protobuf.Timestamp end_date = 2;
+  string label = 3;
+}
+
 // exa.codeium_common_pb.ClientModelConfig
 message ClientModelConfig {
   string label = 1;
@@ -314,12 +342,15 @@ message ClientModelConfig {
   bool is_premium = 7;
   bool is_beta = 9;
   bool is_recommended = 11;
+  ModelPricingType pricing_type = 13;
   bool is_new = 15;
   // The account's context window for this lane, not the output cap.
   int32 max_tokens = 18;
+  PromoStatus promo_status = 19;
   bool is_capacity_limited = 20;
   string model_uid = 22;
   ModelInfo model_info = 23;
+  ModelCostTier model_cost_tier = 24;
   optional string description = 27;
   ModelFamilyMetadata model_family_metadata = 30;
   bool is_default_model_in_family = 31;

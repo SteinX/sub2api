@@ -556,6 +556,7 @@ func (c *CacheKeepaliveController) Tick(ctx context.Context, scope, id string, e
 	<-fenceDone
 	r.Attempt.Response = result.Outcome.Response
 	r.Attempt.BillingModel = result.Outcome.BillingModel
+	r.Attempt.PricingSnapshot = result.Outcome.PricingSnapshot
 	r.DiscardedOutput = result.DiscardedOutput
 	r.RequestSucceeded = result.RequestSucceeded
 	r.CacheConfirmed = result.CacheConfirmed

@@ -163,6 +163,9 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if result.FusionUsageSettled {
 		return nil
 	}
+	if result.devinPricing != nil && input.Account != nil && input.Account.Platform == PlatformDevin && result.devinPricing.AccountID == input.Account.ID {
+		ctx = withDevinPricing(ctx, result.devinPricing)
+	}
 	if s.rateLimitService != nil && input.Account != nil && input.Account.Platform == PlatformOpenAI {
 		s.rateLimitService.ResetOpenAI403Counter(ctx, input.Account.ID)
 	}
@@ -545,6 +548,9 @@ func (s *OpenAIGatewayService) hasIdentifiedOpenAIResponsePricing(ctx context.Co
 	if model == "" {
 		return false, false
 	}
+	if price, ok := devinPriceFromContext(ctx, apiKey, model); ok {
+		return price.Identified, price.Resolved != nil && (price.Resolved.Source == PricingSourceGroup || price.Resolved.Source == PricingSourceChannel)
+	}
 	if s.resolveOpenAIChannelPricing(ctx, model, apiKey) != nil {
 		return true, true
 	}
@@ -622,7 +628,11 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageCost(
 	}
 
 	if result != nil && result.ImageCount > 0 {
-		// 渠道定价为 token 计费时走 token 路径，否则走图片计费
+		// 分组显式开启按张计费且来自图片端点时强制走图片计费；否则渠道 token 定价优先。
+		// 混合的 Responses/Chat/WS 请求即使产出了图片，也不能因开关丢失文本 token 费用。
+		if imageCountBillingApplies(apiKey, result.ImageEndpoint) {
+			return s.calculateOpenAIImageCost(ctx, billingModel, apiKey, result, imageMultiplier), nil
+		}
 		if resolved := s.resolveOpenAIChannelPricing(ctx, billingModel, apiKey); resolved == nil || resolved.Mode != BillingModeToken {
 			return s.calculateOpenAIImageCost(ctx, billingModel, apiKey, result, imageMultiplier), nil
 		}
@@ -744,6 +754,18 @@ func (s *OpenAIGatewayService) calculateOpenAIRecordUsageTokenCost(
 	longContextBillingGate *bool,
 	modelLongContextExempt bool,
 ) (*CostBreakdown, error) {
+	if price, ok := devinPriceFromContext(ctx, apiKey, billingModel); ok && price.Resolved != nil {
+		resolver := s.resolver
+		if resolver == nil {
+			resolver = NewModelPricingResolver(nil, s.billingService)
+		}
+		return s.billingService.CalculateCostUnified(CostInput{
+			Ctx: ctx, Model: billingModel, Tokens: tokens, RequestCount: 1,
+			RateMultiplier: multiplier, PricingAt: pricingAt, ServiceTier: serviceTier,
+			ReasoningEffort: reasoningEffort, Resolver: resolver, Resolved: price.resolved(),
+			LongContextBillingEnabled: longContextBillingGate, DisableModelLongContextPricing: modelLongContextExempt,
+		})
+	}
 	if s.resolver != nil && apiKey.Group != nil {
 		gid := apiKey.Group.ID
 		return s.billingService.CalculateCostUnified(CostInput{
@@ -974,6 +996,12 @@ func (s *OpenAIGatewayService) filterCNProviderBillingModelCandidates(ctx contex
 }
 
 func (s *OpenAIGatewayService) resolveOpenAIChannelPricing(ctx context.Context, billingModel string, apiKey *APIKey) *ResolvedPricing {
+	if price, ok := devinPriceFromContext(ctx, apiKey, billingModel); ok {
+		if r := price.resolved(); r != nil && (r.Source == PricingSourceGroup || r.Source == PricingSourceChannel) {
+			return r
+		}
+		return nil
+	}
 	if s.resolver == nil || apiKey == nil || apiKey.Group == nil {
 		return nil
 	}

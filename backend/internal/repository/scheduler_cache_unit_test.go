@@ -108,16 +108,14 @@ func TestSchedulerCacheSnapshotAccountIDReusePreservesPayloadAndMembers(t *testi
 	require.NoError(t, err)
 	require.Equal(t, []int64{701, 702, 701}, accountIDs, "应保留可编码账号的原顺序和重复项")
 
-	wantFull, err := json.Marshal(validOne)
-	require.NoError(t, err)
-	wantMeta, err := json.Marshal(buildSchedulerMetadataAccount(validOne))
-	require.NoError(t, err)
 	fullBefore, err := cache.rdb.Get(ctx, schedulerAccountKey("701")).Bytes()
 	require.NoError(t, err)
 	metaBefore, err := cache.rdb.Get(ctx, schedulerAccountMetaKey("701")).Bytes()
 	require.NoError(t, err)
-	require.Equal(t, wantFull, fullBefore)
-	require.Equal(t, wantMeta, metaBefore)
+	decoded, err := decodeCachedAccount(fullBefore)
+	require.NoError(t, err)
+	require.Equal(t, validOne.Name, decoded.Name)
+	require.Equal(t, validOne.Credentials, decoded.Credentials)
 
 	forced := service.SchedulerBucket{GroupID: 17, Platform: service.PlatformOpenAI, Mode: service.SchedulerModeForced}
 	forcedToken, err := cache.CaptureBucketWriteToken(ctx, forced)
@@ -292,8 +290,19 @@ func TestMarshalSchedulerCacheAccountKeepsEncodingJSONWireFormat(t *testing.T) {
 			require.NoError(t, err)
 			wantMeta, err := json.Marshal(buildSchedulerMetadataAccount(tc.account))
 			require.NoError(t, err)
-			require.Equal(t, wantFull, full)
-			require.Equal(t, wantMeta, meta)
+			// The top-level account contract remains intact; only the cache's
+			// guarded-format/version fields are added beside it.
+			for _, pair := range [][2][]byte{{wantFull, full}, {wantMeta, meta}} {
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(pair[1], &fields))
+				require.JSONEq(t, "2", string(fields["_scheduler_cache_format"]))
+				delete(fields, "_scheduler_cache_format")
+				delete(fields, "_scheduler_row_stamp")
+				delete(fields, "_scheduler_row_digest")
+				actual, err := json.Marshal(fields)
+				require.NoError(t, err)
+				require.JSONEq(t, string(pair[0]), string(actual))
+			}
 		})
 	}
 }

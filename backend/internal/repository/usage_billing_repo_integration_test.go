@@ -560,6 +560,10 @@ func TestIncrementUsageBillingAccountQuota_StatementVariantsMatchFullStatement(t
 				require.Equal(t, wantHit, probe != nil, "variant statement hit")
 				_, err = tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT quota_variant_probe")
 				require.NoError(t, err)
+				var variantBefore, referenceBefore time.Time
+				require.NoError(t, tx.QueryRowContext(ctx,
+					"SELECT v.updated_at, r.updated_at FROM accounts v, accounts r WHERE v.id=$1 AND r.id=$2",
+					variant.ID, reference.ID).Scan(&variantBefore, &referenceBefore))
 
 				got, err := incrementUsageBillingAccountQuota(ctx, tx, variant.ID, 2.5, hints[0], hints[1])
 				require.NoError(t, err)
@@ -568,13 +572,17 @@ func TestIncrementUsageBillingAccountQuota_StatementVariantsMatchFullStatement(t
 				require.Equal(t, *want, *got)
 
 				var gotExtra, wantExtra string
-				var sameExtra, sameUpdatedAt bool
+				var sameExtra bool
+				var variantAfter, referenceAfter time.Time
 				require.NoError(t, tx.QueryRowContext(ctx,
-					"SELECT v.extra::text, r.extra::text, v.extra = r.extra, v.updated_at = r.updated_at FROM accounts v, accounts r WHERE v.id = $1 AND r.id = $2",
+					"SELECT v.extra::text, r.extra::text, v.extra = r.extra, v.updated_at, r.updated_at FROM accounts v, accounts r WHERE v.id = $1 AND r.id = $2",
 					variant.ID, reference.ID,
-				).Scan(&gotExtra, &wantExtra, &sameExtra, &sameUpdatedAt))
+				).Scan(&gotExtra, &wantExtra, &sameExtra, &variantAfter, &referenceAfter))
 				require.True(t, sameExtra, "variant extra %s != reference extra %s", gotExtra, wantExtra)
-				require.True(t, sameUpdatedAt)
+				// Versions are per-row mutation order, not a transaction-wide
+				// NOW() value. Both SQL paths must advance their own row version.
+				require.True(t, variantAfter.After(variantBefore))
+				require.True(t, referenceAfter.After(referenceBefore))
 			})
 		}
 	}

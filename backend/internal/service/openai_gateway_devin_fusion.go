@@ -41,6 +41,8 @@ type devinFusionExecutor struct {
 	userAgent          string
 	ipAddress          string
 	holdUnsettled      map[string]bool
+	pricing            *devinPricingSnapshot
+	pricingAttempt     string
 }
 
 func (x *devinFusionExecutor) Close() {
@@ -118,8 +120,16 @@ func (x *devinFusionExecutor) cost(ctx context.Context, model string, u UsageTok
 	if s.billingService == nil {
 		return nil, fusion.E("billing_unavailable", "physical model pricing is unavailable", 503)
 	}
+	if _, pinned := devinPriceFromContext(ctx, x.key, model); !pinned {
+		// Read-only quotes have no physical attempt whose price must remain
+		// pinned. Actual estimates/executions carry a stable attempt ID.
+		if x.pricing == nil || x.pricingAttempt == "" {
+			x.refreshPricing(ctx, "", model)
+		}
+		ctx = withDevinPricing(ctx, x.pricing)
+	}
 	if identified, _ := s.hasIdentifiedOpenAIResponsePricing(ctx, model, x.key); !identified {
-		return nil, fusion.E("pricing_unavailable", "configure identified pricing for each real Fusion model UID", 400)
+		return nil, fusion.E("pricing_unavailable", fmt.Sprintf("configure identified pricing for real Fusion model UID %q", model), 400)
 	}
 	multiplier := 1.0
 	if s.cfg != nil {
@@ -131,10 +141,23 @@ func (x *devinFusionExecutor) cost(ctx context.Context, model string, u UsageTok
 	multiplier, _ = computePeakAwareMultipliers(x.key, multiplier, at)
 	cost, err := s.calculateOpenAIRecordUsageTokenCost(ctx, x.key, model, multiplier, at, u, "", "", openAILongContextBillingGate(x.account), false)
 	if err != nil || cost == nil {
-		return nil, fusion.E("pricing_unavailable", "configure pricing for each real Fusion member before inference", 400)
+		return nil, fusion.E("pricing_unavailable", fmt.Sprintf("configure calculable pricing for real Fusion model UID %q before inference", model), 400)
 	}
 	return cost, nil
 }
+
+func (x *devinFusionExecutor) refreshPricing(ctx context.Context, attempt string, uids ...string) {
+	var models []*pb.ClientModelConfig
+	var until time.Time
+	if x.service.devin != nil && x.account != nil {
+		// An expired/failed fetch supplies no FREE evidence. Do not fall back
+		// to x.models or the account's persisted scheduling catalog.
+		models, until, _ = x.service.devin.pricingModels(ctx, x.account)
+	}
+	x.pricing = x.service.captureDevinPricing(ctx, x.account, x.key, models, until, uids...)
+	x.pricingAttempt = attempt
+}
+
 func (x *devinFusionExecutor) Estimate(ctx context.Context, call fusion.Call) (float64, error) {
 	return x.estimate(ctx, call, true)
 }
@@ -164,6 +187,7 @@ func (x *devinFusionExecutor) estimate(ctx context.Context, call fusion.Call, el
 	if (x.key.Quota > 0 || x.key.HasRateLimits()) && x.updater == nil {
 		return 0, fusion.E("billing_unavailable", "API key quota accounting is unavailable", 503)
 	}
+	x.refreshPricing(ctx, call.AttemptID, x.profile.LeadModel, x.profile.SidekickModel, call.Request.Model)
 	// Check both member prices before the first paid inference, while allowing
 	// replay of a durable public response without another billing admission.
 	for _, uid := range []string{x.profile.LeadModel, x.profile.SidekickModel} {
@@ -187,17 +211,24 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	fusionRecovery := x.attemptPrefix != "context"
 	generationSent := false
 	usageObserved := false
+	toolCalls, invalidArguments := 0, 0
 	defer func() {
 		event, component := "devin.fusion_attempt", "audit.devin.fusion"
 		if !fusionRecovery {
 			event, component = "devin.context_attempt", "audit.devin.context"
 		}
-		logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("retry_of", call.RetryOf), zap.String("model", devin.DiagnosticModelID(call.Request.Model)), zap.Bool("generation_sent", generationSent), zap.Bool("usage_observed", usageObserved))
+		logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("retry_of", call.RetryOf), zap.String("model", devin.DiagnosticModelID(call.Request.Model)), zap.Bool("generation_sent", generationSent), zap.Bool("usage_observed", usageObserved), zap.String("failure_kind", devinFusionFailureKind(err)), zap.Int("tool_calls", toolCalls), zap.Int("invalid_tool_arguments", invalidArguments))
 	}()
 	if fusionRecovery {
 		if err := s.devin.waitFusionAdmission(ctx, x.account, call.Request.Model, call.Purpose); err != nil {
 			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 		}
+	}
+	if x.pricing == nil || x.pricingAttempt != call.AttemptID {
+		x.refreshPricing(ctx, call.AttemptID, x.profile.LeadModel, x.profile.SidekickModel, call.Request.Model)
+	}
+	if !x.pricing.readyForInference(time.Now()) {
+		return fusion.Outcome{KnownFailure: true, NotStarted: true}, fusion.E("pricing_unavailable", "account catalog price expired before inference; retry with refreshed pricing", 400)
 	}
 	reservation, err := x.reserve(ctx, call.EstimateUSD, call.AttemptID)
 	if err != nil {
@@ -259,6 +290,9 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 		}
 	}
+	if !x.pricing.readyForInference(time.Now()) {
+		return fusion.Outcome{KnownFailure: true, NotStarted: true}, fusion.E("pricing_unavailable", "account catalog price expired before inference; retry with refreshed pricing", 400)
+	}
 	generationSent = true
 	err = consumeDevinFusionChat(ctx, x.c, x.client, prepared.BaseURL, token, wire, decoder, x.stream, &x.clientDisconnected)
 	if err == nil {
@@ -268,13 +302,22 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	if billingModel == "" {
 		billingModel = wire.ChatModelUid
 	}
+	x.pricing.pinModel(billingModel)
 	// Profile members are concrete. A changed execution identity is never a
 	// silent lane/model switch, but any terminal usage is still settled.
 	if decoder.ActualModel != "" && decoder.ActualModel != wire.ChatModelUid || len(decoder.Evidence.ActualModels) > 1 {
 		err = fusion.E("route_mismatch", "upstream execution model differs from the pinned Fusion member", 502)
 	}
-	outcome = fusion.Outcome{Response: &decoder.Response, BillingModel: billingModel, ClientDisconnected: x.clientDisconnected}
+	outcome = fusion.Outcome{Response: &decoder.Response, BillingModel: billingModel, ClientDisconnected: x.clientDisconnected, PricingSnapshot: x.pricing.marshal()}
 	usageObserved = decoder.Response.Usage != nil
+	for _, item := range decoder.Response.Output {
+		if item.Type == "function_call" {
+			toolCalls++
+			if !json.Valid([]byte(item.Arguments)) {
+				invalidArguments++
+			}
+		}
+	}
 	if err != nil {
 		var upstream *devin.Error
 		if errors.As(err, &upstream) && !decoder.ExecutionObserved {
@@ -293,10 +336,58 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	}
 	return outcome, err
 }
+
+// Report only enumerated categories: raw provider messages, trace IDs and tool
+// contents may contain private data and must not enter the attempt audit.
+func devinFusionFailureKind(err error) string {
+	if err == nil {
+		return "none"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	var native *devin.Error
+	if errors.As(err, &native) {
+		switch native.Code {
+		case "unauthenticated", "permission_denied", "invalid_argument", "resource_exhausted", "deadline_exceeded":
+			return "native_" + native.Code
+		default:
+			return "native_error"
+		}
+	}
+	for inner := err; inner != nil; inner = errors.Unwrap(inner) {
+		switch inner.Error() {
+		case "devin returned incomplete tool arguments":
+			return "incomplete_tool_arguments"
+		case "devin tool argument delta has no call":
+			return "tool_delta_missing_call"
+		case "devin tool call has no name":
+			return "tool_call_missing_name"
+		case "devin returned no content":
+			return "empty_response"
+		}
+	}
+	return "transport_or_decode_error"
+}
 func (x *devinFusionExecutor) Settle(ctx context.Context, a fusion.Attempt) (float64, error) {
 	if a.Response == nil || a.Response.Usage == nil {
 		return 0, nil
 	}
+	// Legacy receipts have no evidence of their historical account promotion.
+	// Keep their existing configured/default pricing; today's FREE tier cannot
+	// establish that an older inference was free.
+	pricing := x.service.captureDevinPricing(ctx, x.account, x.key, nil, time.Time{}, a.BillingModel, a.Model)
+	if len(a.PricingSnapshot) > 0 {
+		var err error
+		pricing, err = restoreDevinPricing(a.PricingSnapshot, x.account, x.key)
+		if err != nil {
+			return 0, err
+		}
+	}
+	ctx = withDevinPricing(ctx, pricing)
 	u := a.Response.Usage
 	cached := 0
 	if u.InputTokensDetails != nil {
@@ -306,7 +397,7 @@ func (x *devinFusionExecutor) Settle(ctx context.Context, a fusion.Attempt) (flo
 	if err != nil {
 		return 0, err
 	}
-	result := &OpenAIForwardResult{RequestID: x.attemptKey(a.ID), ResponseID: a.Response.ID, Model: x.publicModel, BillingModel: a.BillingModel, UpstreamModel: a.Model, UpstreamResponseModel: a.Response.Model, Usage: OpenAIUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheReadInputTokens: cached, CacheCreationInputTokens: u.CacheCreationInputTokens}, Duration: time.Since(a.StartedAt), UpstreamEndpoint: devin.ChatPath}
+	result := &OpenAIForwardResult{RequestID: x.attemptKey(a.ID), ResponseID: a.Response.ID, Model: x.publicModel, BillingModel: a.BillingModel, UpstreamModel: a.Model, UpstreamResponseModel: a.Response.Model, Usage: OpenAIUsage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheReadInputTokens: cached, CacheCreationInputTokens: u.CacheCreationInputTokens}, Duration: time.Since(a.StartedAt), UpstreamEndpoint: devin.ChatPath, devinPricing: pricing}
 	purpose := a.Purpose
 	if purpose == "" {
 		purpose = fusion.Inference

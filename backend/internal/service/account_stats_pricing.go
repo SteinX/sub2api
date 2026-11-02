@@ -64,6 +64,15 @@ func resolveAccountStatsCost(
 		}
 		return &cost
 	}
+	// A current account catalog can supersede the generic supplier price with
+	// FREE. Keep explicit statistics rules above, but do not resurrect a paid
+	// catalog fallback for an attempt whose physical price was pinned to zero.
+	if p, _ := ctx.Value(devinPricingContextKey{}).(*devinPricingSnapshot); p != nil && p.AccountID == accountID && p.GroupID == groupID {
+		if price := p.Prices[upstreamModel]; price.Resolved != nil && price.Resolved.Source == PricingSourceDevinFree {
+			zero := 0.0
+			return &zero
+		}
+	}
 
 	// 优先级 3：模型定价文件（LiteLLM）默认价格
 	if billingService != nil {

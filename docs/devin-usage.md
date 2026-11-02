@@ -16,6 +16,14 @@ Devin 支持长期 API Key、浏览器登录和导入会话。添加时保存名
 
 “使用密钥”和 CC Switch 导入先读取当前 Key 可用的真实模型目录，再选择模型。Codex、Claude Code 和 OpenCode 配置使用同一个选择，包括 Fusion 的上游 UID；目录获取失败或为空时不会生成猜测的 GPT / Claude 配置。可先检查分组权限、模型白名单，再同步上游模型并刷新目录。
 
+在“密钥 → 使用 Key”中选择 Devin 模型后，切换客户端标签并复制生成配置。客户端使用本站公开 Key 和本站地址，原生 PAT 只由管理员在账号管理中配置。直接模型与已启用的 `fusion-*` 使用相同的客户端接入流程；更换模型时新建会话，续接时保持原有消息和工具结果不变。
+
+- OpenCode 使用 OpenAI-compatible Chat provider；可用 `--pure` 进行无插件检查。OMO 模板固定插件版本并提供只读 `devin-check` primary agent，关闭模型和运行时 fallback。先填写项目绝对路径，生成的 `external_directory` 仅允许该工作目录，不使用全域许可。模板供接入检查使用，不将外层 Worker 派发视为已验证能力。
+- OMP 标签生成用户目录下 `models.yml` 和 `config.yml`。JSON 也是合法的 YAML 1.2；配置使用 Chat Completions，关闭自动 compact、`supersedeReads`、`dropUseless` 及自动重试，并把模型角色指向选择的同一模型。读取裁剪的默认行为可能改写 Fusion 历史而触发冲突，不能把兼容配置的结果当作默认配置通过。保留更多历史会增加上下文占用，长会话需单独验证。
+- Codex 的 Responses 与 Claude Code 的 Messages 标签继续提供相应协议配置；不要仅依据协议适配成功声称对应 CLI 版本的全部会话和工具能力通过。非 Fusion 的 HTTP Responses 应关闭存储，由客户端发送完整历史。
+
+将配置与已有用户配置合并后，新建会话先测试简短回复，再在工作目录放置 `probe.txt`，检查真实读取与结果续接。预算或历史冲突应先检查本地用量和客户端配置，不反复自动发送请求。验证边界及固定客户端版本见[客户端进程验收](DEVIN_AGENT_E2E.md)。
+
 Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以下适配：
 
 | 接口 | 行为 |
@@ -33,7 +41,7 @@ Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以
 
 失败时会保留 RPC 阶段（例如 `GetUserJwt`、`AssignModel`、`GetChatMessage`），以及上游提供的合法 trace ID。`invalid_argument` 本身无法证明是模型 UID、请求字段还是上游内部故障；重试仍失败时应记录这些信息定位，不会把失败显示成测试成功。上游原始错误正文和凭据不直接透出。
 
-协议对照来源：[OMP Devin provider](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/ai/src/providers/devin.ts)、[wire metadata](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/catalog/src/wire/devin.ts)、[protobuf 字段](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/catalog/src/discovery/devin-proto.ts)。回归包含模拟原生 RPC 和本机 WebSocket 多轮调用；真实账号的上游可用性需要部署后实测。
+协议对照来源：[OMP Devin provider](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/ai/src/providers/devin.ts)、[wire metadata](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/catalog/src/wire/devin.ts)、[protobuf 字段](https://github.com/can1357/oh-my-pi/blob/0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0/packages/catalog/src/discovery/devin-proto.ts)。可在发布前使用[云端 Devin E2E 环境](DEVIN_E2E.md)，通过当前后端的公开网关执行确定性协议回归，并用独立测试账号验证真实上游。模拟结果不代表真实账号或上游协议当前可用。
 
 ## 账号用量
 
@@ -58,3 +66,13 @@ Devin 上游使用 Cascade 的 Connect/protobuf 接口。Sub2API 对外提供以
 网关 Fusion 默认开启，按 `fusion-<lead>-sidekick-<sidekick>` model ID 和账号目录推断配对，账号编辑支持覆盖或关闭配对，为 Responses、Chat Completions、Anthropic Messages 提供统一的 Lead 委派、Sidekick 工具执行和 Lead 审查。会话固定账号和角色模型，工具由接入客户端执行，两个模型按各次实际用量计费。配置、会话关联、取消与验收边界见 [网关 Fusion](DEVIN_FUSION.md)。
 
 面向个人使用 OMO / OMP 的本期范围、客户端会话适配、上游恢复，以及质量／时间／费用对照方案见 [Fusion 接入与评测计划](DEVIN_FUSION_OMO_OMP_PLAN.md)。其中记录实施进度与证据边界；本地客户端探针不代表真实 Fusion 或日常长任务已经验收。
+
+遇到 `devin_fusion_pricing_unavailable` 时，错误会指出未通过检查的真实成员 UID。管理员需分别核对 Lead 和 Sidekick：价格按当前 Key 分组的模型定价、关联渠道中 Devin 平台的模型定价、全局已识别价卡依次解析；仅给虚拟 `fusion-*` 名称配价不够。渠道中给其他分组或其他平台配置的同名规则不会生效。
+
+普通模型请求成功、模型出现在目录中，都不能证明它满足 Fusion 的价格准入。`GET /api/v1/admin/channels/model-pricing?model=<真实 UID>` 只查询全局默认价，不能据其 `identified` 判断分组或渠道覆盖是否生效。没有已发布 token 费率的模型，应先由管理员确认并配置真实费率；不能从 Devin credits 倍率推导美元 token 单价，也不能用另一模型的价格或系列猜测价放行。修改分组／渠道定价应走管理接口，以执行正常的缓存失效流程。
+
+新版支持使用同一 Devin 公共 Key 调用 `GET /v1/models?pricing_models=<Lead UID>,<Sidekick UID>`，分别查看当前授权目录中物理模型的 `identified`、`calculable` 和价格来源。该只读检查沿用 Fusion 的有效分组／渠道和明确价格判定，不生成模型回答、不预留或扣费，也不返回费率、账号或分组标识。`not_advertised` 表示该 UID 不在此 Key 当前可见目录中；`unidentified` 仍应停止在推理前。零有效价格只有在明确规则已识别且可计算时才有意义，不能用它推断供应商免费。
+
+同时传入正数 `context_tokens` 和 `output_tokens` 可获得保守的 `context_cost_upper_usd`：全部上下文分别计入输入和两类缓存，加上最大输出，使用当前 Key 的有效价格。它只用于本地准入，可能高于实际请求费用，不是供应商账单或扣费硬上限。
+
+该估价当前仅支持可证明上界的平坦 token 费率。按次收费、上下文阶梯、分时费率或无法验证的区间价会返回 `cost_bound_unavailable`，不会把最长窗口所在区间的低价当作短请求的上界；此时真实 runner 停在推理前。

@@ -1,0 +1,46 @@
+syntax = "proto3";
+package exa.codeium_common_pb;
+import "google/protobuf/timestamp.proto";
+
+// Independent fixture subset of the full upstream schema at:
+// can1357/oh-my-pi@3a2758b68f7c8e6bdf22c3a76b86c8675e5e0c9e
+// packages/ai/src/providers/devin/proto/exa/codeium_common_pb/codeium_common.proto
+// This fixture is not generated from the application's cascade.proto.
+enum ModelPricingType {
+  MODEL_PRICING_TYPE_UNSPECIFIED = 0;
+  MODEL_PRICING_TYPE_STATIC_CREDIT = 1;
+  MODEL_PRICING_TYPE_API = 2;
+  MODEL_PRICING_TYPE_BYOK = 3;
+  MODEL_PRICING_TYPE_ACU_TOKEN = 4;
+  MODEL_PRICING_TYPE_ACU_CREDIT = 5;
+}
+enum ModelCostTier {
+  MODEL_COST_TIER_UNSPECIFIED = 0;
+  MODEL_COST_TIER_LOW = 1;
+  MODEL_COST_TIER_MEDIUM = 2;
+  MODEL_COST_TIER_HIGH = 3;
+  MODEL_COST_TIER_FREE = 4;
+}
+message PromoStatus {
+  bool is_active = 1;
+  google.protobuf.Timestamp end_date = 2;
+  string label = 3;
+}
+message ModelFeatures { bool supports_tool_calls = 12; }
+message ModelInfo {
+  ModelFeatures model_features = 6;
+  int32 max_output_tokens = 13;
+}
+message ClientModelConfig {
+  string label = 1;
+  float credit_multiplier = 3;
+  ModelPricingType pricing_type = 13;
+  int32 max_tokens = 18;
+  PromoStatus promo_status = 19;
+  string model_uid = 22;
+  ModelInfo model_info = 23;
+  ModelCostTier model_cost_tier = 24;
+}
+message GetCliModelConfigsResponse {
+  repeated ClientModelConfig client_model_configs = 1;
+}

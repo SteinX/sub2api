@@ -1,0 +1,14 @@
+{
+  "scope": "real OMP process -> current gateway -> synthetic Devin; no live PAT",
+  "client": "@oh-my-pi/pi-coding-agent@18.12.6",
+  "bun": "1.4.4",
+  "trigger": "two successful reads of probe.txt followed by --continue",
+  "initial_tool_result": "E2E_TOOL_RESULT",
+  "replayed_tool_result_with_default_pruning": "[Superseded by a newer read of this file]",
+  "observed_http_status": 409,
+  "observed_error_code": "devin_fusion_history_conflict",
+  "compatibility_configuration": {
+    "compaction": {"enabled": false, "supersedeReads": false, "dropUseless": false}
+  },
+  "production_history_validation_changed": false
+}

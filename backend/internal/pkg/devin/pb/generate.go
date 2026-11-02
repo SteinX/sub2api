@@ -6,6 +6,8 @@ package pb
 // ModelInfo.harness_uids: repeated string, field 20, independently checked against
 // can1357/oh-my-pi at 3a2758b68f7c8e6bdf22c3a76b86c8675e5e0c9e,
 // packages/ai/src/providers/devin/proto/exa/codeium_common_pb/codeium_common.proto.
+// ClientModelConfig pricing_type (13), promo_status (19), model_cost_tier (24),
+// PromoStatus and their enum values are checked against that same full schema.
 // ModelOrAlias and chat fields were checked against can1357/oh-my-pi at
 // 0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0, packages/catalog/src/discovery/devin-proto.ts.
 //go:generate protoc -I . --go_out=. --go_opt=paths=source_relative cascade.proto

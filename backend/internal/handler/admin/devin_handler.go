@@ -72,7 +72,9 @@ func (h *DevinHandler) Start(c *gin.Context) {
 	switch in.Mode {
 	case "browser":
 		out, err = h.devin.StartAuth(c.Request.Context(), devinOwner(c), in.ProxyID, in.AccountID)
-	case "key", "import":
+	case "key":
+		out, err = h.devin.ImportAPIKey(c.Request.Context(), devinOwner(c), in.Content, in.ProxyID, in.AccountID)
+	case "import":
 		out, err = h.devin.ImportAuth(c.Request.Context(), devinOwner(c), in.Content, in.ProxyID, in.AccountID)
 	default:
 		response.BadRequest(c, "Unknown Devin connection mode")

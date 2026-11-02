@@ -4,6 +4,7 @@ package fusion
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -122,26 +123,27 @@ type Handoff struct {
 	Report string `json:"report,omitempty"`
 }
 type Attempt struct {
-	ID             string                       `json:"id"`
-	Purpose        Purpose                      `json:"purpose,omitempty"`
-	Role           Role                         `json:"role"`
-	Turn           int                          `json:"turn"`
-	Model          string                       `json:"model"`
-	BillingModel   string                       `json:"billing_model,omitempty"`
-	StartedAt      time.Time                    `json:"started_at"`
-	Status         string                       `json:"status"` // started, completed, unknown
-	Response       *apicompat.ResponsesResponse `json:"response,omitempty"`
-	Settled        bool                         `json:"settled"`
-	Applied        bool                         `json:"applied"`
-	CostUSD        float64                      `json:"cost_usd"`
-	EstimateUSD    float64                      `json:"estimate_usd"`
-	Failure        string                       `json:"failure,omitempty"`
-	Error          *Error                       `json:"error,omitempty"`
-	RetryOf        string                       `json:"retry_of,omitempty"`
-	RecoveryKind   RejectionKind                `json:"recovery_kind,omitempty"`
-	Rejection      *Rejection                   `json:"rejection,omitempty"`
-	RetryNotBefore time.Time                    `json:"retry_not_before,omitempty"`
-	NotStarted     bool                         `json:"not_started,omitempty"`
+	ID              string                       `json:"id"`
+	Purpose         Purpose                      `json:"purpose,omitempty"`
+	Role            Role                         `json:"role"`
+	Turn            int                          `json:"turn"`
+	Model           string                       `json:"model"`
+	BillingModel    string                       `json:"billing_model,omitempty"`
+	PricingSnapshot json.RawMessage              `json:"pricing_snapshot,omitempty"`
+	StartedAt       time.Time                    `json:"started_at"`
+	Status          string                       `json:"status"` // started, completed, unknown
+	Response        *apicompat.ResponsesResponse `json:"response,omitempty"`
+	Settled         bool                         `json:"settled"`
+	Applied         bool                         `json:"applied"`
+	CostUSD         float64                      `json:"cost_usd"`
+	EstimateUSD     float64                      `json:"estimate_usd"`
+	Failure         string                       `json:"failure,omitempty"`
+	Error           *Error                       `json:"error,omitempty"`
+	RetryOf         string                       `json:"retry_of,omitempty"`
+	RecoveryKind    RejectionKind                `json:"recovery_kind,omitempty"`
+	Rejection       *Rejection                   `json:"rejection,omitempty"`
+	RetryNotBefore  time.Time                    `json:"retry_not_before,omitempty"`
+	NotStarted      bool                         `json:"not_started,omitempty"`
 }
 type RequestRecord struct {
 	Key          string                       `json:"key"`
@@ -244,8 +246,9 @@ type Rejection struct {
 }
 
 type Outcome struct {
-	Response     *apicompat.ResponsesResponse
-	BillingModel string
+	Response        *apicompat.ResponsesResponse
+	BillingModel    string
+	PricingSnapshot json.RawMessage
 	// KnownFailure means a terminal provider outcome was observed; ambiguous
 	// transports with no terminal usage must never be automatically reissued.
 	KnownFailure       bool
