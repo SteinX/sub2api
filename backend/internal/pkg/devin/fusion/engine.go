@@ -227,16 +227,28 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 // Reconcile only known inference usage. Unknown attempts retain their identity
 // and reservation; callers still reconcile independent summaries before stopping.
 func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte, x Executor) (*Attempt, error) {
-	if err := e.reconcileAdmissions(ctx, s, raw, x); err != nil {
-		return nil, err
+	var a *Attempt
+	var previousStatus string
+	if len(s.Attempts) > 0 {
+		a = &s.Attempts[len(s.Attempts)-1]
+		previousStatus = a.Status
+		// The independent journal may be the only durable copy of a refused
+		// outcome. Restore it before scanning admission flags or applied state.
+		if err := e.recoverAttempt(ctx, s, a); err != nil {
+			return a, err
+		}
 	}
-	if len(s.Attempts) == 0 || s.Attempts[len(s.Attempts)-1].Applied {
+	if err := e.reconcileAdmissions(ctx, s, raw, x); err != nil {
+		return a, err
+	}
+	if a == nil {
 		return nil, nil
 	}
-	a := &s.Attempts[len(s.Attempts)-1]
-	previousStatus := a.Status
-	if err := e.recoverAttempt(ctx, s, a); err != nil {
-		return a, err
+	if a.Applied {
+		if a.Status != previousStatus {
+			return nil, e.save(ctx, s, raw)
+		}
+		return nil, nil
 	}
 	if a.Status != "completed" || a.Settled {
 		if err := e.settleBudget(ctx, s, *a); err != nil {

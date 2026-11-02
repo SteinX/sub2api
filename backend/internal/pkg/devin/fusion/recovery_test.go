@@ -81,6 +81,48 @@ func TestFusionMainFormatPendingSettlementWithoutRequestSnapshot(t *testing.T) {
 	require.Len(t, x.calls, 1, "a main-format attempt settles and publishes without replay")
 }
 
+func TestFusionJournaledRefusalRestoresAdmissionBeforeRecovery(t *testing.T) {
+	for _, stopped := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct_advance", true: "cancelled_reconcile"}[stopped], func(t *testing.T) {
+			store := newMemoryStore()
+			store.failCAS = func(next []byte) bool {
+				var s Session
+				return json.Unmarshal(next, &s) == nil && len(s.Attempts) > 0 && s.Attempts[len(s.Attempts)-1].AdmissionPending
+			}
+			x := &pendingAdmissionExecutor{scriptExecutor: &scriptExecutor{t: t}}
+			x.execute = func(c Call) (Outcome, error) {
+				if len(x.calls) == 1 {
+					outcome, err := refused(RejectionRateLimit, time.Millisecond)
+					outcome.AdmissionPending = true
+					return outcome, err
+				}
+				require.Len(t, x.persisted, 1, "a journal-restored cooldown must be durable before any replacement")
+				return Outcome{Response: tool("read", "read_file", `{}`), BillingModel: c.Request.Model}, nil
+			}
+			in := input(testRequest("task"))
+			_, err := New(store).Advance(context.Background(), in, x)
+			require.ErrorContains(t, err, "simulated store interruption")
+			s, _, err := New(store).Load(context.Background(), in.Scope, in.SessionID)
+			require.NoError(t, err)
+			require.Equal(t, "started", s.Attempts[0].Status, "only the independent refusal journal was committed")
+			if stopped {
+				require.NoError(t, New(store).Cancel(context.Background(), in.Scope, in.SessionID))
+				s, err = New(store).ReconcileUsage(context.Background(), in.Scope, in.SessionID, x)
+				require.NoError(t, err)
+				require.Equal(t, Cancelled, s.State)
+				require.False(t, s.Attempts[0].AdmissionPending)
+				require.Len(t, x.calls, 1)
+			} else {
+				result, err := New(store).Advance(context.Background(), in, x)
+				require.NoError(t, err)
+				require.Equal(t, WaitingTool, result.State)
+				require.Len(t, x.calls, 2)
+			}
+			require.Len(t, x.persisted, 1)
+		})
+	}
+}
+
 func TestFusionRecoveryKeepsRequestWhileBackgroundSummaryBecomesReady(t *testing.T) {
 	e, s, raw, base := summarySession(t, Sidekick)
 	s.Profile.Compaction = &CompactionPolicy{Enabled: true, Sidekick: []int{1000, 1500}}
