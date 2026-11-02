@@ -84,6 +84,22 @@ func TestDevinTokenRecoveryRejectsAnUnchangedMintResult(t *testing.T) {
 	}
 }
 
+func TestDevinTokenFingerprintRecoveryReusesReplacementAfterRestart(t *testing.T) {
+	d, mints, _ := devinTestService(t)
+	ctx := context.Background()
+	a := &Account{ID: 1, Platform: PlatformDevin, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "cog_test"}}
+	const rejected = "devin-session-token$rejected"
+	const replacement = "devin-session-token$minted"
+	if err := d.store.Set(ctx, "devin:token:"+d.runtimeKey(ctx, a), []byte(replacement), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewDevinService(nil, nil, d.upstream, d.cfg, d.store)
+	token, err := restarted.recoverTokenFingerprint(ctx, a, devinTokenFingerprint(rejected))
+	if err != nil || token != replacement || mints.Load() != 0 {
+		t.Fatalf("persisted rejection fingerprint did not reuse shared replacement: err=%v mints=%d", err, mints.Load())
+	}
+}
+
 type devinTokenAcquireBarrier struct {
 	devin.SessionStore
 	arrived chan struct{}

@@ -123,22 +123,29 @@ type Handoff struct {
 	Report string `json:"report,omitempty"`
 }
 type Attempt struct {
-	ID              string                       `json:"id"`
-	Purpose         Purpose                      `json:"purpose,omitempty"`
-	Role            Role                         `json:"role"`
-	Turn            int                          `json:"turn"`
-	Model           string                       `json:"model"`
-	BillingModel    string                       `json:"billing_model,omitempty"`
-	PricingSnapshot json.RawMessage              `json:"pricing_snapshot,omitempty"`
-	StartedAt       time.Time                    `json:"started_at"`
-	Status          string                       `json:"status"` // started, completed, unknown
-	Response        *apicompat.ResponsesResponse `json:"response,omitempty"`
-	Settled         bool                         `json:"settled"`
-	Applied         bool                         `json:"applied"`
-	CostUSD         float64                      `json:"cost_usd"`
-	EstimateUSD     float64                      `json:"estimate_usd"`
-	Failure         string                       `json:"failure,omitempty"`
-	Error           *Error                       `json:"error,omitempty"`
+	ID               string                       `json:"id"`
+	Purpose          Purpose                      `json:"purpose,omitempty"`
+	Role             Role                         `json:"role"`
+	Turn             int                          `json:"turn"`
+	Model            string                       `json:"model"`
+	BillingModel     string                       `json:"billing_model,omitempty"`
+	PricingSnapshot  json.RawMessage              `json:"pricing_snapshot,omitempty"`
+	StartedAt        time.Time                    `json:"started_at"`
+	Status           string                       `json:"status"` // started, completed, unknown
+	Response         *apicompat.ResponsesResponse `json:"response,omitempty"`
+	Settled          bool                         `json:"settled"`
+	Applied          bool                         `json:"applied"`
+	CostUSD          float64                      `json:"cost_usd"`
+	EstimateUSD      float64                      `json:"estimate_usd"`
+	Failure          string                       `json:"failure,omitempty"`
+	Error            *Error                       `json:"error,omitempty"`
+	RetryOf          string                       `json:"retry_of,omitempty"`
+	RecoveryKind     RejectionKind                `json:"recovery_kind,omitempty"`
+	Rejection        *Rejection                   `json:"rejection,omitempty"`
+	RetryNotBefore   time.Time                    `json:"retry_not_before,omitempty"`
+	NotStarted       bool                         `json:"not_started,omitempty"`
+	AdmissionPending bool                         `json:"admission_pending,omitempty"`
+	RequestSnapshot  json.RawMessage              `json:"request_snapshot,omitempty"`
 }
 type RequestRecord struct {
 	Key          string                       `json:"key"`
@@ -196,6 +203,11 @@ func (s *Session) LaneScope(role Role) string {
 }
 
 func (s *Session) NeedsUsageReconciliation() bool {
+	for _, a := range s.Attempts {
+		if a.AdmissionPending {
+			return true
+		}
+	}
 	if len(s.Attempts) > 0 {
 		a := s.Attempts[len(s.Attempts)-1]
 		if !a.Applied && (!a.Settled || a.Status == "started" || a.Status == "unknown") {
@@ -211,14 +223,37 @@ func (s *Session) NeedsUsageReconciliation() bool {
 }
 
 type Call struct {
-	AttemptID   string
-	Role        Role
-	Request     *apicompat.ResponsesRequest
-	LaneScope   string
-	PricingAt   time.Time
-	EstimateUSD float64
-	Purpose     Purpose
+	AttemptID                string
+	Role                     Role
+	Request                  *apicompat.ResponsesRequest
+	LaneScope                string
+	PricingAt                time.Time
+	EstimateUSD              float64
+	Purpose                  Purpose
+	RetryOf                  string
+	RecoveryKind             RejectionKind
+	RejectedTokenFingerprint string
+	// AuthRecoveryUsed includes an authentication recovery allocated to this call.
+	AuthRecoveryUsed bool
 }
+
+type RejectionKind string
+
+const (
+	RejectionAuth          RejectionKind = "auth"
+	RejectionRateLimit     RejectionKind = "rate_limit"
+	RejectionModelCapacity RejectionKind = "model_capacity"
+)
+
+// Rejection authorizes recovery only for a terminal, explicitly unexecuted call.
+// RetryAfter is supplied by the provider boundary after validating its hint.
+type Rejection struct {
+	Kind                     RejectionKind `json:"kind"`
+	NotExecuted              bool          `json:"not_executed"`
+	RetryAfter               time.Duration `json:"retry_after"`
+	RejectedTokenFingerprint string        `json:"rejected_token_fingerprint,omitempty"`
+}
+
 type Outcome struct {
 	Response        *apicompat.ResponsesResponse
 	BillingModel    string
@@ -228,6 +263,14 @@ type Outcome struct {
 	KnownFailure       bool
 	NotStarted         bool
 	ClientDisconnected bool
+	Rejection          *Rejection
+	AdmissionPending   bool
+}
+
+// RecoveryAdmission persists a refused call's shared cooldown before retrying.
+// Implementations must use RetryNotBefore, preserving the original deadline.
+type RecoveryAdmission interface {
+	PersistRejection(context.Context, Attempt) error
 }
 
 // Executor keeps physical inference, pricing and billing outside the state machine.

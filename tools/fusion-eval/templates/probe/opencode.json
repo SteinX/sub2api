@@ -1,0 +1,51 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "local-fusion/fusion-probe",
+  "small_model": "local-fusion/fusion-probe",
+  "provider": {
+    "local-fusion": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local Fusion Probe",
+      "options": {
+        "baseURL": "http://127.0.0.1:8765/v1",
+        "apiKey": "local-probe-only"
+      },
+      "models": {
+        "fusion-probe": {
+          "name": "Local Fusion Probe",
+          "limit": {
+            "context": 131072,
+            "output": 1024
+          }
+        }
+      }
+    }
+  },
+  "agent": {
+    "probe": {
+      "mode": "primary",
+      "model": "local-fusion/fusion-probe",
+      "prompt": "Read probe.txt using the read tool, then say LOCAL_PROBE_COMPLETE. Do not use other tools.",
+      "tools": {
+        "read": true,
+        "bash": false,
+        "edit": false,
+        "write": false,
+        "task": false,
+        "glob": false,
+        "grep": false,
+        "webfetch": false,
+        "websearch": false,
+        "todowrite": false,
+        "question": false
+      }
+    }
+  },
+  "permission": {
+    "read": "allow",
+    "*": "deny"
+  },
+  "plugin": [
+    "file:///tmp/fusion-clients/node_modules/oh-my-opencode/dist/index.js"
+  ]
+}

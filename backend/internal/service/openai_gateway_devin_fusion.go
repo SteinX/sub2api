@@ -206,8 +206,24 @@ func (x *devinFusionExecutor) estimate(ctx context.Context, call fusion.Call, el
 	}
 	return math.Max(c.ActualCost, c.TotalCost), nil
 }
-func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fusion.Outcome, error) {
+func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (outcome fusion.Outcome, err error) {
 	s := x.service
+	fusionRecovery := x.attemptPrefix != "context"
+	generationSent := false
+	usageObserved := false
+	toolCalls, invalidArguments := 0, 0
+	defer func() {
+		event, component := "devin.fusion_attempt", "audit.devin.fusion"
+		if !fusionRecovery {
+			event, component = "devin.context_attempt", "audit.devin.context"
+		}
+		logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("retry_of", call.RetryOf), zap.String("model", devin.DiagnosticModelID(call.Request.Model)), zap.Bool("generation_sent", generationSent), zap.Bool("usage_observed", usageObserved), zap.String("failure_kind", devinFusionFailureKind(err)), zap.Int("tool_calls", toolCalls), zap.Int("invalid_tool_arguments", invalidArguments))
+	}()
+	if fusionRecovery {
+		if err := s.devin.waitFusionAdmission(ctx, x.account, call.Request.Model, call.Purpose, x.checkFusionCancellation); err != nil {
+			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
+		}
+	}
 	if x.pricing == nil || x.pricingAttempt != call.AttemptID {
 		x.refreshPricing(ctx, call.AttemptID, x.profile.LeadModel, x.profile.SidekickModel, call.Request.Model)
 	}
@@ -219,6 +235,13 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, fusion.E("billing_denied", "another inference cannot reserve sufficient balance or quota", 402)
 	}
 	x.reservations[call.AttemptID] = reservation
+	defer func() {
+		// Explicit refusals and pre-send failures consumed no inference. Release
+		// their monetary hold before the next durable attempt reserves again.
+		if outcome.KnownFailure && (outcome.Response == nil || outcome.Response.Usage == nil) {
+			x.releaseSettledReservation(fusion.Attempt{ID: call.AttemptID})
+		}
+	}()
 	wire, err := devin.BuildRequest(call.Request, call.LaneScope)
 	if err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
@@ -238,12 +261,19 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 	if err = devin.ApplyModelConfig(wire, selected, call.Request); err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
-	token, err := s.devin.Token(ctx, x.account, false)
+	var token string
+	if call.RecoveryKind == fusion.RejectionAuth {
+		token, err = s.devin.recoverTokenFingerprint(ctx, x.account, call.RejectedTokenFingerprint)
+	} else {
+		token, err = s.devin.Token(ctx, x.account, false)
+	}
 	if err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
 	prepared, err := x.client.Prepare(ctx, token, wire, devin.PlanModel(selected), x.models)
-	if devin.IsUnauthenticated(err) && x.account.GetCredential("api_key") != "" && ctx.Err() == nil {
+	// Managed context shares this transport, but owns a different durable state
+	// machine. Preserve its single pre-generation authentication recovery.
+	if !fusionRecovery && devin.IsUnauthenticated(err) && x.account.GetCredential("api_key") != "" && ctx.Err() == nil {
 		token, err = s.devin.RecoverToken(ctx, x.account, token)
 		if err == nil {
 			wire.ModelAssignmentJwt = nil
@@ -251,15 +281,32 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 		}
 	}
 	if err != nil {
-		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
+		rejection, recordErr := x.recordFusionRejection(ctx, call, err)
+		if rejection != nil && rejection.Kind == fusion.RejectionAuth {
+			rejection.RejectedTokenFingerprint = devinTokenFingerprint(token)
+		}
+		return fusion.Outcome{KnownFailure: true, NotStarted: true, Rejection: rejection, AdmissionPending: rejection != nil && recordErr != nil}, errors.Join(err, recordErr)
 	}
 	decoder := devin.NewEventDecoder(call.Request.Model, func(apicompat.ResponsesStreamEvent) error { return nil }, wire.Tools...)
 	if err := ctx.Err(); err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
+	// Token discovery and Prepare may overlap another worker's refusal. Honor
+	// any newly persisted cooldown immediately before the generation send.
+	if fusionRecovery {
+		if err := s.devin.waitFusionAdmission(ctx, x.account, call.Request.Model, call.Purpose, x.checkFusionCancellation); err != nil {
+			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
+		}
+	}
 	if !x.pricing.readyForInference(time.Now()) {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, fusion.E("pricing_unavailable", "account catalog price expired before inference; retry with refreshed pricing", 400)
 	}
+	if fusionRecovery {
+		if err := x.checkFusionCancellation(ctx); err != nil {
+			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
+		}
+	}
+	generationSent = true
 	err = consumeDevinFusionChat(ctx, x.c, x.client, prepared.BaseURL, token, wire, decoder, x.stream, &x.clientDisconnected)
 	if err == nil {
 		err = decoder.Finish()
@@ -274,33 +321,8 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 	if decoder.ActualModel != "" && decoder.ActualModel != wire.ChatModelUid || len(decoder.Evidence.ActualModels) > 1 {
 		err = fusion.E("route_mismatch", "upstream execution model differs from the pinned Fusion member", 502)
 	}
-	outcome := fusion.Outcome{Response: &decoder.Response, BillingModel: billingModel, ClientDisconnected: x.clientDisconnected, PricingSnapshot: x.pricing.marshal()}
-	if err != nil {
-		var upstream *devin.Error
-		if errors.As(err, &upstream) && !decoder.Started {
-			status := upstream.HTTPStatus()
-			outcome.KnownFailure = status == 400 || status == 401 || status == 403 || status == 429
-			if s.accountRepo != nil {
-				if status == 429 {
-					_ = s.accountRepo.SetRateLimited(context.WithoutCancel(ctx), x.account.ID, time.Now().Add(time.Minute))
-				}
-				if status == 401 {
-					_ = s.accountRepo.SetError(context.WithoutCancel(ctx), x.account.ID, "Devin authorization expired; reconnect this account")
-				}
-			}
-		}
-	}
-	if decoder.Response.Usage != nil || !outcome.KnownFailure {
-		if x.holdUnsettled == nil {
-			x.holdUnsettled = map[string]bool{}
-		}
-		x.holdUnsettled[call.AttemptID] = true
-	}
-	event, component := "devin.fusion_attempt", "audit.devin.fusion"
-	if x.attemptPrefix == "context" {
-		event, component = "devin.context_attempt", "audit.devin.context"
-	}
-	toolCalls, invalidArguments := 0, 0
+	outcome = fusion.Outcome{Response: &decoder.Response, BillingModel: billingModel, ClientDisconnected: x.clientDisconnected, PricingSnapshot: x.pricing.marshal()}
+	usageObserved = decoder.Response.Usage != nil
 	for _, item := range decoder.Response.Output {
 		if item.Type == "function_call" {
 			toolCalls++
@@ -309,7 +331,26 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (fu
 			}
 		}
 	}
-	logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("model", devin.DiagnosticModelID(wire.ChatModelUid)), zap.Bool("usage_observed", decoder.Response.Usage != nil), zap.String("failure_kind", devinFusionFailureKind(err)), zap.Int("tool_calls", toolCalls), zap.Int("invalid_tool_arguments", invalidArguments))
+	if err != nil {
+		var upstream *devin.Error
+		if errors.As(err, &upstream) && !decoder.ExecutionObserved {
+			status := upstream.HTTPStatus()
+			outcome.KnownFailure = status == 400 || status == 401 || status == 403 || status == 429 || upstream.RetryableRejection()
+			var recordErr error
+			outcome.Rejection, recordErr = x.recordFusionRejection(ctx, call, err)
+			if outcome.Rejection != nil && outcome.Rejection.Kind == fusion.RejectionAuth {
+				outcome.Rejection.RejectedTokenFingerprint = devinTokenFingerprint(token)
+			}
+			outcome.AdmissionPending = outcome.Rejection != nil && recordErr != nil
+			err = errors.Join(err, recordErr)
+		}
+	}
+	if decoder.Response.Usage != nil || !outcome.KnownFailure {
+		if x.holdUnsettled == nil {
+			x.holdUnsettled = map[string]bool{}
+		}
+		x.holdUnsettled[call.AttemptID] = true
+	}
 	return outcome, err
 }
 

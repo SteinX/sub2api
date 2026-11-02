@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "verified_date": "2026-10-23",
+  "registry": "https://registry.npmjs.org",
+  "npm_dist_tag": "latest",
+  "platform": "linux-x64",
+  "packages": [
+    {
+      "package": "opencode-ai",
+      "version": "1.19.4",
+      "resolved": "https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.19.4.tgz",
+      "integrity": "sha512-O3rTc9OCd6CeeJohCAjFYD3MX5U0weKzKnySfsJ9sw9uAbNZZK4meIcjd+7k3inmZB5G2qONSen3yA45yECiFA=="
+    },
+    {
+      "package": "opencode-linux-x64",
+      "version": "1.19.4",
+      "resolved": "https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.19.4.tgz",
+      "integrity": "sha512-rQ/l3jmJoxf8ZYnBargg9alURlz6buEilysGODtzkcmcYtcZ91LOgF034oUUHHQl8/y1hbRTDvg6ujqUjQsMXw=="
+    },
+    {
+      "package": "oh-my-opencode",
+      "version": "5.1.44",
+      "resolved": "https://registry.npmjs.org/oh-my-opencode/-/oh-my-opencode-5.1.44.tgz",
+      "integrity": "sha512-Bs0eoTJ9v4QBV/wUs2SQBhrSHPzfbtQ78VmE3pgtRORHD4eWapAdYQNK3oYuYc5g6QHLxepwAdfbIxzcczxc9Q=="
+    },
+    {
+      "package": "oh-my-opencode-linux-x64",
+      "version": "5.1.44",
+      "resolved": "https://registry.npmjs.org/oh-my-opencode-linux-x64/-/oh-my-opencode-linux-x64-5.1.44.tgz",
+      "integrity": "sha512-Vz7H9eFk2PPaavvAxEVTGQ0S4WO3FdtGFz7CBKDZxnlwClo3UeKYPZru0vNxPThhhmifmX67wqeBnrfjUpWkoQ=="
+    },
+    {
+      "package": "@oh-my-pi/pi-coding-agent",
+      "version": "18.12.6",
+      "resolved": "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/-/pi-coding-agent-18.12.6.tgz",
+      "integrity": "sha512-Wo+FcJ7A3RY/OFuafj4hcdIAXc/W7NMxbanwQh3Cmy8s57+ihLOLgAv+HROxHBkssEMg0MaScwkQ9xwqLPiC/g=="
+    },
+    {
+      "package": "@oh-my-pi/pi-natives-linux-x64",
+      "version": "18.12.6",
+      "resolved": "https://registry.npmjs.org/@oh-my-pi/pi-natives-linux-x64/-/pi-natives-linux-x64-18.12.6.tgz",
+      "integrity": "sha512-Dr03a4R2sU03/Qn5I9JgY8c3dnt7O2JNeV8FaFEJsiAlp8DKgfKfrsbVHDk4kqYgiNVfD4Zbyr20e3eFra6rSg=="
+    },
+    {
+      "package": "bun",
+      "version": "1.4.4",
+      "resolved": "https://registry.npmjs.org/bun/-/bun-1.4.4.tgz",
+      "integrity": "sha512-hj0ASdG6PNjLZGFAXktWb3Uaj/dcv/1wCsIttoEXADNIQBsGjTr+5uLKYbrDkuc7NT0Tkj4yPIqJI2jDxXdvVg=="
+    },
+    {
+      "package": "@oven/bun-linux-x64",
+      "version": "1.4.4",
+      "resolved": "https://registry.npmjs.org/@oven/bun-linux-x64/-/bun-linux-x64-1.4.4.tgz",
+      "integrity": "sha512-CHbbkmHVM28T1GFq+6GL4Ao4ujwwYwj1CxFFwEFzLanPfNsId9AhbIP0Q4reWuWBkGimUkoQygrK7Rgjtj3vog=="
+    }
+  ],
+  "alias_observed": {
+    "oh-my-openagent": "5.1.44"
+  },
+  "local_probes": [
+    {
+      "client": "opencode",
+      "version": "1.19.4",
+      "plugin": null,
+      "result": "passed_local_streaming_read_roundtrip",
+      "session_header": "x-session-id",
+      "fixture": "fixtures/opencode-1.19.4-pure.jsonl"
+    },
+    {
+      "client": "omo",
+      "version": "5.1.44",
+      "host": "opencode-ai@1.19.4",
+      "result": "passed_local_streaming_read_roundtrip_resume_and_fresh_session_isolation",
+      "session_header": "x-session-id",
+      "fixture": "fixtures/omo-5.1.44-opencode-1.19.4.jsonl",
+      "limitations": [
+        "HOME/.omo startup migration lock failed with EROFS; plugin continued",
+        "Isolated custom read-only probe agent, not a delegated-agent workflow"
+      ],
+      "contract_fixture": "fixtures/omo-5.1.44-opencode-1.19.4-contract.jsonl",
+      "contract_digest_result": "system/instructions, tools, tool choice stable across one local read roundtrip"
+    },
+    {
+      "client": "omp",
+      "version": "18.12.6",
+      "result": "passed_local_streaming_read_roundtrip_without_session_header",
+      "fixture": "fixtures/omp-18.12.6-baseline.jsonl",
+      "limitations": [
+        "models.yml compat.sessionHeader was not emitted by this version; explicit runtime extension required"
+      ]
+    },
+    {
+      "client": "omp",
+      "version": "18.12.6",
+      "extension": "omp-fusion-session.ts",
+      "extension_sha256": "f3aee43d617aa354b8bf4b3b92f4df9219ce3ea24083b3b33ba7370cc638db75",
+      "result": "passed_local_streaming_read_roundtrip_resume_and_fresh_session_isolation",
+      "session_header": "x-litellm-session-id",
+      "fixture": "fixtures/omp-18.12.6-extension.jsonl",
+      "limitations": [
+        "Actual delegated workers, compact, fork, cancellation and side-effect tool deduplication not exercised"
+      ],
+      "contract_fixture": "fixtures/omp-18.12.6-extension-contract.jsonl",
+      "contract_digest_result": "system/instructions, tools, tool choice stable across one local read roundtrip"
+    }
+  ],
+  "evidence_scope": "Loopback stub only; no live Fusion/backend/model quality, latency, cost, or billing validation."
+}

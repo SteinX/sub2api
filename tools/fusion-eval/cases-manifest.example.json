@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "cohort_id": "personal-fusion-pilot-draft",
+  "status": "draft_specification_only",
+  "task_set_frozen": false,
+  "hidden_checks_status": "not_authored_or_frozen",
+  "comparison_snapshot": null,
+  "evidence": "No prompts, fixture repositories, hidden tests or runs are supplied by this template. Author and freeze them before paid evaluation; exclude development, smoke and historical 12-task cases.",
+  "topology": "Concrete-model OMO/OMP outer orchestration; exactly one non-recursive worker switches between lead and fusion. All other agent/background/summary models stay fixed.",
+  "budget_usd": {
+    "total": "20",
+    "smoke": "4",
+    "paired_runs": "12",
+    "cache_and_long_wait": "4",
+    "per_full_task_run": "0.75",
+    "per_case_pair": "1.50"
+  },
+  "arms": ["lead", "fusion"],
+  "freeze_before_execution": [
+    "Sub2API, client, plugin and extension versions",
+    "Common comparison snapshot describing BOTH worker variants and all other model mappings",
+    "Task prompts, starting workspaces, independent hidden checks and their SHA-256 hashes",
+    "Tool schemas, permissions, compaction settings, model UID/effort and price snapshot",
+    "Precommitted A/B order and independent equal-condition workspaces/cache prefixes",
+    "Full-task monetary/time caps including all agents, maintenance, retries and unknown reservations"
+  ],
+  "cases": [
+    {
+      "case_id": "function-intervals",
+      "client": "omo",
+      "category": "function",
+      "specification": "Author a new interval-normalization task with explicit endpoint, adjacency and invalid-input rules. Do not reuse development or smoke tasks.",
+      "acceptance_specification": "Independent hidden checks for empty, unordered, overlapping, adjacent and invalid intervals, including non-mutation of inputs.",
+      "fixture_sha256": null,
+      "hidden_checks_sha256": null
+    },
+    {
+      "case_id": "function-dependency-order",
+      "client": "omp",
+      "category": "function",
+      "specification": "Author a new deterministic dependency-order task with explicit tie-breaking, missing-node and cycle behavior.",
+      "acceptance_specification": "Independent hidden checks for disconnected graphs, duplicate edges, stable ordering and cycles.",
+      "fixture_sha256": null,
+      "hidden_checks_sha256": null
+    },
+    {
+      "case_id": "repo-pagination",
+      "client": "omo",
+      "category": "multi_file_fix",
+      "specification": "Prepare a small multi-module repository with a pagination boundary bug spanning parser, service and presentation layers.",
+      "acceptance_specification": "Hidden end-to-end cases exercise first/last/empty pages and reject unrelated public API changes.",
+      "fixture_sha256": null,
+      "hidden_checks_sha256": null
+    },
+    {
+      "case_id": "repo-config-reload",
+      "client": "omp",
+      "category": "multi_file_fix",
+      "specification": "Prepare a configuration reload bug involving precedence, validation and retaining the last valid state.",
+      "acceptance_specification": "Hidden cross-module tests verify valid reloads, rejected invalid updates and stable documented precedence.",
+      "fixture_sha256": null,
+      "hidden_checks_sha256": null
+    },
+    {
+      "case_id": "repo-event-deduplication",
+      "client": "omo",
+      "category": "multi_file_fix",
+      "specification": "Prepare an application fixture with duplicate event delivery causing repeated state updates; use synthetic non-financial data.",
+      "acceptance_specification": "Hidden tests check duplicate delivery, restart persistence, event identity and independent events with equal payloads.",
+      "fixture_sha256": null,
+      "hidden_checks_sha256": null
+    },
+    {
+      "case_id": "repo-cancelled-worker",
+      "client": "omp",
+      "category": "multi_file_fix",
+      "specification": "Prepare a task-runner fixture where cancellation and stale worker completion corrupt a newer job's state.",
+      "acceptance_specification": "Hidden tests verify cancellation, generation ownership, cleanup and a later successful run without stale-result publication.",
+      "fixture_sha256": null,
+      "hidden_checks_sha256": null
+    },
+    {
+      "case_id": "long-workspace-contract",
+      "client": "omo",
+      "category": "long_tool_workflow",
+      "specification": "Prepare a multi-step workspace change with durable constraints and sufficient controlled tool feedback to exercise role compaction. Keep the separate 30-tool-roundtrip reliability soak out of quality scoring.",
+      "acceptance_specification": "Independent final tests verify required changes, unchanged public interfaces and no lost initial constraints; record compaction and tool evidence without rewarding unnecessary tool calls.",
+      "fixture_sha256": null,
+      "hidden_checks_sha256": null
+    },
+    {
+      "case_id": "long-migration-recovery",
+      "client": "omp",
+      "category": "long_tool_workflow",
+      "specification": "Prepare a new multi-module migration and repair task with a reproducible long history. Use a separate controlled reliability case for injected disconnects so quality comparisons have equal conditions.",
+      "acceptance_specification": "Independent final tests verify migration correctness, backward compatibility, retained constraints and actual validation evidence.",
+      "fixture_sha256": null,
+      "hidden_checks_sha256": null
+    }
+  ]
+}

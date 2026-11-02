@@ -1,0 +1,11 @@
+# Concrete-model provider only. Fusion is registered by omp-fusion-session.ts.
+# Replace endpoint/UID and supply actual model capabilities before use.
+providers:
+  sub2api-direct:
+    api: openai-completions
+    baseUrl: https://YOUR-SUB2API.invalid/v1
+    apiKey: SUB2API_API_KEY
+    models:
+      - id: REPLACE_WITH_CONCRETE_MODEL_UID
+        name: Concrete direct model
+        input: [text]

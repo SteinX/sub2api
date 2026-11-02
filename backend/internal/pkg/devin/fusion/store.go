@@ -233,7 +233,16 @@ func (e *Engine) Cancel(ctx context.Context, scope, id string) error {
 	return nil
 }
 func (e *Engine) cancelled(ctx context.Context, s *Session) (bool, error) {
-	_, err := e.Store.Get(ctx, indexKey(s.Scope, "cancel", s.ID))
+	return e.IsCancelled(ctx, s.Scope, s.ID)
+}
+
+// IsCancelled reads the scoped durable flag without acquiring the foreground
+// execution lease, so an admission wait can observe a concurrent cancellation.
+func (e *Engine) IsCancelled(ctx context.Context, scope, id string) (bool, error) {
+	if e.Store == nil {
+		return false, E("store_unavailable", "Fusion cancellation state is unavailable", 503)
+	}
+	_, err := e.Store.Get(ctx, indexKey(scope, "cancel", id))
 	if errors.Is(err, devin.ErrSessionNotFound) {
 		return false, nil
 	}
@@ -262,7 +271,7 @@ func (e *Engine) recoverAttempt(ctx context.Context, s *Session, a *Attempt) err
 		return err
 	}
 	var saved Attempt
-	if json.Unmarshal(b, &saved) != nil || saved.ID != a.ID || saved.Role != a.Role || saved.Model != a.Model || saved.Turn != a.Turn {
+	if json.Unmarshal(b, &saved) != nil || saved.ID != a.ID || saved.Role != a.Role || saved.Model != a.Model || saved.Turn != a.Turn || saved.RetryOf != a.RetryOf || saved.RecoveryKind != a.RecoveryKind || string(saved.RequestSnapshot) != string(a.RequestSnapshot) {
 		return E("session_corrupt", "physical usage journal failed validation", 503)
 	}
 	if saved.Status == "completed" {

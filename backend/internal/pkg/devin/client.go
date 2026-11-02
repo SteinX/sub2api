@@ -35,10 +35,13 @@ const (
 
 // Error preserves protocol codes even when the HTTP response itself was 200.
 type Error struct {
-	Code      string
-	Status    int
-	Operation string
-	TraceID   string
+	Code          string
+	Status        int
+	Operation     string
+	TraceID       string
+	RejectionKind RejectionKind
+	RetryAfter    time.Duration
+	HasRetryAfter bool
 }
 
 func (e *Error) Error() string {
@@ -53,9 +56,15 @@ func (e *Error) Error() string {
 }
 func IsUnauthenticated(err error) bool {
 	var e *Error
-	return errors.As(err, &e) && (e.Code == "unauthenticated" || e.Status == 401)
+	return errors.As(err, &e) && (e.Status == 401 || e.Status == 0 && e.Code == "unauthenticated")
 }
 func (e *Error) HTTPStatus() int {
+	if e.Status >= 500 {
+		return e.Status
+	}
+	if e.RejectionKind == RejectionModelCapacity {
+		return http.StatusServiceUnavailable
+	}
 	switch e.Code {
 	case "unauthenticated":
 		return 401
@@ -157,18 +166,15 @@ func (c *Client) unary(ctx context.Context, base, path, token string, in, out pr
 		return errors.New("devin unary response too large")
 	}
 	if r.StatusCode != 200 {
-		return rpcError(responseError(r.StatusCode, b), path)
+		return rpcError(responseError(r.StatusCode, b, r.Header), path)
 	}
 	return proto.Unmarshal(b, out)
 }
 
 var traceIDPattern = regexp.MustCompile(`(?i)trace[ _-]?id\s*[:=]\s*([a-f0-9-]{16,64})\b`)
 
-func responseError(status int, b []byte) error {
-	var v struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	}
+func responseError(status int, b []byte, headers ...http.Header) error {
+	var v rpcFailure
 	_ = json.Unmarshal(b, &v)
 	if v.Code == "" {
 		switch status {
@@ -182,7 +188,7 @@ func responseError(status int, b []byte) error {
 			v.Code = "unavailable"
 		}
 	}
-	return &Error{Code: v.Code, Status: status, TraceID: extractTraceID(v.Message)}
+	return classifyRejection(status, v, headers...)
 }
 
 // Keep actionable diagnostics without exposing arbitrary upstream payloads,
@@ -370,7 +376,7 @@ func (c *Client) Chat(ctx context.Context, base, token string, in *pb.GetChatMes
 	defer func() { _ = r.Body.Close() }()
 	if r.StatusCode != 200 {
 		b, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
-		return rpcError(responseError(r.StatusCode, b), ChatPath)
+		return rpcError(responseError(r.StatusCode, b, r.Header), ChatPath)
 	}
 	for {
 		flags, b, err := ReadFrame(r.Body)
@@ -382,16 +388,14 @@ func (c *Client) Chat(ctx context.Context, base, token string, in *pb.GetChatMes
 		}
 		if flags&2 != 0 {
 			var end struct {
-				Error *struct {
-					Code    string `json:"code"`
-					Message string `json:"message"`
-				} `json:"error"`
+				Error    *rpcFailure         `json:"error"`
+				Metadata map[string][]string `json:"metadata"`
 			}
 			if err = json.Unmarshal(b, &end); err != nil {
 				return errors.New("invalid Devin trailer")
 			}
 			if end.Error != nil {
-				return &Error{Code: end.Error.Code, Operation: "GetChatMessage", TraceID: extractTraceID(end.Error.Message)}
+				return rpcError(classifyRejection(0, *end.Error, r.Header, http.Header(end.Metadata)), ChatPath)
 			}
 			return nil
 		}
@@ -469,7 +473,7 @@ func (c *Client) Mint(ctx context.Context, key string) (string, error) {
 		return "", err
 	}
 	if r.StatusCode != 200 {
-		return "", responseError(r.StatusCode, b)
+		return "", responseError(r.StatusCode, b, r.Header)
 	}
 	var v struct {
 		Token string `json:"sessionToken"`
@@ -495,7 +499,7 @@ func (c *Client) Exchange(ctx context.Context, code, verifier string) (string, e
 		return "", err
 	}
 	if r.StatusCode != 200 {
-		return "", responseError(r.StatusCode, b)
+		return "", responseError(r.StatusCode, b, r.Header)
 	}
 	var v struct {
 		Token string `json:"token"`

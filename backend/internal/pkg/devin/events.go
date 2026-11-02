@@ -27,10 +27,13 @@ type EventDecoder struct {
 	messageID       string
 	stop            pb.StopReason
 	Started         bool
-	ActualModel     string
-	BillingModel    string
-	Evidence        ModelEvidence
-	emptyArguments  map[string]bool
+	// ExecutionObserved includes native generation/accounting evidence that may
+	// arrive without any public SSE item. Such a call cannot be retried as unexecuted.
+	ExecutionObserved bool
+	ActualModel       string
+	BillingModel      string
+	Evidence          ModelEvidence
+	emptyArguments    map[string]bool
 }
 
 func NewEventDecoder(model string, emit func(apicompat.ResponsesStreamEvent) error, tools ...*pb.ChatToolDefinition) *EventDecoder {
@@ -141,7 +144,19 @@ func (d *EventDecoder) closeBlock() error {
 	d.kind = ""
 	return err
 }
+
+// HasExecutionEvidence recognizes native generation or accounting observations,
+// including a reported zero-usage snapshot. Preallocated request/message IDs alone
+// do not prove execution. Callers that filter native frames must check before filtering.
+func HasExecutionEvidence(m *pb.GetChatMessageResponse) bool {
+	return m.GetDeltaText() != "" || m.GetDeltaThinking() != "" || m.GetDeltaSignature() != "" ||
+		len(m.GetDeltaToolCalls()) > 0 || m.GetUsage() != nil || m.GetDeltaTokens() > 0 ||
+		m.GetCreditCost() > 0 || m.GetCommittedCreditCost() > 0 || m.GetCommittedAcuCost() > 0 ||
+		m.GetThinkingRedacted() || m.GetStopReason() != pb.StopReason_STOP_REASON_UNSPECIFIED
+}
+
 func (d *EventDecoder) Apply(m *pb.GetChatMessageResponse) error {
+	d.ExecutionObserved = d.ExecutionObserved || HasExecutionEvidence(m)
 	d.Evidence.Observe(m)
 	if m.MessageId != "" {
 		d.messageID = m.MessageId
