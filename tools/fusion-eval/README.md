@@ -132,7 +132,7 @@ export SUB2API_FUSION_API_KEY=local-probe-only
 4. 每个客户端先在全新合成工作区执行两个短 smoke：真实外层派发 → Fusion Worker → 读写/命令验证 → Worker 报告 → 外层核对文件与退出码。保存客户端实际工具执行次数与网关物理调用次数、session/epoch 指纹、模型 UID 和完整任务费用；不要导出私有推理正文。
 5. personal 模板的权限限制仍是**候选配置**。OMP Worker 显式列出 `read/write/edit/bash`，没有 `task` 或 `spawns`；OMO Worker 关闭 agent 派发工具并拒绝 task 权限。必须抓取实际工具列表并尝试递归派发，才能确认限制生效。若客户端仍暴露其他派发工具，先修配置，不凭提示词视为隔离完成。
 
-默认只验证一个显式 Worker。OMP 先设置 `compaction.enabled: false`，保持 smoke 短小；仅 pin `smol` 不能保证摘要绕过 Fusion。**真实外层/子 Worker 身份、交错两个 Worker、compact、fork、取消、重试及有副作用工具去重仍待本机验收**。contract conflict 后不能换个 session 自动重发；先停止并查明账务和工具执行状态。通过这些边界前，不建议把 Fusion 设为长期默认 Worker。
+默认只验证一个显式 Worker。OMP 同时设置 `compaction.enabled: false`、`compaction.supersedeReads: false` 和 `compaction.dropUseless: false`，保持短 smoke 的公共历史不被客户端裁剪。仅关闭自动 compact 仍会改写旧的 read 结果；主线的[最小复现及兼容配置](../../docs/DEVIN_AGENT_E2E.md)已记录这一边界。保留更多历史会增加上下文占用与输入费用；仅 pin `smol` 也不能保证摘要绕过 Fusion。**真实外层/子 Worker 身份、交错两个 Worker、compact、fork、取消、重试及有副作用工具去重仍待本机验收**。contract conflict 后不能换个 session 自动重发；先停止并查明账务和工具执行状态。通过这些边界前，不建议把 Fusion 设为长期默认 Worker。
 
 当前模板关闭 OMP 自动 retry、retry 模型 fallback，以及 OMO 插件的 model/runtime fallback。这些设置已通过对应发布版的配置解析；OMO 插件设置不代表 OpenCode 内核和 SDK 的所有重试都已关闭，实际发送次数仍需观察。
 

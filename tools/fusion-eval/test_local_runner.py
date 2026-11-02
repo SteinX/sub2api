@@ -101,6 +101,8 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("default: sub2api-direct/concrete-model", config)
         self.assertIn("fusion-worker: sub2api-fusion/fusion-worker-test", config)
         self.assertIn("enabled: false", config)
+        self.assertRegex(config, r"(?m)^  supersedeReads: false$")
+        self.assertRegex(config, r"(?m)^  dropUseless: false$")
         self.assertEqual(runner.inspect(directory)["state"], "prepared")
         self.assertFalse((directory / "start.json").exists())
 

@@ -36,6 +36,8 @@ For the short loopback smoke, put this in the isolated agent directory's `config
 ```yaml
 compaction:
   enabled: false
+  supersedeReads: false
+  dropUseless: false
 ```
 
 OMP 18.12.6's public [`compaction.enabled` setting](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/session/context-settings.ts) at line 106 is the **Auto-Compact** toggle. It disables automatic compaction; it does not establish compatibility with manual `/compact`.

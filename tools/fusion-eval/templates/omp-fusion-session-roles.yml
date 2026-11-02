@@ -30,6 +30,8 @@ task:
 # Early short smoke only. Daily-use /compact and /fork remain unaccepted.
 compaction:
   enabled: false
+  supersedeReads: false
+  dropUseless: false
 
 # This setting disables automatic context promotion to another model.
 contextPromotion:

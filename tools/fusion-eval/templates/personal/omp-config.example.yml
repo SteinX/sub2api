@@ -13,6 +13,9 @@ modelRoles:
   widget: sub2api-direct/REPLACE_WITH_CONCRETE_MODEL_UID
 compaction:
   enabled: false
+  # OMP read pruning rewrites durable Fusion history even with compact off.
+  supersedeReads: false
+  dropUseless: false
 contextPromotion:
   enabled: false
 # Keep provider/model selection fixed while validating gateway recovery.
