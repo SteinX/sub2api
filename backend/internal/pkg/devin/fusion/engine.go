@@ -526,6 +526,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			call.RetryOf = recovery.ID
 			call.RecoveryKind = recoveryKind
 			call.AuthRecoveryUsed = authRecoveryUsed
+			if recoveryKind == RejectionAuth && recovery.Rejection != nil {
+				call.RejectedTokenFingerprint = recovery.Rejection.RejectedTokenFingerprint
+			}
 		}
 		if ctx.Err() != nil {
 			continue

@@ -123,6 +123,32 @@ func TestFusionJournaledRefusalRestoresAdmissionBeforeRecovery(t *testing.T) {
 	}
 }
 
+func TestFusionAuthRecoveryRetainsRejectedTokenFingerprintAcrossRestart(t *testing.T) {
+	store := newMemoryStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fingerprint := strings.Repeat("a", 64)
+	x := &scriptExecutor{t: t}
+	x.execute = func(c Call) (Outcome, error) {
+		if len(x.calls) == 1 {
+			cancel()
+			outcome, err := refused(RejectionAuth, 0)
+			outcome.Rejection.RejectedTokenFingerprint = fingerprint
+			return outcome, err
+		}
+		require.Equal(t, RejectionAuth, c.RecoveryKind)
+		require.Equal(t, fingerprint, c.RejectedTokenFingerprint)
+		return Outcome{Response: tool("read", "read_file", `{}`), BillingModel: c.Request.Model}, nil
+	}
+	in := input(testRequest("task"))
+	_, err := New(store).Advance(ctx, in, x)
+	require.ErrorIs(t, err, context.Canceled)
+	result, err := New(store).Advance(context.Background(), in, x)
+	require.NoError(t, err)
+	require.Equal(t, WaitingTool, result.State)
+	require.Len(t, x.calls, 2)
+}
+
 func TestFusionRecoveryKeepsRequestWhileBackgroundSummaryBecomesReady(t *testing.T) {
 	e, s, raw, base := summarySession(t, Sidekick)
 	s.Profile.Compaction = &CompactionPolicy{Enabled: true, Sidekick: []int{1000, 1500}}

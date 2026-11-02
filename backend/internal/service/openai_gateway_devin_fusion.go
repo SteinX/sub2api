@@ -261,7 +261,12 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	if err = devin.ApplyModelConfig(wire, selected, call.Request); err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
-	token, err := s.devin.Token(ctx, x.account, call.RecoveryKind == fusion.RejectionAuth)
+	var token string
+	if call.RecoveryKind == fusion.RejectionAuth {
+		token, err = s.devin.recoverTokenFingerprint(ctx, x.account, call.RejectedTokenFingerprint)
+	} else {
+		token, err = s.devin.Token(ctx, x.account, false)
+	}
 	if err != nil {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 	}
@@ -277,6 +282,9 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	}
 	if err != nil {
 		rejection, recordErr := x.recordFusionRejection(ctx, call, err)
+		if rejection != nil && rejection.Kind == fusion.RejectionAuth {
+			rejection.RejectedTokenFingerprint = devinTokenFingerprint(token)
+		}
 		return fusion.Outcome{KnownFailure: true, NotStarted: true, Rejection: rejection, AdmissionPending: rejection != nil && recordErr != nil}, errors.Join(err, recordErr)
 	}
 	decoder := devin.NewEventDecoder(call.Request.Model, func(apicompat.ResponsesStreamEvent) error { return nil }, wire.Tools...)
@@ -330,6 +338,9 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 			outcome.KnownFailure = status == 400 || status == 401 || status == 403 || status == 429 || upstream.RetryableRejection()
 			var recordErr error
 			outcome.Rejection, recordErr = x.recordFusionRejection(ctx, call, err)
+			if outcome.Rejection != nil && outcome.Rejection.Kind == fusion.RejectionAuth {
+				outcome.Rejection.RejectedTokenFingerprint = devinTokenFingerprint(token)
+			}
 			outcome.AdmissionPending = outcome.Rejection != nil && recordErr != nil
 			err = errors.Join(err, recordErr)
 		}

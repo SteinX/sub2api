@@ -259,6 +259,61 @@ func TestFusionGatewayRecoversAuthenticationWithDurableAttempts(t *testing.T) {
 	}
 }
 
+func TestFusionGatewayAuthRecoveryReusesConcurrentlyReplacedToken(t *testing.T) {
+	for _, phase := range []string{"prepare", "chat"} {
+		t.Run(phase, func(t *testing.T) {
+			f := newWarmFixture(t)
+			f.account.Credentials["api_key"] = "cog_synthetic"
+			key := f.service.devin.runtimeKey(context.Background(), f.account)
+			f.service.devin.runtime[key] = devinRuntime{token: "old-token", tokenUntil: time.Now().Add(time.Hour)}
+			_, request := fusionRecoveryGateway(t, f)
+			upstream := f.service.devin.upstream.(*devinHTTP)
+			original := upstream.handle
+			mints, successful := 0, 0
+			refused := false
+			rejectOld := func() *http.Response {
+				refused = true
+				// Another worker has recovered the account while the old token's
+				// refusal is still in flight. Minting may return this same token.
+				f.service.devin.mu.Lock()
+				entry := f.service.devin.runtime[key]
+				entry.token, entry.tokenUntil = "fresh-token", time.Now().Add(time.Hour)
+				f.service.devin.runtime[key] = entry
+				f.service.devin.mu.Unlock()
+				require.NoError(t, f.service.devin.store.Set(context.Background(), "devin:token:"+key, []byte("fresh-token"), time.Hour))
+				return devinReply(401, []byte(`{"code":"unauthenticated"}`))
+			}
+			upstream.handle = func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path == devin.MintPath {
+					mints++
+					return devinReply(200, []byte(`{"sessionToken":"fresh-token"}`)), nil
+				}
+				if phase == "prepare" && r.URL.Path == devin.UserJWTPath && !refused {
+					return rejectOld(), nil
+				}
+				return original(r)
+			}
+			f.chat = func(r *http.Request, wire *pb.GetChatMessageRequest) (*http.Response, error) {
+				if phase == "chat" && !refused {
+					return rejectOld(), nil
+				}
+				user, _, ok := r.BasicAuth()
+				require.True(t, ok)
+				require.Equal(t, "fresh-token", user)
+				successful++
+				return fusionRecoveryToolReply(wire.ChatModelUid, successful), nil
+			}
+			w, err := request()
+			require.NoError(t, err, w.Body.String())
+			require.Zero(t, mints, "a concurrently replaced token must be reused rather than excluded")
+			require.Len(t, f.bills.commands, 2)
+			session, _, err := f.engine.Load(context.Background(), fusion.Scope(f.keys.key.UserID, f.keys.key.ID), "recovery-session")
+			require.NoError(t, err)
+			require.Equal(t, devinTokenFingerprint("old-token"), session.Attempts[0].Rejection.RejectedTokenFingerprint)
+		})
+	}
+}
+
 func TestFusionGatewayExplicitRejectionsAreBounded(t *testing.T) {
 	for _, kind := range []string{"rate", "capacity"} {
 		t.Run(kind, func(t *testing.T) {

@@ -223,15 +223,16 @@ func (s *Session) NeedsUsageReconciliation() bool {
 }
 
 type Call struct {
-	AttemptID    string
-	Role         Role
-	Request      *apicompat.ResponsesRequest
-	LaneScope    string
-	PricingAt    time.Time
-	EstimateUSD  float64
-	Purpose      Purpose
-	RetryOf      string
-	RecoveryKind RejectionKind
+	AttemptID                string
+	Role                     Role
+	Request                  *apicompat.ResponsesRequest
+	LaneScope                string
+	PricingAt                time.Time
+	EstimateUSD              float64
+	Purpose                  Purpose
+	RetryOf                  string
+	RecoveryKind             RejectionKind
+	RejectedTokenFingerprint string
 	// AuthRecoveryUsed includes an authentication recovery allocated to this call.
 	AuthRecoveryUsed bool
 }
@@ -247,9 +248,10 @@ const (
 // Rejection authorizes recovery only for a terminal, explicitly unexecuted call.
 // RetryAfter is supplied by the provider boundary after validating its hint.
 type Rejection struct {
-	Kind        RejectionKind `json:"kind"`
-	NotExecuted bool          `json:"not_executed"`
-	RetryAfter  time.Duration `json:"retry_after"`
+	Kind                     RejectionKind `json:"kind"`
+	NotExecuted              bool          `json:"not_executed"`
+	RetryAfter               time.Duration `json:"retry_after"`
+	RejectedTokenFingerprint string        `json:"rejected_token_fingerprint,omitempty"`
 }
 
 type Outcome struct {

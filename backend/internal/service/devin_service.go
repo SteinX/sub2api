@@ -172,7 +172,16 @@ func (s *DevinService) Token(ctx context.Context, a *Account, force bool) (strin
 		failed = s.runtime[s.runtimeKey(ctx, a)].token
 		s.mu.Unlock()
 	}
-	return s.token(ctx, a, force, failed)
+	return s.token(ctx, a, force, devinTokenFingerprint(failed))
+}
+
+// Recovery can cross a process boundary; retain only the rejected credential's
+// fingerprint in a conversation journal, never the bearer credential itself.
+func devinTokenFingerprint(token string) string {
+	if token == "" {
+		return ""
+	}
+	return fusion.Digest(devin.NormalizeToken(token))
 }
 
 func (s *DevinService) token(ctx context.Context, a *Account, force bool, failed string) (string, error) {
@@ -193,7 +202,7 @@ func (s *DevinService) token(ctx context.Context, a *Account, force bool, failed
 	}
 	s.mu.Lock()
 	entry := s.runtime[key]
-	if entry.token != "" && time.Now().Before(entry.tokenUntil) && (!force || failed != "" && entry.token != failed) {
+	if entry.token != "" && time.Now().Before(entry.tokenUntil) && (!force || failed != "" && devinTokenFingerprint(entry.token) != failed) {
 		s.mu.Unlock()
 		return entry.token, nil
 	}
@@ -223,7 +232,7 @@ func (s *DevinService) token(ctx context.Context, a *Account, force bool, failed
 		if !ok {
 			return "", errors.New("invalid Devin token cache result")
 		}
-		if !force || failed == "" || token != failed {
+		if !force || failed == "" || devinTokenFingerprint(token) != failed {
 			return token, nil
 		}
 		// A normal lookup may already have been in flight when recovery began.
@@ -234,7 +243,7 @@ func (s *DevinService) token(ctx context.Context, a *Account, force bool, failed
 func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key string, force bool, failed string) (string, error) {
 	s.mu.Lock()
 	e := s.runtime[key]
-	if e.token != "" && time.Now().Before(e.tokenUntil) && (!force || failed != "" && e.token != failed) {
+	if e.token != "" && time.Now().Before(e.tokenUntil) && (!force || failed != "" && devinTokenFingerprint(e.token) != failed) {
 		s.mu.Unlock()
 		return e.token, nil
 	}
@@ -260,7 +269,7 @@ func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key stri
 			if cacheErr != nil {
 				return "", cacheErr
 			}
-			if len(cached) == 0 || force && (failed == "" || string(cached) == failed) {
+			if len(cached) == 0 || force && (failed == "" || devinTokenFingerprint(string(cached)) == failed) {
 				return "", nil
 			}
 			s.mu.Lock()
@@ -306,7 +315,7 @@ func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key stri
 		}
 		return "", fmt.Errorf("devin CLI session token exchange (GetSelfDevinSessionToken) failed: %w", err)
 	}
-	if force && failed != "" && token == failed {
+	if force && failed != "" && devinTokenFingerprint(token) == failed {
 		return "", &devin.Error{Code: "unauthenticated", Status: 401}
 	}
 	if s.store != nil {
@@ -332,7 +341,14 @@ func (s *DevinService) loadOrMintToken(ctx context.Context, a *Account, key stri
 
 // RecoverToken reuses a credential another request has already recovered.
 func (s *DevinService) RecoverToken(ctx context.Context, a *Account, failed string) (string, error) {
-	return s.token(ctx, a, true, devin.NormalizeToken(failed))
+	return s.token(ctx, a, true, devinTokenFingerprint(failed))
+}
+
+func (s *DevinService) recoverTokenFingerprint(ctx context.Context, a *Account, failed string) (string, error) {
+	if len(failed) != 64 || strings.Trim(failed, "0123456789abcdef") != "" {
+		return "", fusion.E("session_corrupt", "authentication recovery has no rejected-token fingerprint", 503)
+	}
+	return s.token(ctx, a, true, failed)
 }
 
 func (s *DevinService) Models(ctx context.Context, a *Account, force ...bool) ([]*pb.ClientModelConfig, error) {
