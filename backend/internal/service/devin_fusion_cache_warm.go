@@ -275,7 +275,7 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 		return result, err
 	}
 	defer x.Close()
-	if err = a.service.devin.waitFusionAdmission(ctx, x.account, snapshot.Model, fusion.CacheRefresh); err != nil {
+	if err = a.service.devin.waitFusionAdmission(ctx, x.account, snapshot.Model, fusion.CacheRefresh, x.checkFusionCancellation); err != nil {
 		return result, err
 	}
 	recordCooldown := func(cause error) error {
@@ -344,7 +344,7 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 	if err = ctx.Err(); err != nil {
 		return result, err
 	}
-	if err = a.service.devin.waitFusionAdmission(ctx, x.account, snapshot.Model, fusion.CacheRefresh); err != nil {
+	if err = a.service.devin.waitFusionAdmission(ctx, x.account, snapshot.Model, fusion.CacheRefresh, x.checkFusionCancellation); err != nil {
 		return result, err
 	}
 	if !x.pricing.readyForInference(time.Now()) {

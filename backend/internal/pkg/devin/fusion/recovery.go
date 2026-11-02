@@ -64,6 +64,35 @@ func recoveryChain(s *Session, a *Attempt) (attempts int, authUsed bool, err err
 	}
 }
 
+// Cooldown persistence is independent of resend eligibility, cancellation and
+// settlement. Applied/stopped attempts can still carry an unacknowledged gate.
+func (e *Engine) reconcileAdmissions(ctx context.Context, s *Session, raw *[]byte, x Executor) error {
+	for i := range s.Attempts {
+		a := &s.Attempts[i]
+		if !a.AdmissionPending {
+			continue
+		}
+		if !validRejection(a.Rejection) || a.RetryNotBefore.IsZero() || a.Status != "completed" || !a.Settled || a.Response != nil && (a.Response.Usage != nil || len(a.Response.Output) != 0) {
+			return E("session_corrupt", "pending cooldown has no confirmed refusal", 503)
+		}
+		recorder, ok := x.(RecoveryAdmission)
+		if !ok {
+			return E("store_unavailable", "refusal cooldown persistence is unavailable", 503)
+		}
+		if err := recorder.PersistRejection(ctx, *a); err != nil {
+			return err
+		}
+		a.AdmissionPending = false
+		if err := e.journal(ctx, s, a); err != nil {
+			return err
+		}
+		if err := e.save(ctx, s, raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (e *Engine) prepareRecovery(ctx, persistCtx context.Context, s *Session, raw *[]byte, a *Attempt, x Executor) (RejectionKind, bool, error) {
 	count, authUsed, err := recoveryChain(s, a)
 	if err != nil {
@@ -78,16 +107,6 @@ func (e *Engine) prepareRecovery(ctx, persistCtx context.Context, s *Session, ra
 	}
 	// Both the result journal and the conversation must acknowledge the refusal
 	// before any replacement inference can start. A failed write only pauses it.
-	if a.AdmissionPending {
-		recorder, ok := x.(RecoveryAdmission)
-		if !ok {
-			return "", authUsed, E("store_unavailable", "refusal cooldown persistence is unavailable", 503)
-		}
-		if err = recorder.PersistRejection(persistCtx, *a); err != nil {
-			return "", authUsed, err
-		}
-		a.AdmissionPending = false
-	}
 	if err = e.journal(persistCtx, s, a); err != nil {
 		return "", authUsed, err
 	}

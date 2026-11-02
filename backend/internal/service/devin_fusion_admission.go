@@ -29,13 +29,18 @@ func fusionAdmissionKeys(account *Account, model string) [2]string {
 
 // waitFusionAdmission rechecks shared deadlines before sending. Maintenance
 // never waits for a cooldown or consumes a foreground recovery opportunity.
-func (s *DevinService) waitFusionAdmission(ctx context.Context, account *Account, model string, purpose fusion.Purpose) error {
+func (s *DevinService) waitFusionAdmission(ctx context.Context, account *Account, model string, purpose fusion.Purpose, checks ...func(context.Context) error) error {
 	if s == nil || s.store == nil || account == nil {
 		return fusion.E("store_unavailable", "shared Fusion admission is unavailable", 503)
 	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		for _, check := range checks {
+			if err := check(ctx); err != nil {
+				return err
+			}
 		}
 		var until time.Time
 		for _, key := range fusionAdmissionKeys(account, model) {
@@ -72,6 +77,20 @@ func (s *DevinService) waitFusionAdmission(ctx context.Context, account *Account
 		case <-timer.C:
 		}
 	}
+}
+
+func (x *devinFusionExecutor) checkFusionCancellation(ctx context.Context) error {
+	if x.key == nil || x.sessionID == "" {
+		return nil
+	}
+	cancelled, err := fusion.New(x.service.devin.store).IsCancelled(ctx, fusion.Scope(x.key.UserID, x.key.ID), x.sessionID)
+	if err != nil {
+		return err
+	}
+	if cancelled {
+		return fusion.E("cancelled", "Fusion session was cancelled during admission", 409)
+	}
+	return nil
 }
 
 // noteFusionRejection stores an observed refusal even after caller disconnect.

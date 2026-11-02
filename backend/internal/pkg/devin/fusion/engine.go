@@ -227,6 +227,9 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 // Reconcile only known inference usage. Unknown attempts retain their identity
 // and reservation; callers still reconcile independent summaries before stopping.
 func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte, x Executor) (*Attempt, error) {
+	if err := e.reconcileAdmissions(ctx, s, raw, x); err != nil {
+		return nil, err
+	}
 	if len(s.Attempts) == 0 || s.Attempts[len(s.Attempts)-1].Applied {
 		return nil, nil
 	}
@@ -389,6 +392,8 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 					state := Failed
 					if a.Error.Status == 402 || a.Error.Code == "devin_fusion_budget_exhausted" {
 						state = BudgetExhausted
+					} else if a.Error.Code == "devin_fusion_cancelled" {
+						state = Cancelled
 					}
 					return stop(a.Error, state)
 				}

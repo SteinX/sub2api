@@ -203,6 +203,11 @@ func (s *Session) LaneScope(role Role) string {
 }
 
 func (s *Session) NeedsUsageReconciliation() bool {
+	for _, a := range s.Attempts {
+		if a.AdmissionPending {
+			return true
+		}
+	}
 	if len(s.Attempts) > 0 {
 		a := s.Attempts[len(s.Attempts)-1]
 		if !a.Applied && (!a.Settled || a.Status == "started" || a.Status == "unknown") {

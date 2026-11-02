@@ -16,6 +16,71 @@ func refused(kind RejectionKind, delay time.Duration) (Outcome, error) {
 	return Outcome{KnownFailure: true, Rejection: &Rejection{Kind: kind, NotExecuted: true, RetryAfter: delay}}, errors.New("explicit provider refusal")
 }
 
+type pendingAdmissionExecutor struct {
+	*scriptExecutor
+	persisted []Attempt
+}
+
+func (x *pendingAdmissionExecutor) PersistRejection(_ context.Context, a Attempt) error {
+	x.persisted = append(x.persisted, a)
+	return nil
+}
+
+func TestFusionCancelledRefusalReconcilesAdmissionWithoutExecuting(t *testing.T) {
+	store := newMemoryStore()
+	e := New(store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	x := &pendingAdmissionExecutor{scriptExecutor: &scriptExecutor{t: t}}
+	x.execute = func(Call) (Outcome, error) {
+		cancel()
+		outcome, err := refused(RejectionRateLimit, time.Minute)
+		outcome.NotStarted, outcome.AdmissionPending = true, true
+		return outcome, err
+	}
+	in := input(testRequest("task"))
+	_, err := e.Advance(ctx, in, x)
+	require.ErrorIs(t, err, context.Canceled)
+	s, _, err := e.Load(context.Background(), in.Scope, in.SessionID)
+	require.NoError(t, err)
+	require.True(t, s.Attempts[0].Applied)
+	require.True(t, s.Attempts[0].AdmissionPending)
+	anchor := s.Attempts[0].RetryNotBefore
+	require.True(t, s.NeedsUsageReconciliation(), "an applied pending gate must still trigger read-only reconciliation")
+	require.NoError(t, e.Cancel(context.Background(), in.Scope, in.SessionID))
+	s, err = e.ReconcileUsage(context.Background(), in.Scope, in.SessionID, x)
+	require.NoError(t, err)
+	require.Len(t, x.persisted, 1)
+	require.Equal(t, anchor, x.persisted[0].RetryNotBefore)
+	require.False(t, s.Attempts[0].AdmissionPending)
+	require.Equal(t, Cancelled, s.State)
+	require.Len(t, x.calls, 1, "reconciliation must not send a replacement")
+}
+
+func TestFusionMainFormatPendingSettlementWithoutRequestSnapshot(t *testing.T) {
+	store := newMemoryStore()
+	e := New(store)
+	x := &scriptExecutor{t: t, failSettle: true, responses: []*apicompat.ResponsesResponse{tool("read", "read_file", `{}`)}}
+	in := input(testRequest("task"))
+	_, err := e.Advance(context.Background(), in, x)
+	requireCode(t, err, "billing_pending")
+	s, raw, err := e.Load(context.Background(), in.Scope, in.SessionID)
+	require.NoError(t, err)
+	// main and stx.3 have no recoverable-refusal fields. Their incomplete
+	// attempts can require settlement but cannot authorize a refusal resend.
+	a := &s.Attempts[0]
+	a.RequestSnapshot = nil
+	require.Nil(t, a.Rejection)
+	require.Empty(t, a.RetryOf)
+	require.True(t, a.RetryNotBefore.IsZero())
+	require.NoError(t, e.journal(context.Background(), s, a))
+	require.NoError(t, e.save(context.Background(), s, &raw))
+	result, err := New(store).Advance(context.Background(), in, x)
+	require.NoError(t, err)
+	require.Equal(t, WaitingTool, result.State)
+	require.Len(t, x.calls, 1, "a main-format attempt settles and publishes without replay")
+}
+
 func TestFusionRecoveryKeepsRequestWhileBackgroundSummaryBecomesReady(t *testing.T) {
 	e, s, raw, base := summarySession(t, Sidekick)
 	s.Profile.Compaction = &CompactionPolicy{Enabled: true, Sidekick: []int{1000, 1500}}

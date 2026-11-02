@@ -220,7 +220,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 		logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("retry_of", call.RetryOf), zap.String("model", devin.DiagnosticModelID(call.Request.Model)), zap.Bool("generation_sent", generationSent), zap.Bool("usage_observed", usageObserved), zap.String("failure_kind", devinFusionFailureKind(err)), zap.Int("tool_calls", toolCalls), zap.Int("invalid_tool_arguments", invalidArguments))
 	}()
 	if fusionRecovery {
-		if err := s.devin.waitFusionAdmission(ctx, x.account, call.Request.Model, call.Purpose); err != nil {
+		if err := s.devin.waitFusionAdmission(ctx, x.account, call.Request.Model, call.Purpose, x.checkFusionCancellation); err != nil {
 			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 		}
 	}
@@ -286,12 +286,17 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	// Token discovery and Prepare may overlap another worker's refusal. Honor
 	// any newly persisted cooldown immediately before the generation send.
 	if fusionRecovery {
-		if err := s.devin.waitFusionAdmission(ctx, x.account, call.Request.Model, call.Purpose); err != nil {
+		if err := s.devin.waitFusionAdmission(ctx, x.account, call.Request.Model, call.Purpose, x.checkFusionCancellation); err != nil {
 			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
 		}
 	}
 	if !x.pricing.readyForInference(time.Now()) {
 		return fusion.Outcome{KnownFailure: true, NotStarted: true}, fusion.E("pricing_unavailable", "account catalog price expired before inference; retry with refreshed pricing", 400)
+	}
+	if fusionRecovery {
+		if err := x.checkFusionCancellation(ctx); err != nil {
+			return fusion.Outcome{KnownFailure: true, NotStarted: true}, err
+		}
 	}
 	generationSent = true
 	err = consumeDevinFusionChat(ctx, x.c, x.client, prepared.BaseURL, token, wire, decoder, x.stream, &x.clientDisconnected)

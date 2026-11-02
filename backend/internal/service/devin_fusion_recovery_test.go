@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,73 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type observingFusionAdmissionStore struct {
+	fusion.AtomicStore
+	seen chan struct{}
+	once sync.Once
+}
+
+func (s *observingFusionAdmissionStore) Get(ctx context.Context, key string) ([]byte, error) {
+	raw, err := s.AtomicStore.Get(ctx, key)
+	if err == nil && strings.HasPrefix(key, "devin:fusion:admission:") {
+		s.once.Do(func() { close(s.seen) })
+	}
+	return raw, err
+}
+
+func TestFusionGatewayDurableCancelInterruptsSharedAdmission(t *testing.T) {
+	for _, phase := range []string{"before_prepare", "before_generation"} {
+		t.Run(phase, func(t *testing.T) {
+			f := newWarmFixture(t)
+			_, request := fusionRecoveryGateway(t, f)
+			store := &observingFusionAdmissionStore{AtomicStore: f.engine.Store, seen: make(chan struct{})}
+			f.service.devin.store = store
+			cooldown := func(ctx context.Context) error {
+				return f.service.devin.noteFusionRejection(ctx, f.account, f.models[0].ModelUid, &fusion.Rejection{Kind: fusion.RejectionRateLimit, NotExecuted: true, RetryAfter: 2 * time.Second})
+			}
+			if phase == "before_prepare" {
+				require.NoError(t, cooldown(context.Background()))
+			} else {
+				upstream := f.service.devin.upstream.(*devinHTTP)
+				original := upstream.handle
+				upstream.handle = func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path == devin.UserJWTPath {
+						if err := cooldown(r.Context()); err != nil {
+							return nil, err
+						}
+					}
+					return original(r)
+				}
+			}
+			f.chat = func(_ *http.Request, wire *pb.GetChatMessageRequest) (*http.Response, error) {
+				return fusionRecoveryToolReply(wire.ChatModelUid, int(f.calls.Load())), nil
+			}
+			done := make(chan error, 1)
+			go func() { _, err := request(); done <- err }()
+			select {
+			case <-store.seen:
+			case <-time.After(time.Second):
+				t.Fatal("executor never entered shared cooldown")
+			}
+			scope := fusion.Scope(f.keys.key.UserID, f.keys.key.ID)
+			require.NoError(t, f.engine.Cancel(context.Background(), scope, "recovery-session"))
+			select {
+			case err := <-done:
+				require.ErrorContains(t, err, "cancelled")
+			case <-time.After(time.Second):
+				t.Error("durable cancellation did not interrupt shared admission")
+				select {
+				case <-done:
+				case <-time.After(4 * time.Second):
+					t.Fatal("request did not finish")
+				}
+			}
+			require.Zero(t, f.calls.Load(), "cancelled admission must never generate")
+			require.Empty(t, f.bills.commands)
+		})
+	}
+}
 
 type interruptedFusionAdmissionStore struct {
 	fusion.AtomicStore
