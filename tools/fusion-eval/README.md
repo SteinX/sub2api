@@ -2,7 +2,9 @@
 
 本目录区分三步：**本地 stub 合同验证 → 用户本机真实 Fusion smoke → 冻结 A/B 评测**。已完成本地客户端探针，继续提供本机 smoke 运行器和离线费用工具；没有在云端启动收费评测。部署、恢复合同及后续验收矩阵见 [Fusion 说明](../../docs/DEVIN_FUSION.md) 和 [个人接入计划](../../docs/DEVIN_FUSION_OMO_OMP_PLAN.md)。
 
-当前选择 **Linux 远端执行**，从 [远端 smoke 操作说明](LINUX_REMOTE.md) 开始；[macOS 操作说明](LOCAL_SMOKE.md) 保留为备用。`prepare` / `inspect` 不调用模型；`run` 启动一次真实客户端，并保存独立文件验收、派发和已观察费用的证据。运行结果仍保留费用完整性未知，不能自动作为冻结 A/B 成绩或释放未知预留。
+本目录用于显式个人 Worker 的客户端会话探针和开发 smoke。仓库的完整受控验收入口是 `deploy/devin-e2e.sh`、`tools/devin-acceptance/` 和 `tools/devin-e2e-clients/`；本目录的本地预算账本不替代其授权、价格预检、沙箱或发布验收。
+
+需要单独验证个人 Worker 时，从 [Linux 远端 smoke 操作说明](LINUX_REMOTE.md) 开始；[macOS 操作说明](LOCAL_SMOKE.md) 为另一平台的步骤。`prepare` / `inspect` 不调用模型；`run` 启动一次真实客户端，需要另外明确授权收费调用，并保存独立文件验收、派发和已观察费用的证据。运行结果仍保留费用完整性未知，不能自动作为冻结 A/B 成绩或释放未知预留。
 
 ## 固定版本与已有证据
 

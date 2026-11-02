@@ -277,7 +277,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	}
 	if err != nil {
 		rejection, recordErr := x.recordFusionRejection(ctx, call, err)
-		return fusion.Outcome{KnownFailure: true, NotStarted: true, Rejection: rejection}, errors.Join(err, recordErr)
+		return fusion.Outcome{KnownFailure: true, NotStarted: true, Rejection: rejection, AdmissionPending: rejection != nil && recordErr != nil}, errors.Join(err, recordErr)
 	}
 	decoder := devin.NewEventDecoder(call.Request.Model, func(apicompat.ResponsesStreamEvent) error { return nil }, wire.Tools...)
 	if err := ctx.Err(); err != nil {
@@ -325,6 +325,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 			outcome.KnownFailure = status == 400 || status == 401 || status == 403 || status == 429 || upstream.RetryableRejection()
 			var recordErr error
 			outcome.Rejection, recordErr = x.recordFusionRejection(ctx, call, err)
+			outcome.AdmissionPending = outcome.Rejection != nil && recordErr != nil
 			err = errors.Join(err, recordErr)
 		}
 	}

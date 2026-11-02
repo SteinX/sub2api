@@ -16,6 +16,37 @@ func refused(kind RejectionKind, delay time.Duration) (Outcome, error) {
 	return Outcome{KnownFailure: true, Rejection: &Rejection{Kind: kind, NotExecuted: true, RetryAfter: delay}}, errors.New("explicit provider refusal")
 }
 
+func TestFusionRecoveryKeepsRequestWhileBackgroundSummaryBecomesReady(t *testing.T) {
+	e, s, raw, base := summarySession(t, Sidekick)
+	s.Profile.Compaction = &CompactionPolicy{Enabled: true, Sidekick: []int{1000, 1500}}
+	s.ProfileRevision = s.Profile.Revision()
+	s.ActiveRequest = 0
+	s.Requests = []RequestRecord{{Key: "original-request"}}
+	original, err := e.roleRequest(s, base)
+	require.NoError(t, err)
+	snapshot, err := json.Marshal(original)
+	require.NoError(t, err)
+	aux := &summaryExecutor{response: summaryResponse(), started: make(chan struct{}), finish: make(chan struct{})}
+	started, err := e.prepareCompaction(context.Background(), s, &raw, base, aux, true)
+	require.NoError(t, err)
+	require.True(t, started)
+	<-aux.started
+	jobID := s.roleContext(Sidekick).Job.ID
+	// The first physical inference has been refused while this summary runs.
+	s.Attempts = []Attempt{{ID: "refused-before-summary", Purpose: Inference, Role: Sidekick, Turn: s.Turn, Model: original.Model, Status: "completed", Settled: true, Failure: "upstream_failed", Rejection: &Rejection{Kind: RejectionRateLimit, NotExecuted: true}, RetryNotBefore: time.Now(), RequestSnapshot: snapshot}}
+	s.TurnRequests++
+	require.NoError(t, e.save(context.Background(), s, &raw))
+	close(aux.finish)
+	<-e.Runner.Done(jobID)
+	x := &scriptExecutor{t: t, responses: []*apicompat.ResponsesResponse{tool("read", "read_file", `{}`)}}
+	_, err = e.run(context.Background(), s, &raw, base, x, &Result{})
+	require.NoError(t, err)
+	require.Len(t, x.calls, 1)
+	require.Equal(t, "refused-before-summary", x.calls[0].RetryOf)
+	require.JSONEq(t, string(snapshot), string(mustJSON(x.calls[0].Request)), "a completed summary must not alter the logical retry")
+	require.Equal(t, "ready", s.roleContext(Sidekick).Job.State, "compaction waits until the next logical inference")
+}
+
 func TestFusionExplicitRejectionsHaveIndependentBoundedAttempts(t *testing.T) {
 	store := newMemoryStore()
 	x := &scriptExecutor{t: t}

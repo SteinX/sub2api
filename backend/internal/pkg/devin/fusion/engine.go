@@ -367,7 +367,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			}
 			if recoverableAttempt(a) {
 				var recoveryErr error
-				recoveryKind, authRecoveryUsed, recoveryErr = e.prepareRecovery(ctx, persistCtx, s, raw, a)
+				recoveryKind, authRecoveryUsed, recoveryErr = e.prepareRecovery(ctx, persistCtx, s, raw, a, x)
 				if recoveryErr != nil {
 					var typed *Error
 					if errors.As(recoveryErr, &typed) {
@@ -423,6 +423,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 					_ = e.Cache.Observe(persistCtx, s)
 				}
 				a.Applied = true
+				a.RequestSnapshot = nil
 				if err := e.save(persistCtx, s, raw); err != nil {
 					return result, err
 				}
@@ -460,7 +461,17 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		if s.TurnRequests >= s.Profile.MaxRequests || s.TurnCostUSD >= s.Profile.MaxCostUSD || e.now().Sub(s.TurnStarted) >= time.Duration(s.Profile.MaxWallSeconds)*time.Second {
 			return stop(E("budget_exhausted", "Fusion turn request, cost or wall-time budget exhausted", 409), BudgetExhausted)
 		}
-		req, err := e.prepareRoleContext(ctx, s, raw, base, x)
+		var req *apicompat.ResponsesRequest
+		if recovery != nil {
+			// A ready background summary may change the lane while a refusal
+			// waits. Recovery must resend the exact durable logical request.
+			req = &apicompat.ResponsesRequest{}
+			if len(recovery.RequestSnapshot) == 0 || json.Unmarshal(recovery.RequestSnapshot, req) != nil || req.Model != recovery.Model {
+				return result, E("session_corrupt", "refused inference has no valid immutable request", 503)
+			}
+		} else {
+			req, err = e.prepareRoleContext(ctx, s, raw, base, x)
+		}
 		if err != nil {
 			var typed *Error
 			if errors.As(err, &typed) {
@@ -532,7 +543,12 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			// replacement. A crash between these two facts must not reset the chain.
 			recovery.Applied = true
 		}
-		s.Attempts = append(s.Attempts, Attempt{ID: call.AttemptID, Purpose: Inference, Role: s.Role, Turn: s.Turn, Model: req.Model, StartedAt: call.PricingAt, Status: "started", EstimateUSD: estimate, RetryOf: call.RetryOf, RecoveryKind: call.RecoveryKind})
+		for i := range s.Attempts {
+			if s.Attempts[i].Applied {
+				s.Attempts[i].RequestSnapshot = nil
+			}
+		}
+		s.Attempts = append(s.Attempts, Attempt{ID: call.AttemptID, Purpose: Inference, Role: s.Role, Turn: s.Turn, Model: req.Model, StartedAt: call.PricingAt, Status: "started", EstimateUSD: estimate, RetryOf: call.RetryOf, RecoveryKind: call.RecoveryKind, RequestSnapshot: b})
 		s.TurnRequests++
 		if err = e.save(persistCtx, s, raw); err != nil {
 			// Execute was never entered. A store error may have happened after
@@ -554,6 +570,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		a.BillingModel = outcome.BillingModel
 		a.NotStarted = outcome.NotStarted && (outcome.Response == nil || outcome.Response.Usage == nil && len(outcome.Response.Output) == 0)
 		a.Rejection = acceptedRejection(outcome, runErr)
+		a.AdmissionPending = a.Rejection != nil && outcome.AdmissionPending
 		if a.Rejection != nil {
 			a.RetryNotBefore = e.now().Add(a.Rejection.RetryAfter)
 		}
@@ -606,6 +623,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		}
 		if journalErr != nil {
 			return result, journalErr
+		}
+		if a.AdmissionPending {
+			return result, E("store_unavailable", "refusal recorded; shared cooldown persistence is pending", 503)
 		}
 		if billingErr != nil {
 			return result, E("billing_pending", "usage settlement is pending; retry exactly the same request", 503)

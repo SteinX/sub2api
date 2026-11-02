@@ -64,26 +64,30 @@ func recoveryChain(s *Session, a *Attempt) (attempts int, authUsed bool, err err
 	}
 }
 
-func (e *Engine) prepareRecovery(ctx, persistCtx context.Context, s *Session, raw *[]byte, a *Attempt) (RejectionKind, bool, error) {
+func (e *Engine) prepareRecovery(ctx, persistCtx context.Context, s *Session, raw *[]byte, a *Attempt, x Executor) (RejectionKind, bool, error) {
 	count, authUsed, err := recoveryChain(s, a)
 	if err != nil {
 		return "", false, err
 	}
-	if count >= maxInferenceAttempts {
-		return "", authUsed, E("recovery_exhausted", "explicit provider rejection recovery limit reached", 503)
-	}
 	kind := RejectionKind("")
 	if a.Rejection != nil {
 		kind = a.Rejection.Kind
-		if kind == RejectionAuth && authUsed {
-			return "", true, E("auth_recovery_exhausted", "authentication recovery was already attempted for this inference", 401)
-		}
 		if a.RetryNotBefore.IsZero() {
 			return "", authUsed, E("session_corrupt", "rejected inference has no durable recovery time", 503)
 		}
 	}
 	// Both the result journal and the conversation must acknowledge the refusal
 	// before any replacement inference can start. A failed write only pauses it.
+	if a.AdmissionPending {
+		recorder, ok := x.(RecoveryAdmission)
+		if !ok {
+			return "", authUsed, E("store_unavailable", "refusal cooldown persistence is unavailable", 503)
+		}
+		if err = recorder.PersistRejection(persistCtx, *a); err != nil {
+			return "", authUsed, err
+		}
+		a.AdmissionPending = false
+	}
 	if err = e.journal(persistCtx, s, a); err != nil {
 		return "", authUsed, err
 	}
@@ -92,6 +96,14 @@ func (e *Engine) prepareRecovery(ctx, persistCtx context.Context, s *Session, ra
 	}
 	if err = e.save(persistCtx, s, raw); err != nil {
 		return "", authUsed, err
+	}
+	// Even a final refused attempt must persist its shared gate. Exhaustion
+	// does not let other sessions bypass an admission write outage.
+	if count >= maxInferenceAttempts {
+		return "", authUsed, E("recovery_exhausted", "explicit provider rejection recovery limit reached", 503)
+	}
+	if kind == RejectionAuth && authUsed {
+		return "", true, E("auth_recovery_exhausted", "authentication recovery was already attempted for this inference", 401)
 	}
 	if err = e.waitRecovery(ctx, s, a.RetryNotBefore); err != nil {
 		return "", authUsed, err

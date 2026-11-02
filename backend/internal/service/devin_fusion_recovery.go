@@ -48,7 +48,7 @@ func (x *devinFusionExecutor) recordFusionRejection(ctx context.Context, call fu
 	// recovery journal or admission gate, even though it shares the executor.
 	if x.attemptPrefix != "context" {
 		if err := x.service.devin.noteFusionRejection(cleanup, x.account, call.Request.Model, r); err != nil {
-			return nil, err
+			return r, err
 		}
 	}
 	if r.Kind == fusion.RejectionRateLimit {
@@ -60,4 +60,16 @@ func (x *devinFusionExecutor) recordFusionRejection(ctx context.Context, call fu
 		}
 	}
 	return r, nil
+}
+
+func (x *devinFusionExecutor) PersistRejection(ctx context.Context, attempt fusion.Attempt) error {
+	if attempt.Rejection == nil || attempt.RetryNotBefore.IsZero() {
+		return fusion.E("session_corrupt", "pending refusal has no durable cooldown", 503)
+	}
+	r := *attempt.Rejection
+	r.RetryAfter = time.Until(attempt.RetryNotBefore)
+	if r.RetryAfter < 0 {
+		r.RetryAfter = 0
+	}
+	return x.service.devin.noteFusionRejection(ctx, x.account, attempt.Model, &r)
 }

@@ -100,3 +100,9 @@ jobs:
       - run: python -m unittest discover -s .github/release-tools -p 'test_release_matrix.py'
       - run: bash -n .github/release-tools/release-images.sh
       - run: make test-devin-acceptance
+      - name: Fusion client probe and ledger tests (offline)
+        run: python3 -m unittest discover -s tools/fusion-eval -p 'test_*.py'
+      - name: Fusion OMP session adapter contract tests (offline)
+        run: |
+          npm install --prefix "$RUNNER_TEMP/fusion-test-runtime" --ignore-scripts --no-audit --no-fund @oven/bun-linux-x64@1.4.4
+          "$RUNNER_TEMP/fusion-test-runtime/node_modules/@oven/bun-linux-x64/bin/bun" test tools/fusion-eval/omp-fusion-session.test.ts

@@ -4,10 +4,12 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +21,77 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type interruptedFusionAdmissionStore struct {
+	fusion.AtomicStore
+	fail bool
+}
+
+func (s *interruptedFusionAdmissionStore) CompareAndSwap(ctx context.Context, key string, old, next []byte, ttl time.Duration) (bool, error) {
+	if s.fail && strings.HasPrefix(key, "devin:fusion:admission:") {
+		return false, errors.New("synthetic admission write outage")
+	}
+	return s.AtomicStore.CompareAndSwap(ctx, key, old, next, ttl)
+}
+
+func TestFusionGatewayAdmissionWriteFailurePausesDurableRefusal(t *testing.T) {
+	for _, phase := range []string{"prepare", "chat"} {
+		t.Run(phase, func(t *testing.T) {
+			f := newWarmFixture(t)
+			_, request := fusionRecoveryGateway(t, f)
+			store := &interruptedFusionAdmissionStore{AtomicStore: f.engine.Store, fail: true}
+			f.service.devin.store = store
+			upstream := f.service.devin.upstream.(*devinHTTP)
+			original := upstream.handle
+			refused, successful := false, 0
+			rejection := func() *http.Response {
+				r := devinReply(429, []byte(`{"code":"resource_exhausted"}`))
+				r.Header.Set("Retry-After", "1")
+				return r
+			}
+			upstream.handle = func(r *http.Request) (*http.Response, error) {
+				if phase == "prepare" && r.URL.Path == devin.UserJWTPath && !refused {
+					refused = true
+					return rejection(), nil
+				}
+				return original(r)
+			}
+			f.chat = func(_ *http.Request, wire *pb.GetChatMessageRequest) (*http.Response, error) {
+				if phase == "chat" && !refused {
+					refused = true
+					return rejection(), nil
+				}
+				successful++
+				return fusionRecoveryToolReply(wire.ChatModelUid, successful), nil
+			}
+			_, err := request()
+			require.ErrorContains(t, err, "store_unavailable")
+			scope := fusion.Scope(f.keys.key.UserID, f.keys.key.ID)
+			session, _, err := f.engine.Load(context.Background(), scope, "recovery-session")
+			require.NoError(t, err)
+			require.Equal(t, fusion.RunningLead, session.State)
+			require.Len(t, session.Attempts, 1)
+			anchor := session.Attempts[0].RetryNotBefore
+			require.True(t, session.Attempts[0].AdmissionPending)
+			require.NotNil(t, session.Attempts[0].Rejection)
+			before := f.calls.Load()
+			_, err = request()
+			require.ErrorContains(t, err, "store_unavailable")
+			require.Equal(t, before, f.calls.Load(), "no resend while the shared refusal cannot be persisted")
+			store.fail = false
+			w, err := request()
+			require.NoError(t, err, w.Body.String())
+			require.False(t, time.Now().Before(anchor))
+			session, _, err = f.engine.Load(context.Background(), scope, "recovery-session")
+			require.NoError(t, err)
+			require.Len(t, session.Attempts, 3)
+			require.Equal(t, session.Attempts[0].ID, session.Attempts[1].RetryOf)
+			require.Equal(t, anchor, session.Attempts[0].RetryNotBefore)
+			require.False(t, session.Attempts[0].AdmissionPending)
+			require.Len(t, f.bills.commands, 2)
+		})
+	}
+}
 
 type fusionRecoveryAccountRepo struct {
 	*fusionAccountRepo
