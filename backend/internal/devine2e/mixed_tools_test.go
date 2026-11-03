@@ -149,6 +149,7 @@ func TestDevinFusionMixedToolsPublicResponses(t *testing.T) {
 	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), DB: a.redisDB})
 	t.Cleanup(func() { _ = rdb.Close() })
 	engine := fusion.New(devin.NewRedisSessionStore(rdb))
+	cache := fusion.NewCacheKeepaliveController(devin.NewRedisSessionStore(rdb))
 	session := "mixed-" + randomID()
 	load := func() *fusion.Session {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -207,6 +208,18 @@ func TestDevinFusionMixedToolsPublicResponses(t *testing.T) {
 		require.Equal(t, 1, s.Turn)
 		require.Equal(t, started, s.TurnStarted)
 		require.Equal(t, id, s.Pending.InternalID)
+		if id == "lead-read" || s.Pending.Role == fusion.Sidekick {
+			state, _, err := cache.Load(context.Background(), fusion.Scope(createdUser.Get("id").Int(), keyID), session)
+			require.NoError(t, err)
+			require.NotNil(t, state.Snapshot, "public ingress must retain the actual Lead candidate for queued handoffs")
+			require.NotNil(t, state.Snapshot.Request)
+			if s.Pending.Role == fusion.Lead {
+				require.Equal(t, "NO_SNAPSHOT", state.State)
+			} else {
+				require.Equal(t, "ARMED", state.State)
+				require.Equal(t, s.Handoffs[len(s.Handoffs)-1].ID, state.WindowID)
+			}
+		}
 		call := response.Get("output.0")
 		require.Equal(t, "function_call", call.Get("type").String())
 		require.NotEqual(t, fusion.DelegateTool, call.Get("name").String())

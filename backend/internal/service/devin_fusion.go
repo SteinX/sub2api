@@ -316,7 +316,10 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 		}
 		binding.Profile = &session.Profile
 		if session.Role == fusion.Lead && engine.Cache != nil {
-			_ = engine.Cache.Stop(ctx, session, "foreground_requested")
+			// A Lead tool result can start a queued handoff without another
+			// Lead inference. Preserve that candidate; the engine fences warming
+			// immediately before it actually dispatches a Lead generation.
+			_ = engine.Cache.Observe(ctx, session)
 		}
 	}
 	c.Request = c.Request.WithContext(context.WithValue(ctx, devinFusionBindingKey{}, binding))
