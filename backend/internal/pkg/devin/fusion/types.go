@@ -184,8 +184,10 @@ type Session struct {
 	Contexts        map[Role]*RoleContext          `json:"contexts,omitempty"`
 	Maintenance     MaintenanceStats               `json:"maintenance,omitempty"`
 
-	TurnDelegationReminders int           `json:"turn_delegation_reminders,omitempty"`
-	QueuedTools             []PendingTool `json:"queued_tools,omitempty"`
+	TurnDelegationReminders int `json:"turn_delegation_reminders,omitempty"`
+	// Remaining emitted calls, including private delegations; child-role calls
+	// precede the suspended Lead tail. Only Pending is exposed to the client.
+	QueuedTools []PendingTool `json:"queued_tools,omitempty"`
 }
 
 func (s *Session) Lane(role Role) *[]apicompat.ResponsesInputItem {

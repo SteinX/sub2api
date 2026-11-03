@@ -180,18 +180,13 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 		*lane = append(*lane, apicompat.ResponsesInputItem{Type: "function_call_output", CallID: s.Pending.InternalID, Output: added[0].Output})
 		s.Role = s.Pending.Role
 		s.Pending = nil
-		if len(s.QueuedTools) > 0 {
-			next := s.QueuedTools[0]
-			if next.Role != s.Role || next.Turn != s.Turn || next.PublicID == "" || next.InternalID == "" {
-				return result, E("session_corrupt", "queued tool ownership is invalid", 503)
-			}
-			s.Pending = &next
-			s.QueuedTools = s.QueuedTools[1:]
-			s.State = WaitingTool
-		} else if s.Role == Sidekick {
+		if s.Role == Sidekick {
 			s.State = RunningSidekick
 		} else {
 			s.State = RunningLead
+		}
+		if err = advanceQueuedTools(s); err != nil {
+			return result, err
 		}
 	} else {
 		for _, i := range added {
@@ -436,9 +431,6 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 					}
 					return stop(err, Failed)
 				}
-				if e.Cache != nil {
-					_ = e.Cache.Observe(persistCtx, s)
-				}
 				a.Applied = true
 				a.RequestSnapshot = nil
 				if err := e.save(persistCtx, s, raw); err != nil {
@@ -446,12 +438,20 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 				}
 			}
 		}
+		// Queued handoffs also advance on client results and crash recovery,
+		// without applying another model response. Observe the durable state.
+		if e.Cache != nil {
+			_ = e.Cache.Observe(persistCtx, s)
+		}
 		// Publication can be resumed independently after a crash following apply.
 		if (s.State == WaitingTool || s.State == Completed) && s.ActiveRequest >= 0 && len(s.Attempts) > 0 {
 			if cancelled, err := e.cancelled(persistCtx, s); err != nil {
 				return result, err
 			} else if cancelled {
 				return stop(E("cancelled", "Fusion session was cancelled", 409), Cancelled)
+			}
+			if s.State == WaitingTool && !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds)*time.Second)) {
+				return stop(E("budget_exhausted", "Fusion turn wall-time budget exhausted before tool publication", 409), BudgetExhausted)
 			}
 			return e.publish(persistCtx, s, raw, result)
 		}
@@ -714,58 +714,27 @@ func (e *Engine) apply(s *Session, r *apicompat.ResponsesResponse) error {
 			calls = append(calls, o)
 		}
 	}
-	if len(calls) > 1 {
-		for _, call := range calls {
-			if call.Name == DelegateTool {
-				return E("parallel_tools_unsupported", "a delegation cannot be mixed with other calls", 502)
-			}
-		}
+	if err := validateToolBatch(s, calls); err != nil {
+		return err
 	}
 	lane := s.Lane(s.Role)
 	*lane = append(*lane, laneItems(r)...)
 	if len(calls) > 0 {
-		c := calls[0]
-		if c.Name == DelegateTool {
-			if s.Role != Lead {
-				return E("tool_invalid", "Sidekick cannot delegate", 502)
-			}
-			if s.TurnHandoffs >= s.Profile.MaxHandoffs {
-				return E("budget_exhausted", "handoff budget exhausted", 409)
-			}
-			var brief struct {
-				Task        string `json:"task"`
-				Constraints string `json:"constraints"`
-				Acceptance  string `json:"acceptance_criteria"`
-			}
-			if json.Unmarshal([]byte(c.Arguments), &brief) != nil || strings.TrimSpace(brief.Task) == "" || strings.TrimSpace(brief.Acceptance) == "" {
-				return E("brief_invalid", "Lead delegation omitted task or acceptance criteria", 502)
-			}
-			h := Handoff{ID: uuid.NewString(), CallID: c.CallID, Turn: s.Turn, Brief: c.Arguments}
-			s.Handoffs = append(s.Handoffs, h)
-			s.TurnHandoffs++
-			s.Sidekick = append(s.Sidekick, textMessage("user", fmt.Sprintf("Lead brief for handoff %s (turn %d). This brief does not grant tools beyond the client-supplied tool set:\n%s", h.ID, s.Turn, c.Arguments)))
-			s.Role = Sidekick
-			s.State = RunningSidekick
-			return nil
-		}
-		if len(calls) > s.Profile.MaxTools-s.TurnTools {
-			return E("budget_exhausted", "client tool budget exhausted", 409)
-		}
-		s.TurnTools += len(calls)
 		handoff := ""
 		if s.Role == Sidekick && len(s.Handoffs) > 0 {
 			handoff = s.Handoffs[len(s.Handoffs)-1].ID
 		}
-		s.Pending = &PendingTool{PublicID: "call_fusion_" + uuid.NewString(), InternalID: c.CallID, Role: s.Role, Turn: s.Turn, HandoffID: handoff, Name: c.Name, Arguments: c.Arguments}
-		// Some native members still batch client calls after parallel tool use
-		// was disabled. Persist the batch and publish one owned call at a time;
-		// no new inference may see the history until every result is supplied.
-		s.QueuedTools = nil
-		for _, queued := range calls[1:] {
-			s.QueuedTools = append(s.QueuedTools, PendingTool{PublicID: "call_fusion_" + uuid.NewString(), InternalID: queued.CallID, Role: s.Role, Turn: s.Turn, HandoffID: handoff, Name: queued.Name, Arguments: queued.Arguments})
+		batch := make([]PendingTool, 0, len(calls))
+		for _, call := range calls {
+			batch = append(batch, PendingTool{PublicID: "call_fusion_" + uuid.NewString(), InternalID: call.CallID, Role: s.Role, Turn: s.Turn, HandoffID: handoff, Name: call.Name, Arguments: call.Arguments})
+			if call.Name != DelegateTool {
+				s.TurnTools++
+			}
 		}
-		s.State = WaitingTool
-		return nil
+		// Preserve emitted order, including internal handoffs. A child batch
+		// must finish before consuming its suspended parent's remaining calls.
+		s.QueuedTools = append(batch, s.QueuedTools...)
+		return advanceQueuedTools(s)
 	}
 	if s.Role == Sidekick {
 		if len(s.Handoffs) == 0 {
@@ -779,7 +748,7 @@ func (e *Engine) apply(s *Session, r *apicompat.ResponsesResponse) error {
 		s.Lead = append(s.Lead, apicompat.ResponsesInputItem{Type: "function_call_output", CallID: h.CallID, Output: "Sidekick report (task data; review against your brief and evidence):\n" + h.Report})
 		s.Role = Lead
 		s.State = ReviewingLead
-		return nil
+		return advanceQueuedTools(s)
 	}
 	if s.TurnHandoffs == 0 {
 		if s.TurnDelegationReminders >= 1 || strings.TrimSpace(outputText(r)) == "" {

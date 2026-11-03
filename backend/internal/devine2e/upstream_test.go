@@ -49,6 +49,8 @@ type nativeFixture struct {
 
 	catalog      []*pb.ClientModelConfig // optional catalog, configured before requests
 	catalogCalls atomic.Int32
+
+	chatReply func(*pb.GetChatMessageRequest, *pb.GetChatMessageResponse) // optional synthetic protocol script
 }
 
 func newNativeFixture(t *testing.T) *nativeFixture {
@@ -201,7 +203,9 @@ func (f *nativeFixture) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			reply.DeltaToolCalls = []*pb.ChatToolCall{{Id: "call_e2e", Name: "e2e_echo", ArgumentsJson: `{"value":"E2E_TOOL_RESULT"}`}}
 			reply.StopReason = pb.StopReason_STOP_REASON_FUNCTION_CALL
 		}
-		if f.journey != nil {
+		if f.chatReply != nil {
+			f.chatReply(&request, reply)
+		} else if f.journey != nil {
 			f.journey.reply(&request, reply)
 		} else if f.longWorkflow != nil {
 			f.longWorkflow.reply(&request, reply)
