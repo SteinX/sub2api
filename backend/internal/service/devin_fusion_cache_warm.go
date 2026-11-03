@@ -382,7 +382,7 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 		billingModel = snapshot.Model
 	}
 	x.pricing.pinModel(billingModel)
-	result.Outcome = fusion.Outcome{Response: &d.Response, BillingModel: billingModel, PricingSnapshot: x.pricing.marshal()}
+	result.Outcome = fusion.Outcome{Response: &d.Response, UsageFinal: err == nil && d.Response.Usage != nil, BillingModel: billingModel, PricingSnapshot: x.pricing.marshal()}
 	if err != nil {
 		var upstream *devin.Error
 		if errors.As(err, &upstream) && !executionObserved {
@@ -395,10 +395,10 @@ func (a *devinCacheWarmAdapter) Refresh(ctx context.Context, snapshot fusion.Cac
 		x.holdUnsettled[id] = true
 	}
 	// A clean Connect trailer is terminal even when a provider omits stop_reason.
-	// Broken streams without a known terminal stop keep their monetary reserve.
+	// A native stop does not prove the final accounting frame arrived when the
+	// transport broke. Keep that attempt's monetary reserve without replaying it.
 	u := d.Response.Usage
-	knownStop := stop != pb.StopReason_STOP_REASON_UNSPECIFIED && stop != pb.StopReason_STOP_REASON_PARTIAL && stop != pb.StopReason_STOP_REASON_INCOMPLETE
-	result.UsageUncertain = u != nil && (u.InputTokens <= 0 || !knownStop && err != nil)
+	result.UsageUncertain = u != nil && (u.InputTokens <= 0 || !result.Outcome.UsageFinal)
 	result.DiscardedOutput = visible
 	complete := stop != pb.StopReason_STOP_REASON_PARTIAL && stop != pb.StopReason_STOP_REASON_INCOMPLETE && stop != pb.StopReason_STOP_REASON_ERROR && stop != pb.StopReason_STOP_REASON_CONTENT_FILTER && stop != pb.StopReason_STOP_REASON_NONFINITE_LOGIT_OR_PROB
 	compatible := complete && !mismatch && u != nil && u.InputTokens > 0 && u.OutputTokens >= 0 && u.OutputTokens <= warmOutputTokens(snapshot.Model) && billingModel == snapshot.Model

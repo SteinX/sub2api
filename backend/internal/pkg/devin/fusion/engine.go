@@ -262,6 +262,12 @@ func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte
 	if a == nil {
 		return nil, nil
 	}
+	if a.Status == "completed" && !a.Settled && a.Response != nil && a.Response.Usage != nil && !apicompat.HasFinalUsage(a.Response, a.UsageFinal) {
+		a.Status = "unknown"
+		if err := e.journal(ctx, s, a); err != nil {
+			return a, err
+		}
+	}
 	if a.Applied {
 		if a.Status != previousStatus {
 			return nil, e.save(ctx, s, raw)
@@ -631,6 +637,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		release()
 		a := &s.Attempts[len(s.Attempts)-1]
 		a.Response = outcome.Response
+		a.UsageFinal = &outcome.UsageFinal
 		a.BillingModel = outcome.BillingModel
 		a.NotStarted = outcome.NotStarted && (outcome.Response == nil || outcome.Response.Usage == nil && len(outcome.Response.Output) == 0)
 		a.Rejection = acceptedRejection(outcome, runErr)
@@ -639,9 +646,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			a.RetryNotBefore = e.now().Add(a.Rejection.RetryAfter)
 		}
 		a.PricingSnapshot = outcome.PricingSnapshot
-		if outcome.Response != nil && outcome.Response.Usage != nil {
+		if apicompat.HasFinalUsage(a.Response, a.UsageFinal) {
 			a.Status = "completed"
-		} else if outcome.KnownFailure {
+		} else if outcome.KnownFailure && !outcome.hasExecutionEvidence() {
 			a.Status = "completed"
 			a.Settled = true
 		} else {

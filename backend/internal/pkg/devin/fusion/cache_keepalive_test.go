@@ -116,7 +116,7 @@ func cacheFixture(t *testing.T) (*Engine, *Session, *CacheKeepaliveController, *
 	s.Profile.Keepalive = &KeepalivePolicy{Enabled: true, IntervalSeconds: 10, MaxWindowSeconds: 100, MaxAttempts: 3, MaxCostUSD: 1, TimeoutSeconds: 5}
 	s.ProfileRevision = s.Profile.Revision()
 	require.NoError(t, e.save(context.Background(), s, &raw))
-	f := &refreshFake{supported: true, result: RefreshResult{RequestSucceeded: true, CacheConfirmed: true, Outcome: Outcome{Response: &apicompat.ResponsesResponse{Status: "completed", Usage: &apicompat.ResponsesUsage{InputTokens: 40, OutputTokens: 0, TotalTokens: 40}}, BillingModel: s.Profile.LeadModel}}}
+	f := &refreshFake{supported: true, result: RefreshResult{RequestSucceeded: true, CacheConfirmed: true, Outcome: Outcome{UsageFinal: true, Response: &apicompat.ResponsesResponse{Status: "completed", Usage: &apicompat.ResponsesUsage{InputTokens: 40, OutputTokens: 0, TotalTokens: 40}}, BillingModel: s.Profile.LeadModel}}}
 	c := NewCacheKeepaliveController(e.Store)
 	c.Now = clock.Now
 	c.Adapter = f

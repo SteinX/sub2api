@@ -603,7 +603,7 @@ func TestFusionSummaryUsageSettlesWithoutHTTPAndHasSeparatePurpose(t *testing.T)
 	bills := &fusionBillingRepo{}
 	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(logs, bills, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
 	x := &devinFusionExecutor{service: svc, account: &Account{ID: 7, Platform: PlatformDevin}, key: &APIKey{ID: 2, UserID: 1, User: &User{ID: 1}}, profile: fusionTestProfile(), sessionID: "session", publicModel: "fusion-team", inboundEndpoint: "/v1/responses", userAgent: "test-client", ipAddress: "127.0.0.1", reservations: map[string]*InflightReservation{}}
-	a := fusion.Attempt{ID: "summary-independent-attempt", Purpose: fusion.Compaction, Role: fusion.Sidekick, Model: x.profile.SidekickModel, BillingModel: x.profile.SidekickModel, StartedAt: time.Now(), Response: &apicompat.ResponsesResponse{Model: x.profile.SidekickModel, Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 20}}}
+	a := fusion.Attempt{ID: "summary-independent-attempt", Purpose: fusion.Compaction, Role: fusion.Sidekick, Model: x.profile.SidekickModel, BillingModel: x.profile.SidekickModel, StartedAt: time.Now(), Response: &apicompat.ResponsesResponse{Status: "completed", Model: x.profile.SidekickModel, Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 20}}}
 	ctx := context.WithValue(context.Background(), ctxkey.ClientRequestID, "same-outer-id")
 	first, err := x.Settle(ctx, a)
 	require.NoError(t, err)
@@ -651,7 +651,7 @@ func TestFusionPendingSummaryReservationSurvivesHTTPAndReleasesOnRecovery(t *tes
 	require.Equal(t, 1, cache.count())
 	recovery := *x
 	recovery.reservations = map[string]*InflightReservation{}
-	a := fusion.Attempt{ID: "summary-held", Purpose: fusion.Compaction, Role: fusion.Sidekick, Model: x.profile.SidekickModel, BillingModel: x.profile.SidekickModel, EstimateUSD: 1, StartedAt: time.Now(), Response: &apicompat.ResponsesResponse{Model: x.profile.SidekickModel, Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 10}}}
+	a := fusion.Attempt{ID: "summary-held", Purpose: fusion.Compaction, Role: fusion.Sidekick, Model: x.profile.SidekickModel, BillingModel: x.profile.SidekickModel, EstimateUSD: 1, StartedAt: time.Now(), Response: &apicompat.ResponsesResponse{Status: "completed", Model: x.profile.SidekickModel, Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 10}}}
 	_, err = recovery.Settle(context.Background(), a)
 	require.NoError(t, err)
 	require.Zero(t, cache.count())

@@ -54,29 +54,29 @@ func (x *closingExecutor) Execute(_ context.Context, c Call) (Outcome, error) {
 			x.summaries = map[Role]int{}
 		}
 		x.summaries[c.Role]++
-		return Outcome{Response: summaryResponse()}, nil
+		return Outcome{UsageFinal: true, Response: summaryResponse()}, nil
 	}
 	if string(c.Request.ToolChoice) == `"none"` {
 		require.Empty(x.t, c.Request.Tools)
 		require.Equal(x.t, "none", wire.ToolChoice.GetOptionName())
 		if x.violate {
-			return Outcome{Response: tool("forbidden-new-work", "read_file", `{}`)}, nil
+			return Outcome{UsageFinal: true, Response: tool("forbidden-new-work", "read_file", `{}`)}, nil
 		}
 		if c.Role == Sidekick {
-			return Outcome{Response: textResponse("Partial Sidekick report: evidence retained; implementation and tests are unfinished")}, nil
+			return Outcome{UsageFinal: true, Response: textResponse("Partial Sidekick report: evidence retained; implementation and tests are unfinished")}, nil
 		}
 		require.Contains(x.t, string(c.Request.Input), "Partial Sidekick report")
-		return Outcome{Response: textResponse("Reviewed actual Sidekick evidence: work remains unfinished; no passing tests claimed")}, nil
+		return Outcome{UsageFinal: true, Response: textResponse("Reviewed actual Sidekick evidence: work remains unfinished; no passing tests claimed")}, nil
 	}
 	if c.Role == Lead {
 		x.leads++
 		if x.leads == 4 {
-			return Outcome{Response: delegation("original-brief")}, nil
+			return Outcome{UsageFinal: true, Response: delegation("original-brief")}, nil
 		}
-		return Outcome{Response: tool(fmt.Sprintf("lead-%d", x.leads), "read_file", `{}`)}, nil
+		return Outcome{UsageFinal: true, Response: tool(fmt.Sprintf("lead-%d", x.leads), "read_file", `{}`)}, nil
 	}
 	x.workers++
-	return Outcome{Response: tool(fmt.Sprintf("worker-%d", x.workers), "read_file", `{}`)}, nil
+	return Outcome{UsageFinal: true, Response: tool(fmt.Sprintf("worker-%d", x.workers), "read_file", `{}`)}, nil
 }
 func (x *closingExecutor) Settle(_ context.Context, a Attempt) (float64, error) {
 	if x.failReportSettle && a.ClosingPhase == closingReport {

@@ -97,7 +97,7 @@ func TestFusionJournaledRefusalRestoresAdmissionBeforeRecovery(t *testing.T) {
 					return outcome, err
 				}
 				require.Len(t, x.persisted, 1, "a journal-restored cooldown must be durable before any replacement")
-				return Outcome{Response: tool("read", "read_file", `{}`), BillingModel: c.Request.Model}, nil
+				return Outcome{UsageFinal: true, Response: tool("read", "read_file", `{}`), BillingModel: c.Request.Model}, nil
 			}
 			in := input(testRequest("task"))
 			_, err := New(store).Advance(context.Background(), in, x)
@@ -138,7 +138,7 @@ func TestFusionAuthRecoveryRetainsRejectedTokenFingerprintAcrossRestart(t *testi
 		}
 		require.Equal(t, RejectionAuth, c.RecoveryKind)
 		require.Equal(t, fingerprint, c.RejectedTokenFingerprint)
-		return Outcome{Response: tool("read", "read_file", `{}`), BillingModel: c.Request.Model}, nil
+		return Outcome{UsageFinal: true, Response: tool("read", "read_file", `{}`), BillingModel: c.Request.Model}, nil
 	}
 	in := input(testRequest("task"))
 	_, err := New(store).Advance(ctx, in, x)
@@ -190,11 +190,11 @@ func TestFusionExplicitRejectionsHaveIndependentBoundedAttempts(t *testing.T) {
 		case 2:
 			return refused(RejectionAuth, 0)
 		case 3:
-			return Outcome{Response: delegation("delegate"), BillingModel: c.Request.Model}, nil
+			return Outcome{UsageFinal: true, Response: delegation("delegate"), BillingModel: c.Request.Model}, nil
 		case 4:
-			return Outcome{Response: textResponse("Sidekick report"), BillingModel: c.Request.Model}, nil
+			return Outcome{UsageFinal: true, Response: textResponse("Sidekick report"), BillingModel: c.Request.Model}, nil
 		default:
-			return Outcome{Response: textResponse("Reviewed answer"), BillingModel: c.Request.Model}, nil
+			return Outcome{UsageFinal: true, Response: textResponse("Reviewed answer"), BillingModel: c.Request.Model}, nil
 		}
 	}
 	in := input(testRequest("fix the issue"))
@@ -273,7 +273,7 @@ func TestFusionRejectionLimitsAndRequestBudget(t *testing.T) {
 			if len(x.calls) <= 2 {
 				return refused(RejectionRateLimit, 0)
 			}
-			return Outcome{Response: delegation("delegate"), BillingModel: c.Request.Model}, nil
+			return Outcome{UsageFinal: true, Response: delegation("delegate"), BillingModel: c.Request.Model}, nil
 		}
 		in := input(testRequest("task"))
 		in.Profile.MaxRequests = 3
@@ -294,8 +294,8 @@ func TestFusionAmbiguousOrObservedOutcomesNeverAuthorizeRecovery(t *testing.T) {
 		{"metadata without terminal rejection", Outcome{Rejection: &Rejection{Kind: RejectionAuth, NotExecuted: true}}, Uncertain},
 		{"not known unexecuted", Outcome{KnownFailure: true, Rejection: &Rejection{Kind: RejectionAuth}}, Failed},
 		{"invalid wait", Outcome{KnownFailure: true, Rejection: &Rejection{Kind: RejectionRateLimit, NotExecuted: true, RetryAfter: -time.Second}}, Failed},
-		{"zero usage is still observed", Outcome{KnownFailure: true, Rejection: &Rejection{Kind: RejectionRateLimit, NotExecuted: true}, Response: &apicompat.ResponsesResponse{Usage: &apicompat.ResponsesUsage{}}}, Failed},
-		{"partial tool", Outcome{KnownFailure: true, Rejection: &Rejection{Kind: RejectionModelCapacity, NotExecuted: true}, Response: &apicompat.ResponsesResponse{Output: []apicompat.ResponsesOutput{{Type: "function_call", CallID: "partial", Name: "edit_file", Arguments: `{`}}}}, Failed},
+		{"zero usage is still observed", Outcome{KnownFailure: true, Rejection: &Rejection{Kind: RejectionRateLimit, NotExecuted: true}, Response: &apicompat.ResponsesResponse{Usage: &apicompat.ResponsesUsage{}}}, Uncertain},
+		{"partial tool", Outcome{KnownFailure: true, Rejection: &Rejection{Kind: RejectionModelCapacity, NotExecuted: true}, Response: &apicompat.ResponsesResponse{Output: []apicompat.ResponsesOutput{{Type: "function_call", CallID: "partial", Name: "edit_file", Arguments: `{`}}}}, Uncertain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newMemoryStore()
@@ -474,7 +474,7 @@ func TestFusionNotStartedClaimCannotDiscardObservedUsageOnCancellation(t *testin
 	ctx, cancel := context.WithCancel(context.Background())
 	x := &scriptExecutor{t: t, execute: func(c Call) (Outcome, error) {
 		cancel()
-		return Outcome{Response: textResponse("partial"), BillingModel: c.Request.Model, NotStarted: true, ClientDisconnected: true}, context.Canceled
+		return Outcome{UsageFinal: true, Response: textResponse("partial"), BillingModel: c.Request.Model, NotStarted: true, ClientDisconnected: true}, context.Canceled
 	}}
 	in := input(testRequest("task"))
 	_, err := New(store).Advance(ctx, in, x)
@@ -568,7 +568,7 @@ func TestFusionInterruptedRecoveryAdmissionPersistenceNeverResetsAuthentication(
 				default:
 					require.Empty(t, c.RecoveryKind)
 					require.True(t, c.AuthRecoveryUsed)
-					return Outcome{Response: tool("read", "read_file", `{}`), BillingModel: c.Request.Model}, nil
+					return Outcome{UsageFinal: true, Response: tool("read", "read_file", `{}`), BillingModel: c.Request.Model}, nil
 				}
 			}
 			in := input(testRequest("task"))

@@ -372,6 +372,13 @@ func (e *Engine) settle(ctx context.Context, a *Attempt, r *Record, x Executor) 
 	if a.State != "terminal" || a.Settled {
 		return nil
 	}
+	if a.Usage != nil && !apicompat.HasFinalUsage(&apicompat.ResponsesResponse{Status: a.ResponseStatus, Usage: a.Usage}, a.UsageFinal) {
+		a.State = "unknown"
+		if err := e.save(ctx, r, a, a.State, nil, nil, nil); err != nil {
+			return err
+		}
+		return E("attempt_uncertain", "provider usage is not final; this attempt will not be replayed", 409)
+	}
 	if x == nil {
 		return E("billing_pending", "settlement executor is unavailable", 503)
 	}
@@ -482,6 +489,7 @@ func (e *Engine) executeCall(ctx context.Context, a *Attempt, ar *Record, call C
 		return nil, nil, err
 	}
 	outcome, executeErr := x.Execute(ctx, call)
+	a.UsageFinal = &outcome.UsageFinal
 	a.BillingModel = outcome.BillingModel
 	a.PricingSnapshot = outcome.PricingSnapshot
 	if a.BillingModel == "" {
@@ -494,14 +502,14 @@ func (e *Engine) executeCall(ctx context.Context, a *Attempt, ar *Record, call C
 		a.ResponseID = outcome.Response.ID
 		a.ResponseModel = outcome.Response.Model
 		a.ResponseStatus = outcome.Response.Status
-		if a.Usage != nil {
+		if apicompat.HasFinalUsage(outcome.Response, a.UsageFinal) {
 			a.State = "terminal"
 		}
 		b, _ := json.Marshal(outcome.Response)
 		a.ResponseRef = "result_" + a.ID
 		blobs = []Blob{{ID: a.ResponseRef, SessionID: a.SessionID, Visibility: "private", Kind: "provider_result", Data: b, ExpiresAt: ar.ExpiresAt}}
 	}
-	if outcome.KnownFailure && a.Usage == nil {
+	if outcome.KnownFailure && (outcome.Response == nil || outcome.Response.Usage == nil && len(outcome.Response.Output) == 0) {
 		a.State = "terminal"
 		a.Settled = true
 	}

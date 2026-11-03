@@ -163,6 +163,7 @@ type Attempt struct {
 	StartedAt        time.Time                    `json:"started_at"`
 	Status           string                       `json:"status"` // started, completed, unknown
 	Response         *apicompat.ResponsesResponse `json:"response,omitempty"`
+	UsageFinal       *bool                        `json:"usage_final,omitempty"`
 	Settled          bool                         `json:"settled"`
 	Applied          bool                         `json:"applied"`
 	CostUSD          float64                      `json:"cost_usd"`
@@ -292,7 +293,10 @@ type Rejection struct {
 }
 
 type Outcome struct {
-	Response        *apicompat.ResponsesResponse
+	Response *apicompat.ResponsesResponse
+	// UsageFinal proves accounting completed, even if output validation failed.
+	// Observing a usage frame or native stop alone does not establish this.
+	UsageFinal      bool
 	BillingModel    string
 	PricingSnapshot json.RawMessage
 	// KnownFailure means a terminal provider outcome was observed; ambiguous
@@ -302,6 +306,10 @@ type Outcome struct {
 	ClientDisconnected bool
 	Rejection          *Rejection
 	AdmissionPending   bool
+}
+
+func (o Outcome) hasExecutionEvidence() bool {
+	return o.Response != nil && (o.Response.Usage != nil || len(o.Response.Output) > 0)
 }
 
 // RecoveryAdmission persists a refused call's shared cooldown before retrying.

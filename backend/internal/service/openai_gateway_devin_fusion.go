@@ -217,7 +217,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 		if !fusionRecovery {
 			event, component = "devin.context_attempt", "audit.devin.context"
 		}
-		logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("retry_of", call.RetryOf), zap.String("model", devin.DiagnosticModelID(call.Request.Model)), zap.Bool("generation_sent", generationSent), zap.Bool("usage_observed", usageObserved), zap.String("failure_kind", devinFusionFailureKind(err)), zap.Int("tool_calls", toolCalls), zap.Int("invalid_tool_arguments", invalidArguments))
+		logger.FromContext(ctx).Info(event, zap.String("component", component), zap.Int64("account_id", x.account.ID), zap.String("role", string(call.Role)), zap.String("purpose", string(call.Purpose)), zap.String("attempt_id", call.AttemptID), zap.String("retry_of", call.RetryOf), zap.String("model", devin.DiagnosticModelID(call.Request.Model)), zap.Bool("generation_sent", generationSent), zap.Bool("usage_observed", usageObserved), zap.Bool("usage_final", outcome.UsageFinal), zap.String("failure_kind", devinFusionFailureKind(err)), zap.Int("tool_calls", toolCalls), zap.Int("invalid_tool_arguments", invalidArguments))
 	}()
 	if fusionRecovery {
 		if err := s.devin.waitFusionAdmission(ctx, x.account, call.Request.Model, call.Purpose, x.checkFusionCancellation); err != nil {
@@ -308,6 +308,10 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	}
 	generationSent = true
 	err = consumeDevinFusionChat(ctx, x.c, x.client, prepared.BaseURL, token, wire, decoder, x.stream, &x.clientDisconnected)
+	// Capture clean transport completion before Finish validates the content.
+	// Refusals/malformed output can still have final, billable usage; a timeout
+	// can expose cumulative usage without a final accounting receipt.
+	usageFinal := err == nil && decoder.Response.Usage != nil
 	if err == nil {
 		err = decoder.Finish()
 	}
@@ -321,7 +325,7 @@ func (x *devinFusionExecutor) Execute(ctx context.Context, call fusion.Call) (ou
 	if decoder.ActualModel != "" && decoder.ActualModel != wire.ChatModelUid || len(decoder.Evidence.ActualModels) > 1 {
 		err = fusion.E("route_mismatch", "upstream execution model differs from the pinned Fusion member", 502)
 	}
-	outcome = fusion.Outcome{Response: &decoder.Response, BillingModel: billingModel, ClientDisconnected: x.clientDisconnected, PricingSnapshot: x.pricing.marshal()}
+	outcome = fusion.Outcome{Response: &decoder.Response, UsageFinal: usageFinal, BillingModel: billingModel, ClientDisconnected: x.clientDisconnected, PricingSnapshot: x.pricing.marshal()}
 	usageObserved = decoder.Response.Usage != nil
 	for _, item := range decoder.Response.Output {
 		if item.Type == "function_call" {
@@ -392,6 +396,9 @@ func devinFusionFailureKind(err error) string {
 func (x *devinFusionExecutor) Settle(ctx context.Context, a fusion.Attempt) (float64, error) {
 	if a.Response == nil || a.Response.Usage == nil {
 		return 0, nil
+	}
+	if !apicompat.HasFinalUsage(a.Response, a.UsageFinal) {
+		return 0, fusion.E("billing_pending", "provider usage is not final; the original attempt must not be replayed", 503)
 	}
 	// Legacy receipts have no evidence of their historical account promotion.
 	// Keep their existing configured/default pricing; today's FREE tier cannot

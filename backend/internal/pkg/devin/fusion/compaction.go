@@ -58,6 +58,44 @@ func (e *Engine) writeCompaction(ctx context.Context, s *Session, r *compactionR
 	}
 	return nil
 }
+
+func sameCompactionJob(a, b CompactionJob) bool {
+	return a.ID == b.ID && a.Role == b.Role && a.Turn == b.Turn && a.Epoch == b.Epoch &&
+		a.ProfileRevision == b.ProfileRevision && a.PrefixCount == b.PrefixCount &&
+		a.PrefixDigest == b.PrefixDigest && a.Policy == b.Policy && a.EstimateUSD == b.EstimateUSD &&
+		a.CreatedAt.Equal(b.CreatedAt) && a.Deadline.Equal(b.Deadline)
+}
+
+// Recovery can mark a dispatched summary unknown while its original worker is
+// receiving a late final receipt. Refresh only that same attempt's revision;
+// never bill an outcome whose durable receipt was lost to a CAS conflict.
+func (e *Engine) saveObservedCompaction(ctx context.Context, s *Session, r *compactionRecord, old []byte) error {
+	for tries := 0; tries < 3; tries++ {
+		err := e.writeCompaction(ctx, s, r, old)
+		if err == nil {
+			return nil
+		}
+		latest, current, readErr := e.readCompaction(ctx, s, &r.Job)
+		if readErr != nil || string(current) == string(old) {
+			return errors.Join(err, readErr)
+		}
+		if !sameCompactionJob(latest.Job, r.Job) || latest.Attempt.ID != r.Attempt.ID || latest.Attempt.Role != r.Attempt.Role || latest.Attempt.Turn != r.Attempt.Turn || latest.Attempt.Model != r.Attempt.Model || !latest.Attempt.StartedAt.Equal(r.Attempt.StartedAt) || latest.Attempt.EstimateUSD != r.Attempt.EstimateUSD {
+			return E("session_corrupt", "compaction attempt identity changed", 503)
+		}
+		if latest.Attempt.Status == "completed" {
+			if r.Attempt.Status != "completed" || !r.Attempt.Settled || latest.Attempt.Settled {
+				*r = *latest
+				return nil
+			}
+			latest.Attempt.Settled, latest.Attempt.CostUSD = true, r.Attempt.CostUSD
+			*r = *latest
+		} else if latest.Attempt.Status != "unknown" && latest.Attempt.Status != "started" {
+			return err
+		}
+		old = current
+	}
+	return E("revision_conflict", "compaction receipt changed during recovery", 409)
+}
 func contextSize(x Executor, req *apicompat.ResponsesRequest, p Profile) (int, int, error) {
 	var measure contextcompact.MeasureRequest
 	if m, ok := x.(ContextMeasurer); ok {
@@ -116,12 +154,13 @@ func (e *Engine) performCompaction(ctx context.Context, s *Session, r *compactio
 	call := Call{AttemptID: r.Attempt.ID, Purpose: Compaction, Role: r.Job.Role, Request: r.Request, LaneScope: s.LaneScope(r.Job.Role) + ":summary:" + r.Job.ID, PricingAt: r.Attempt.StartedAt, EstimateUSD: r.Attempt.EstimateUSD}
 	outcome, err := x.Execute(ctx, call)
 	r.Attempt.Response = outcome.Response
+	r.Attempt.UsageFinal = &outcome.UsageFinal
 	r.Attempt.BillingModel = outcome.BillingModel
 	r.Attempt.PricingSnapshot = outcome.PricingSnapshot
 	r.Request = nil
-	if outcome.Response != nil && outcome.Response.Usage != nil {
+	if apicompat.HasFinalUsage(r.Attempt.Response, r.Attempt.UsageFinal) {
 		r.Attempt.Status = "completed"
-	} else if outcome.KnownFailure {
+	} else if outcome.KnownFailure && !outcome.hasExecutionEvidence() {
 		r.Attempt.Status = "completed"
 		r.Attempt.Settled = true
 	} else {
@@ -144,10 +183,7 @@ func (e *Engine) performCompaction(ctx context.Context, s *Session, r *compactio
 	// journal without issuing another summary request.
 	persist, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	if e.writeCompaction(persist, s, r, old) != nil {
-		if r.Attempt.Status == "completed" && !r.Attempt.Settled {
-			_, _ = x.Settle(persist, r.Attempt)
-		}
+	if e.saveObservedCompaction(persist, s, r, old) != nil {
 		return
 	}
 	old, _ = json.Marshal(r)
@@ -156,8 +192,9 @@ func (e *Engine) performCompaction(ctx context.Context, s *Session, r *compactio
 		if billErr == nil && validCost(cost) {
 			r.Attempt.CostUSD = cost
 			r.Attempt.Settled = true
-			_ = e.writeCompaction(persist, s, r, old)
-			_ = e.settleBudget(persist, s, r.Attempt)
+			if e.saveObservedCompaction(persist, s, r, old) == nil {
+				_ = e.settleBudget(persist, s, r.Attempt)
+			}
 		}
 	}
 }
@@ -194,6 +231,12 @@ func (e *Engine) collectCompactions(ctx context.Context, s *Session, raw *[]byte
 				return err
 			}
 			old, _ = json.Marshal(r)
+		}
+		if r.Attempt.Status == "completed" && !r.Attempt.Settled && r.Attempt.Response != nil && r.Attempt.Response.Usage != nil && !apicompat.HasFinalUsage(r.Attempt.Response, r.Attempt.UsageFinal) {
+			r.Attempt.Status, r.Job.State = "unknown", "unknown"
+			if err = e.writeCompaction(ctx, s, r, old); err != nil {
+				return err
+			}
 		}
 		if r.Attempt.Status == "unknown" {
 			pendingErr = errors.Join(pendingErr, E("compaction_uncertain", "summary provider outcome is unknown; no inference will be automatically replayed", 409))
@@ -483,8 +526,16 @@ func (e *Engine) awaitCompaction(ctx context.Context, s *Session, j *CompactionJ
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		if bounded.Err() != nil {
+			// The caller collects the original job into unknown after its child
+			// deadline. Do not mask an unconfirmed provider outcome as a 413.
+			return ctx.Err()
+		}
 		r, _, err := e.readCompaction(bounded, s, j)
 		if err != nil {
+			if bounded.Err() != nil {
+				return ctx.Err()
+			}
 			return err
 		}
 		if r.Attempt.Status != "started" && r.Attempt.Status != "prepared" {
@@ -492,7 +543,7 @@ func (e *Engine) awaitCompaction(ctx context.Context, s *Session, j *CompactionJ
 		}
 		select {
 		case <-bounded.Done():
-			return E("context_limit", "summary was not ready before the hard context deadline", 413)
+			return ctx.Err()
 		case <-ticker.C:
 		}
 	}

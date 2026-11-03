@@ -108,7 +108,7 @@ func (x *scriptExecutor) Execute(_ context.Context, c Call) (Outcome, error) {
 	require.NotEmpty(x.t, x.responses)
 	r := x.responses[0]
 	x.responses = x.responses[1:]
-	return Outcome{Response: r, BillingModel: c.Request.Model}, nil
+	return Outcome{UsageFinal: true, Response: r, BillingModel: c.Request.Model}, nil
 }
 func (x *scriptExecutor) Settle(_ context.Context, a Attempt) (float64, error) {
 	if x.failSettle {
@@ -403,7 +403,7 @@ func TestFusionDisconnectStopsBeforeNextRoleAndCanResume(t *testing.T) {
 	x := &scriptExecutor{t: t}
 	x.execute = func(c Call) (Outcome, error) {
 		cancel()
-		return Outcome{Response: delegation("d"), BillingModel: c.Request.Model}, nil
+		return Outcome{UsageFinal: true, Response: delegation("d"), BillingModel: c.Request.Model}, nil
 	}
 	in := input(testRequest("task"))
 	_, err := engine.Advance(ctx, in, x)
@@ -476,7 +476,7 @@ func TestFusionWriteDisconnectStopsRoleScheduling(t *testing.T) {
 	store := newMemoryStore()
 	e := New(store)
 	x := &scriptExecutor{t: t, execute: func(c Call) (Outcome, error) {
-		return Outcome{Response: delegation("d"), BillingModel: c.Request.Model, ClientDisconnected: true}, nil
+		return Outcome{UsageFinal: true, Response: delegation("d"), BillingModel: c.Request.Model, ClientDisconnected: true}, nil
 	}}
 	in := input(testRequest("task"))
 	_, err := e.Advance(context.Background(), in, x)
