@@ -426,15 +426,39 @@ func (e *Engine) prepareCompaction(ctx context.Context, s *Session, raw *[]byte,
 	}()
 	// The summary's own request must fit. Shrink only the selected completed
 	// prefix, never individual messages or required active handoff constraints.
-	cut := safeSummaryPrefix(s, role, s.Profile.MaxContextBytes/2)
+	prefix := func(limit int) int {
+		if background {
+			return safeSummaryPrefix(s, role, limit)
+		}
+		// At the hard gate, a fixed six-item tail can retain nearly the
+		// entire history. Keep the newest item and its enclosing complete
+		// call/result group; PlanPrefix never cuts an open group.
+		return contextcompact.PlanPrefix(*s.Lane(role), contextcompact.PrefixPolicy{RetainItems: 1, MinItems: 2, MaxBytes: limit})
+	}
+	limit := s.Profile.MaxContextBytes / 2
+	if !background {
+		// The raw prefix's byte count is not the summary wire size. The
+		// concrete request measurement below is the authoritative send gate.
+		limit = s.Profile.MaxContextBytes
+	}
+	cut := prefix(limit)
 	var req *apicompat.ResponsesRequest
 	for cut > 0 {
+		if !background && ctx.Err() != nil {
+			return false, ctx.Err()
+		}
 		req = summaryRequest(s, role, base, cut)
 		size, safe, err := contextSize(child, req, s.Profile)
 		if err == nil && size <= safe {
 			break
 		}
-		cut = safeSummaryPrefix(s, role, cutBytes((*s.Lane(role))[:cut])/2)
+		if background {
+			cut = prefix(cutBytes((*s.Lane(role))[:cut]) / 2)
+		} else {
+			// Walk completed boundaries rather than halving: halving can skip
+			// the largest sendable prefix and leave an unnecessarily large tail.
+			cut = contextcompact.PlanPrefix((*s.Lane(role))[:cut], contextcompact.PrefixPolicy{RetainItems: 1, MinItems: 2, MaxBytes: limit})
+		}
 	}
 	if cut == 0 {
 		return false, nil
