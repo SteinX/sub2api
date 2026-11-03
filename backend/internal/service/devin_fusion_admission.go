@@ -44,7 +44,13 @@ func (s *DevinService) waitFusionAdmission(ctx context.Context, account *Account
 		}
 		var until time.Time
 		for _, key := range fusionAdmissionKeys(account, model) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			raw, err := s.store.Get(ctx, key)
+			if cancelled := ctx.Err(); cancelled != nil {
+				return cancelled
+			}
 			if errors.Is(err, devin.ErrSessionNotFound) {
 				continue
 			}
@@ -60,7 +66,7 @@ func (s *DevinService) waitFusionAdmission(ctx context.Context, account *Account
 			}
 		}
 		if !until.After(time.Now()) {
-			return nil
+			return ctx.Err()
 		}
 		if !purpose.IsInference() {
 			return fusion.E("admission_deferred", "background Fusion maintenance skipped during upstream cooldown", 429)
