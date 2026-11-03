@@ -46,7 +46,22 @@ compose=("${docker_cli[@]}" compose -p "$project" -f "$repo_dir/deploy/docker-co
 export DEVIN_E2E_DB_PASSWORD DEVIN_E2E_REDIS_PASSWORD
 DEVIN_E2E_DB_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
 DEVIN_E2E_REDIS_PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')"
+# Keep mock client identities outside the Go test process: its package timeout
+# aborts without running testing.Cleanup. The shell must retain the same scoped
+# identity proofs so its EXIT trap can reap clients even after that abort.
+if [ "$mode" = mock ] && [ "${DEVIN_JOURNEY_SUITE:-false}" = true ]; then
+  journey_cleanup_dir="$(mktemp -d "$DEVIN_E2E_ARTIFACTS/.journey-cleanup-XXXXXX")"
+  export DEVIN_JOURNEY_PROCESS_REGISTRY="$journey_cleanup_dir/processes.jsonl"
+  export DEVIN_JOURNEY_CONTAINER_REGISTRY="$journey_cleanup_dir/containers.jsonl"
+  touch "$DEVIN_JOURNEY_PROCESS_REGISTRY" "$DEVIN_JOURNEY_CONTAINER_REGISTRY"
+fi
 cleanup() {
+  local run_exit_code=$?
+  if [ -n "${journey_cleanup_dir:-}" ]; then
+    if ! python3 "$repo_dir/tools/devin-e2e-clients/process_cleanup.py" "$DEVIN_JOURNEY_PROCESS_REGISTRY"; then
+      run_exit_code=1
+    fi
+  fi
   if [ -f "$DEVIN_E2E_ARTIFACTS/server.pid" ]; then
     read -r backend_pid < "$DEVIN_E2E_ARTIFACTS/server.pid" || true
     if [[ "${backend_pid:-}" =~ ^[0-9]+$ ]] && [ "$(readlink "/proc/$backend_pid/exe" 2>/dev/null || true)" = "$DEVIN_E2E_BINARY" ]; then
@@ -54,6 +69,7 @@ cleanup() {
     fi
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+  exit "$run_exit_code"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
