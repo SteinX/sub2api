@@ -128,6 +128,10 @@ func TestContextGatewayPreservesNativeFinalUsageEvidence(t *testing.T) {
 			f := newWarmFixture(t)
 			model := f.session.Profile.LeadModel
 			f.keys.key.User.Status = StatusActive
+			groupID := int64(9)
+			f.keys.key.GroupID = &groupID
+			f.keys.key.Group = &Group{ID: groupID, Platform: PlatformDevin, RateMultiplier: 1}
+			f.account.GroupIDs = []int64{groupID}
 			f.account.Extra[DevinContextEnabledExtra] = true
 			f.service.cfg.Gateway.DevinContext.Enabled = true
 			f.service.cfg.Gateway.DevinContext.APIKeyIDs = []int64{f.keys.key.ID}
@@ -153,7 +157,9 @@ func TestContextGatewayPreservesNativeFinalUsageEvidence(t *testing.T) {
 				_, err := f.service.RunContext(c, f.keys.key, keys, body, "responses", "", 0, 0)
 				return err
 			}
-			require.Error(t, request())
+			firstErr := request()
+			require.Error(t, firstErr)
+			require.EqualValues(t, 1, f.calls.Load(), "managed request must reach the provider: %v", firstErr)
 			var attempts []mc.Attempt
 			for _, record := range store.records {
 				if record.Kind == "attempt" {
