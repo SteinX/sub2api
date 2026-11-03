@@ -685,6 +685,12 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		}
 		wallExpired := !e.now().Before(deadline)
 		if a.NotStarted && (ctx.Err() != nil || wallExpired) {
+			// Even a known-unsent admission can leave existing optional workers
+			// armed. Fence them before journal/store failures can return early.
+			e.Runner.Cancel(s.Scope, s.ID)
+			if e.Cache != nil {
+				_ = e.Cache.Stop(persistCtx, s, "client_disconnected")
+			}
 			a.Status = "completed"
 			a.Settled = true
 			a.Applied = true
@@ -696,9 +702,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			cause := ctx.Err()
 			if wallExpired {
 				cause = context.DeadlineExceeded
-				if journalErr == nil && budgetErr == nil && saveErr == nil {
-					return interrupted(cause)
-				}
+			}
+			if journalErr == nil && budgetErr == nil && saveErr == nil {
+				return interrupted(cause)
 			}
 			return result, errors.Join(cause, journalErr, budgetErr, saveErr)
 		}
