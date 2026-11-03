@@ -11,6 +11,17 @@ import (
 
 const devinFusionOMPSessionHeader = "X-Litellm-Session-Id"
 
+func devinFusionClosingPolicy(c *gin.Context) (string, error) {
+	values := c.Request.Header.Values(fusion.HeaderClosingPolicy)
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) != 1 || values[0] != fusion.ClosingReserveV1 {
+		return "", fusion.E("closing_policy_invalid", "send one reserve-v1 closing policy or omit the header", 400)
+	}
+	return values[0], nil
+}
+
 // devinFusionRequestSessionID adopts runtime client identity only after the
 // caller has established Fusion intent. Ordinary routing keeps its own rules.
 func devinFusionRequestSessionID(c *gin.Context) (string, error) {

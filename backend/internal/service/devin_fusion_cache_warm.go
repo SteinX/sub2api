@@ -195,6 +195,11 @@ func (a *devinCacheWarmAdapter) executor(ctx context.Context, snapshot fusion.Ca
 		accountCopy := *account
 		account = &accountCopy
 		p := devinFusionProfile(account, profile.PublicModel)
+		if p != nil {
+			// Closing policy is a pinned session opt-in, not an account override.
+			// Compare every account-owned field without losing that session fence.
+			p.ClosingPolicy = profile.ClosingPolicy
+		}
 		if !a.Supports(snapshot) || !key.IsActive() || key.IsExpired() || key.IsQuotaExhausted() || !key.User.IsActive() || !account.IsSchedulable() || p == nil || p.Revision() != snapshot.ProfileRevision || !p.KeepalivePolicy().Enabled || s.devin.runtimeKey(ctx, account) != snapshot.RouteIdentity {
 			return nil, fusion.E("refresh_unavailable", "cache refresh authorization or route changed", 409)
 		}

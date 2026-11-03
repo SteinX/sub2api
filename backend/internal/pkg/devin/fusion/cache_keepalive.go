@@ -265,6 +265,9 @@ func (c *CacheKeepaliveController) Stop(ctx context.Context, s *Session, reason 
 	})
 }
 func activeSidekick(s *Session) bool {
+	if s.isClosing() {
+		return false
+	}
 	if len(s.Handoffs) == 0 || s.Handoffs[len(s.Handoffs)-1].Turn != s.Turn || s.Handoffs[len(s.Handoffs)-1].Report != "" {
 		return false
 	}

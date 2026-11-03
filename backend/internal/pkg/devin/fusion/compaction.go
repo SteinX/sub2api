@@ -331,6 +331,15 @@ func (e *Engine) applyCompaction(ctx context.Context, s *Session, raw *[]byte, r
 }
 
 func (e *Engine) prepareCompaction(ctx context.Context, s *Session, raw *[]byte, base *apicompat.ResponsesRequest, x Executor, background bool) (bool, error) {
+	if s.isClosing() {
+		if background {
+			return false, nil
+		}
+		lead, worker := closingCalls(s, 0)
+		if s.Profile.MaxRequests-s.TurnRequests <= lead+worker {
+			return false, E("budget_exhausted", "hard summary would consume reserved report/review request capacity", 409)
+		}
+	}
 	role := s.Role
 	c := s.roleContext(role)
 	p := s.Profile.CompactPolicy()
