@@ -431,15 +431,17 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 					}
 					return stop(err, Failed)
 				}
-				if e.Cache != nil {
-					_ = e.Cache.Observe(persistCtx, s)
-				}
 				a.Applied = true
 				a.RequestSnapshot = nil
 				if err := e.save(persistCtx, s, raw); err != nil {
 					return result, err
 				}
 			}
+		}
+		// Queued handoffs also advance on client results and crash recovery,
+		// without applying another model response. Observe the durable state.
+		if e.Cache != nil {
+			_ = e.Cache.Observe(persistCtx, s)
 		}
 		// Publication can be resumed independently after a crash following apply.
 		if (s.State == WaitingTool || s.State == Completed) && s.ActiveRequest >= 0 && len(s.Attempts) > 0 {

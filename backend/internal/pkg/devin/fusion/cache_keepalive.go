@@ -325,7 +325,28 @@ func (c *CacheKeepaliveController) Capture(ctx context.Context, s *Session, requ
 	})
 }
 
-// Observe preserves a Lead snapshot/epoch/due time across Sidekick-only progress.
+// pauseQueuedHandoff fences old workers while retaining the immutable Lead
+// candidate needed by a queued delegation. Per-turn spend and journals survive.
+func (c *CacheKeepaliveController) pauseQueuedHandoff(ctx context.Context, s *Session) error {
+	c.Scheduler.Forget(s.Scope, s.ID)
+	c.mu.Lock()
+	if cancel := c.cancels[cacheKey(s.Scope, s.ID)]; cancel != nil {
+		cancel()
+	}
+	c.mu.Unlock()
+	return c.update(ctx, s, func(state *CacheControl) {
+		if state.Snapshot == nil || state.State != "ARMED" && state.State != "IN_FLIGHT" {
+			return // Never revive disabled, exhausted or uncertain controls.
+		}
+		state.Epoch++
+		state.State = "NO_SNAPSHOT"
+		state.StopReason = "queued_handoff"
+		state.InFlightID = ""
+	})
+}
+
+// Observe preserves a Lead snapshot/epoch/due time across Sidekick-only progress,
+// and fences a new window when the same emitted batch starts another handoff.
 func (c *CacheKeepaliveController) Observe(ctx context.Context, s *Session) error {
 	if c == nil {
 		return nil
@@ -334,7 +355,23 @@ func (c *CacheKeepaliveController) Observe(ctx context.Context, s *Session) erro
 		return err
 	}
 	if !activeSidekick(s) {
+		if s.State == WaitingTool && s.Pending != nil && s.Pending.Role == Lead {
+			for _, call := range s.QueuedTools {
+				if call.Role == Lead && call.Turn == s.Turn && call.Name == DelegateTool {
+					return c.pauseQueuedHandoff(ctx, s)
+				}
+			}
+		}
 		return c.Stop(ctx, s, "no_active_handoff")
+	}
+	state, _, err := c.Load(ctx, s.Scope, s.ID)
+	if err != nil {
+		return err
+	}
+	if state.WindowID != s.Handoffs[len(s.Handoffs)-1].ID && (state.State == "ARMED" || state.State == "IN_FLIGHT") {
+		if err := c.pauseQueuedHandoff(ctx, s); err != nil {
+			return err
+		}
 	}
 	defer c.schedule(ctx, s)
 	return c.update(ctx, s, func(state *CacheControl) {
