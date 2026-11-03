@@ -468,6 +468,9 @@ func (s *OpenAIGatewayService) forwardDevinFusion(ctx context.Context, c *gin.Co
 	} else if binding.ClosingPolicy != "" {
 		p.ClosingPolicy = binding.ClosingPolicy
 	}
+	if err = p.Validate(); err != nil {
+		return fail(err)
+	}
 	models, err := s.devin.Models(ctx, a)
 	if err != nil {
 		return fail(fusion.E("catalog_unavailable", "could not verify Fusion model grants", 503))

@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 
@@ -74,4 +75,30 @@ func TestDevinFusionClosingCannotBeConfiguredAccountWide(t *testing.T) {
 	require.ErrorContains(t, ValidateDevinFusionExtra(PlatformDevin, f.account.Extra), "closing_policy is session-scoped")
 	require.Nil(t, devinFusionProfile(f.account, f.session.PublicModel))
 	require.Zero(t, f.calls.Load())
+}
+
+func TestDevinFusionClosingSmallBudgetRejectedBeforeNativeInference(t *testing.T) {
+	for _, limit := range []int{3, 4} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			f := newWarmFixture(t)
+			p := *devinFusionProfile(f.account, f.session.PublicModel)
+			p.MaxRequests = limit
+			f.account.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+			body := fusionProtocolBody("responses", false, "")
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+			c.Request.Header.Set(fusion.HeaderSession, fmt.Sprintf("new-closing-small-%d", limit))
+			c.Request.Header.Set(fusion.HeaderClosingPolicy, fusion.ClosingReserveV1)
+			c.Set("api_key", f.keys.key)
+			_, err := f.service.BindDevinFusionRequest(c, f.keys.key, p.PublicModel, body, "responses", f.keys)
+			require.NoError(t, err)
+			_, err = f.service.forwardDevin(c.Request.Context(), c, f.account, body, "responses", "unused", "")
+			require.ErrorContains(t, err, "closing_policy_invalid")
+			require.Equal(t, 400, w.Code)
+			require.Zero(t, f.calls.Load())
+			require.Empty(t, f.bills.commands)
+			require.Equal(t, limit, devinFusionProfile(f.account, p.PublicModel).MaxRequests)
+		})
+	}
 }

@@ -62,6 +62,15 @@ func (p Profile) Validate() error {
 	if err := p.CompactPolicy().Validate(); err != nil {
 		return err
 	}
+	if p.ClosingPolicy != "" {
+		minimum := 3 // Initial delegation, actual Sidekick report and Lead review.
+		if p.CompactPolicy().Enabled {
+			minimum += 2 // One possible hard summary for each reporting role.
+		}
+		if p.MaxRequests < minimum {
+			return E("closing_policy_invalid", fmt.Sprintf("reserve-v1 requires at least %d counted requests for delegation, report, review and the configured summary reserve", minimum), 400)
+		}
+	}
 	return p.KeepalivePolicy().Validate()
 }
 func (p Profile) Revision() string {

@@ -65,15 +65,18 @@ func (e *Engine) Advance(ctx context.Context, in Input, executor Executor) (*Res
 		return nil, err
 	}
 	if fresh {
+		if in.ClosingPolicy != "" {
+			in.Profile.ClosingPolicy = in.ClosingPolicy
+			if err := in.Profile.Validate(); err != nil {
+				return nil, err
+			}
+		}
 		seen, err := e.index(ctx, in.Scope, "seen", in.SessionID)
 		if err != nil {
 			return nil, err
 		}
 		if seen != "" {
 			return nil, E("session_expired", "Fusion session expired; use a new session ID", 410)
-		}
-		if in.ClosingPolicy != "" {
-			in.Profile.ClosingPolicy = in.ClosingPolicy
 		}
 		s = &Session{ID: in.SessionID, Scope: in.Scope, AccountID: in.AccountID, Profile: in.Profile, ProfileRevision: in.Profile.Revision(), PublicModel: in.Request.Model, ExpiresAt: e.now().Add(time.Duration(in.Profile.TTLSeconds) * time.Second), Contract: contractID, Role: Lead, State: Completed, ActiveRequest: -1}
 		if err = e.putIndex(ctx, s, "seen", s.ID); err != nil {
