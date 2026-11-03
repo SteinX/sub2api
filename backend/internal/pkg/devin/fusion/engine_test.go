@@ -293,11 +293,12 @@ func TestFusionBudgetContextToolAndContractBoundaries(t *testing.T) {
 		{"undeclared tool", func(i *Input, x *scriptExecutor) {
 			x.responses = []*apicompat.ResponsesResponse{delegation("d"), tool("bad", "shell_not_supplied", `{}`)}
 		}, "tool_invalid"},
-		{"mixed delegation", func(i *Input, x *scriptExecutor) {
+		{"mixed invalid delegation", func(i *Input, x *scriptExecutor) {
 			r := delegation("d")
+			r.Output[0].Arguments = `{"task":"missing acceptance criteria"}`
 			r.Output = append(r.Output, tool("b", "edit_file", `{}`).Output...)
 			x.responses = []*apicompat.ResponsesResponse{r}
-		}, "parallel_tools_unsupported"},
+		}, "brief_invalid"},
 		{"no delegation", func(i *Input, x *scriptExecutor) {
 			x.responses = []*apicompat.ResponsesResponse{textResponse("unreviewed draft"), textResponse("pretend done")}
 		}, "delegation_required"},
