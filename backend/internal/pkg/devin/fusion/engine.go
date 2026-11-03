@@ -377,6 +377,12 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		// outcome, without extending the original execution deadline.
 		cleanup, release := context.WithTimeout(persistCtx, 30*time.Second)
 		defer release()
+		// Fencing cannot depend on successful collection: a billing/store
+		// outage must not leave optional workers armed after interruption.
+		e.Runner.Cancel(s.Scope, s.ID)
+		if e.Cache != nil {
+			_ = e.Cache.Stop(cleanup, s, "client_disconnected")
+		}
 		if err := e.collectCompactions(cleanup, s, raw, x); err != nil {
 			var typed *Error
 			if errors.As(err, &typed) && typed.Code == "devin_fusion_compaction_uncertain" {
@@ -386,10 +392,6 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		}
 		if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
 			return stop(E("budget_exhausted", "Fusion turn wall-time budget exhausted", 409), BudgetExhausted)
-		}
-		e.Runner.Cancel(s.Scope, s.ID)
-		if e.Cache != nil {
-			_ = e.Cache.Stop(cleanup, s, "client_disconnected")
 		}
 		if err := e.save(cleanup, s, raw); err != nil {
 			return result, err
