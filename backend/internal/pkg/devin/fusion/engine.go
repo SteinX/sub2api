@@ -542,6 +542,12 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		} else {
 			req, err = e.prepareRoleContext(ctx, s, raw, base, x)
 		}
+		// A child summary timer may fire before the foreground timer's cancel
+		// callback. Recheck the original wall budget after this blocking stage;
+		// never prepare another inference merely because ctx.Err is not set yet.
+		if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
+			return interrupted(context.DeadlineExceeded)
+		}
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return interrupted(err)
@@ -599,6 +605,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			continue
 		}
 		estimate, err := x.Estimate(ctx, call)
+		if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
+			return interrupted(context.DeadlineExceeded)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				continue
@@ -674,7 +683,8 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		} else {
 			a.Status = "unknown"
 		}
-		if a.NotStarted && ctx.Err() != nil {
+		wallExpired := !e.now().Before(deadline)
+		if a.NotStarted && (ctx.Err() != nil || wallExpired) {
 			a.Status = "completed"
 			a.Settled = true
 			a.Applied = true
@@ -683,7 +693,14 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			journalErr := e.journal(persistCtx, s, a)
 			budgetErr := e.settleBudget(persistCtx, s, *a)
 			saveErr := e.save(persistCtx, s, raw)
-			return result, errors.Join(ctx.Err(), journalErr, budgetErr, saveErr)
+			cause := ctx.Err()
+			if wallExpired {
+				cause = context.DeadlineExceeded
+				if journalErr == nil && budgetErr == nil && saveErr == nil {
+					return interrupted(cause)
+				}
+			}
+			return result, errors.Join(cause, journalErr, budgetErr, saveErr)
 		}
 		if runErr != nil {
 			a.Failure = "upstream_failed"

@@ -2,6 +2,7 @@ package fusion
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -21,6 +22,93 @@ type awaitDeadlineStore struct {
 	waited    bool
 	onAwait   func()
 	onExpired func() error
+}
+
+// The timer callback need not have delivered ctx cancellation when wall time
+// passes inside an executor boundary. The engine clock supplies that ordering
+// without sleeps or any provider generation.
+type wallExpiryExecutor struct {
+	awaitExecutor
+	engine        *Engine
+	stage         string
+	started       time.Time
+	estimateCalls int
+}
+
+func (x *wallExpiryExecutor) Estimate(ctx context.Context, call Call) (float64, error) {
+	x.estimateCalls++
+	s, _, err := x.engine.Load(ctx, Scope(1, 2), "chat-one")
+	if err != nil {
+		return 0, err
+	}
+	x.started = s.TurnStarted
+	if x.stage == "estimate" {
+		x.engine.Now = func() time.Time { return x.started.Add(901 * time.Second) }
+	}
+	return .1, nil
+}
+
+func (x *wallExpiryExecutor) Execute(ctx context.Context, call Call) (Outcome, error) {
+	x.entered++
+	x.engine.Now = func() time.Time { return x.started.Add(901 * time.Second) }
+	return Outcome{KnownFailure: true, NotStarted: true}, context.DeadlineExceeded
+}
+
+func TestFusionAdvanceWallExpiryAtExecutorBoundaries(t *testing.T) {
+	for _, stage := range []string{"estimate", "execute_not_sent"} {
+		t.Run(stage, func(t *testing.T) {
+			e := New(newMemoryStore())
+			x := &wallExpiryExecutor{engine: e, stage: stage}
+			in := input(testRequest("Keep the original task budget and deadline"))
+			in.Profile.MaxCostUSD = 5
+			in.IdempotencyKey = "original"
+			_, err := e.Advance(context.Background(), in, x)
+			requireCode(t, err, "budget_exhausted")
+			s, _, err := e.Load(context.Background(), in.Scope, in.SessionID)
+			require.NoError(t, err)
+			require.Equal(t, BudgetExhausted, s.State)
+			require.Equal(t, -1, s.ActiveRequest)
+			require.Equal(t, 1, s.Turn)
+			require.True(t, x.started.Equal(s.TurnStarted))
+			require.Equal(t, 900, s.Profile.MaxWallSeconds)
+			require.Equal(t, 5.0, s.Profile.MaxCostUSD)
+			require.Equal(t, 1, x.estimateCalls)
+			require.Empty(t, x.calls, "no provider generation occurred")
+			if stage == "estimate" {
+				require.Zero(t, x.entered)
+				require.Zero(t, s.TurnRequests)
+				require.Empty(t, s.Attempts)
+			} else {
+				require.Equal(t, 1, x.entered)
+				require.Equal(t, 1, s.TurnRequests, "preserve the already admitted request count")
+				require.Len(t, s.Attempts, 1)
+				a := s.Attempts[0]
+				require.True(t, a.NotStarted)
+				require.True(t, a.Settled)
+				require.True(t, a.Applied)
+				require.Zero(t, a.CostUSD)
+				b, err := e.Store.Get(context.Background(), budgetKey(s, s.Turn))
+				require.NoError(t, err)
+				var ledger turnBudget
+				require.NoError(t, json.Unmarshal(b, &ledger))
+				require.Len(t, ledger.Entries, 1)
+				require.Equal(t, budgetEntry{Purpose: Inference, Amount: 0, Settled: true}, ledger.Entries[a.ID])
+			}
+			for range 2 {
+				_, err = New(e.Store).ReconcileUsage(context.Background(), s.Scope, s.ID, x)
+				require.NoError(t, err)
+			}
+			_, err = New(e.Store).Advance(context.Background(), in, x)
+			requireCode(t, err, "session_stopped")
+			require.Zero(t, x.charged, "known no-send proof cannot create usage settlement")
+			require.Empty(t, x.settled)
+			require.Equal(t, 1, x.estimateCalls, "retry must not revive the original turn")
+			after, _, err := e.Load(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.Equal(t, s.TurnRequests, after.TurnRequests)
+			require.True(t, s.TurnStarted.Equal(after.TurnStarted))
+		})
+	}
 }
 
 func (s *awaitDeadlineStore) Get(ctx context.Context, key string) ([]byte, error) {
@@ -45,12 +133,14 @@ func (s *awaitDeadlineStore) Get(ctx context.Context, key string) ([]byte, error
 
 type awaitExecutor struct {
 	calls   []Call
+	entered int
 	settled map[string]bool
 	charged float64
 }
 
 func (x *awaitExecutor) Estimate(context.Context, Call) (float64, error) { return .1, nil }
 func (x *awaitExecutor) Execute(ctx context.Context, call Call) (Outcome, error) {
+	x.entered++
 	if err := ctx.Err(); err != nil {
 		return Outcome{KnownFailure: true, NotStarted: true}, err
 	}
@@ -76,6 +166,7 @@ func TestFusionAdvanceHardGateInterruptions(t *testing.T) {
 	for _, tc := range []struct {
 		name                                                 string
 		turnExpires, jobExpires, knownAtExpiry, cancelClient bool
+		wallBeforeParentTimer                                bool
 		wantState                                            string
 		canResume                                            bool
 	}{
@@ -85,6 +176,7 @@ func TestFusionAdvanceHardGateInterruptions(t *testing.T) {
 		{name: "parent_and_child_expired_unknown", jobExpires: true, wantState: Uncertain},
 		{name: "original_900s_expired_unknown", turnExpires: true, jobExpires: true, wantState: Uncertain},
 		{name: "original_900s_expired_known", turnExpires: true, jobExpires: true, knownAtExpiry: true, wantState: BudgetExhausted},
+		{name: "wall_expires_before_parent_timer", jobExpires: true, knownAtExpiry: true, wallBeforeParentTimer: true, wantState: BudgetExhausted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, s, raw, base := summarySession(t, Sidekick)
@@ -144,6 +236,8 @@ func TestFusionAdvanceHardGateInterruptions(t *testing.T) {
 			var cancel context.CancelFunc
 			if tc.turnExpires {
 				parent, cancel = context.WithCancel(parent)
+			} else if tc.wallBeforeParentTimer {
+				parent, cancel = context.WithCancel(parent)
 			} else if tc.cancelClient {
 				parent, cancel = context.WithCancel(parent)
 				store.onAwait = cancel
@@ -152,7 +246,14 @@ func TestFusionAdvanceHardGateInterruptions(t *testing.T) {
 			}
 			defer cancel()
 			if tc.knownAtExpiry {
-				store.onExpired = injectFinal
+				store.onExpired = func() error {
+					if tc.wallBeforeParentTimer {
+						// Advance the authoritative wall clock while the parent
+						// timer has not delivered cancellation yet.
+						e.Now = func() time.Time { return originalStart.Add(900*time.Second + time.Millisecond) }
+					}
+					return injectFinal()
+				}
 			}
 			x := &awaitExecutor{}
 			in := Input{Scope: s.Scope, SessionID: s.ID, AccountID: s.AccountID, Profile: s.Profile, Request: base, IdempotencyKey: "original"}
@@ -168,6 +269,7 @@ func TestFusionAdvanceHardGateInterruptions(t *testing.T) {
 			assert.True(t, originalStart.Equal(restored.TurnStarted))
 			assert.Equal(t, 1, restored.TurnRequests)
 			assert.Empty(t, x.calls, "interrupt must never start a new physical inference")
+			assert.Zero(t, x.entered, "expiry must stop before allocating or entering another attempt")
 			if tc.canResume {
 				assert.Equal(t, 0, restored.ActiveRequest)
 			} else {
