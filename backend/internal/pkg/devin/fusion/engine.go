@@ -262,6 +262,12 @@ func (e *Engine) reconcileInference(ctx context.Context, s *Session, raw *[]byte
 	if a == nil {
 		return nil, nil
 	}
+	if a.Status == "completed" && !a.Settled && a.Response != nil && a.Response.Usage != nil && !apicompat.HasFinalUsage(a.Response, a.UsageFinal) {
+		a.Status = "unknown"
+		if err := e.journal(ctx, s, a); err != nil {
+			return a, err
+		}
+	}
 	if a.Applied {
 		if a.Status != previousStatus {
 			return nil, e.save(ctx, s, raw)
@@ -364,6 +370,33 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			return result, saveErr
 		}
 		return result, err
+	}
+	interrupted := func(cause error) (*Result, error) {
+		// A cancelled foreground can still have a durable summary receipt (or
+		// an expired unknown attempt). Reconcile it before choosing the session
+		// outcome, without extending the original execution deadline.
+		cleanup, release := context.WithTimeout(persistCtx, 30*time.Second)
+		defer release()
+		// Fencing cannot depend on successful collection: a billing/store
+		// outage must not leave optional workers armed after interruption.
+		e.Runner.Cancel(s.Scope, s.ID)
+		if e.Cache != nil {
+			_ = e.Cache.Stop(cleanup, s, "client_disconnected")
+		}
+		if err := e.collectCompactions(cleanup, s, raw, x); err != nil {
+			var typed *Error
+			if errors.As(err, &typed) && typed.Code == "devin_fusion_compaction_uncertain" {
+				return stop(err, Uncertain)
+			}
+			return result, err
+		}
+		if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
+			return stop(E("budget_exhausted", "Fusion turn wall-time budget exhausted", 409), BudgetExhausted)
+		}
+		if err := e.save(cleanup, s, raw); err != nil {
+			return result, err
+		}
+		return result, cause
 	}
 	for {
 		result.State = s.State
@@ -493,17 +526,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			return stop(E("cancelled", "Fusion session was cancelled", 409), Cancelled)
 		}
 		if err := ctx.Err(); err != nil { // Drain already completed; do not start another role.
-			e.Runner.Cancel(s.Scope, s.ID)
-			if e.Cache != nil {
-				_ = e.Cache.Stop(persistCtx, s, "client_disconnected")
-			}
-			if saveErr := e.save(persistCtx, s, raw); saveErr != nil {
-				return result, saveErr
-			}
-			if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
-				return stop(E("budget_exhausted", "Fusion turn wall-time budget exhausted", 409), BudgetExhausted)
-			}
-			return result, err
+			return interrupted(err)
 		}
 		if s.TurnRequests >= s.Profile.MaxRequests || s.TurnCostUSD >= s.Profile.MaxCostUSD || e.now().Sub(s.TurnStarted) >= time.Duration(s.Profile.MaxWallSeconds)*time.Second {
 			return stop(E("budget_exhausted", "Fusion turn request, cost or wall-time budget exhausted", 409), BudgetExhausted)
@@ -519,7 +542,16 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		} else {
 			req, err = e.prepareRoleContext(ctx, s, raw, base, x)
 		}
+		// A child summary timer may fire before the foreground timer's cancel
+		// callback. Recheck the original wall budget after this blocking stage;
+		// never prepare another inference merely because ctx.Err is not set yet.
+		if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
+			return interrupted(context.DeadlineExceeded)
+		}
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return interrupted(err)
+			}
 			var typed *Error
 			if errors.As(err, &typed) {
 				if typed.Code == "devin_fusion_billing_pending" || typed.Code == "devin_fusion_compaction_pending" {
@@ -573,6 +605,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			continue
 		}
 		estimate, err := x.Estimate(ctx, call)
+		if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
+			return interrupted(context.DeadlineExceeded)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				continue
@@ -631,6 +666,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		release()
 		a := &s.Attempts[len(s.Attempts)-1]
 		a.Response = outcome.Response
+		a.UsageFinal = &outcome.UsageFinal
 		a.BillingModel = outcome.BillingModel
 		a.NotStarted = outcome.NotStarted && (outcome.Response == nil || outcome.Response.Usage == nil && len(outcome.Response.Output) == 0)
 		a.Rejection = acceptedRejection(outcome, runErr)
@@ -639,15 +675,22 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			a.RetryNotBefore = e.now().Add(a.Rejection.RetryAfter)
 		}
 		a.PricingSnapshot = outcome.PricingSnapshot
-		if outcome.Response != nil && outcome.Response.Usage != nil {
+		if apicompat.HasFinalUsage(a.Response, a.UsageFinal) {
 			a.Status = "completed"
-		} else if outcome.KnownFailure {
+		} else if outcome.KnownFailure && !outcome.hasExecutionEvidence() {
 			a.Status = "completed"
 			a.Settled = true
 		} else {
 			a.Status = "unknown"
 		}
-		if a.NotStarted && ctx.Err() != nil {
+		wallExpired := !e.now().Before(deadline)
+		if a.NotStarted && (ctx.Err() != nil || wallExpired) {
+			// Even a known-unsent admission can leave existing optional workers
+			// armed. Fence them before journal/store failures can return early.
+			e.Runner.Cancel(s.Scope, s.ID)
+			if e.Cache != nil {
+				_ = e.Cache.Stop(persistCtx, s, "client_disconnected")
+			}
 			a.Status = "completed"
 			a.Settled = true
 			a.Applied = true
@@ -656,7 +699,14 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			journalErr := e.journal(persistCtx, s, a)
 			budgetErr := e.settleBudget(persistCtx, s, *a)
 			saveErr := e.save(persistCtx, s, raw)
-			return result, errors.Join(ctx.Err(), journalErr, budgetErr, saveErr)
+			cause := ctx.Err()
+			if wallExpired {
+				cause = context.DeadlineExceeded
+			}
+			if journalErr == nil && budgetErr == nil && saveErr == nil {
+				return interrupted(cause)
+			}
+			return result, errors.Join(cause, journalErr, budgetErr, saveErr)
 		}
 		if runErr != nil {
 			a.Failure = "upstream_failed"

@@ -37,7 +37,7 @@ func (x *summaryExecutor) Execute(ctx context.Context, call Call) (Outcome, erro
 		case <-ctx.Done():
 		}
 	}
-	return Outcome{Response: x.response, BillingModel: call.Request.Model}, nil
+	return Outcome{UsageFinal: true, Response: x.response, BillingModel: call.Request.Model}, nil
 }
 func (x *summaryExecutor) Settle(_ context.Context, a Attempt) (float64, error) {
 	x.mu.Lock()
@@ -419,7 +419,7 @@ func (x *longFusionExecutor) MeasureContext(r *apicompat.ResponsesRequest) (int,
 func (x *longFusionExecutor) Execute(_ context.Context, c Call) (Outcome, error) {
 	if c.Purpose == Compaction {
 		x.summaries++
-		return Outcome{Response: summaryResponse(), BillingModel: c.Request.Model}, nil
+		return Outcome{UsageFinal: true, Response: summaryResponse(), BillingModel: c.Request.Model}, nil
 	}
 	x.normal++
 	if c.Role == Lead {
@@ -427,15 +427,15 @@ func (x *longFusionExecutor) Execute(_ context.Context, c Call) (Outcome, error)
 		if x.leadCalls <= 2 {
 			x.handoff++
 			x.tools = 0
-			return Outcome{Response: delegation(fmt.Sprintf("delegation-%d", x.handoff)), BillingModel: c.Request.Model}, nil
+			return Outcome{UsageFinal: true, Response: delegation(fmt.Sprintf("delegation-%d", x.handoff)), BillingModel: c.Request.Model}, nil
 		}
-		return Outcome{Response: textResponse("Final reviewed result"), BillingModel: c.Request.Model}, nil
+		return Outcome{UsageFinal: true, Response: textResponse("Final reviewed result"), BillingModel: c.Request.Model}, nil
 	}
 	if x.tools < 8 {
 		x.tools++
-		return Outcome{Response: tool(fmt.Sprintf("worker-%d-%d", x.handoff, x.tools), "read_file", `{}`), BillingModel: c.Request.Model}, nil
+		return Outcome{UsageFinal: true, Response: tool(fmt.Sprintf("worker-%d-%d", x.handoff, x.tools), "read_file", `{}`), BillingModel: c.Request.Model}, nil
 	}
-	return Outcome{Response: textResponse("Completed the current brief with tool evidence"), BillingModel: c.Request.Model}, nil
+	return Outcome{UsageFinal: true, Response: textResponse("Completed the current brief with tool evidence"), BillingModel: c.Request.Model}, nil
 }
 func (x *longFusionExecutor) Settle(_ context.Context, a Attempt) (float64, error) {
 	if x.billed == nil {

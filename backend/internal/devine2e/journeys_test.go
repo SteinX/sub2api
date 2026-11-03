@@ -40,7 +40,7 @@ func TestDevinClientUserJourneysMock(t *testing.T) {
 func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, admin, key, userPassword string, keyID, accountID int64) {
 	t.Helper()
 	shard := os.Getenv("DEVIN_JOURNEY_CI_SHARD")
-	require.Contains(t, []string{"", "contracts", "matrix"}, shard, "unknown mock shard must not silently omit coverage")
+	require.Contains(t, []string{"", "contracts", "bounded-long", "matrix"}, shard, "unknown mock shard must not silently omit coverage")
 	require.Equal(t, "mock", os.Getenv("DEVIN_E2E_MODE"), "CI shards are synthetic only")
 	shardScope := shard
 	if shardScope == "" {
@@ -88,14 +88,14 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 		require.NoError(t, err)
 		require.Zero(t, cost)
 	})
-	if shard != "matrix" {
+	if shard == "" || shard == "contracts" {
 		verifyNativeClientWorkflow(t, app, fixture, key, userPassword, keyID)
 	}
 	if os.Getenv("DEVIN_JOURNEY_NATIVE_POLICY_ONLY") == "true" {
 		return // Focused synthetic CLI regression; never an authorized live path.
 	}
 	profile := fusion.DefaultProfile("fusion-project-journey", fixtureModel, fixtureSidekick)
-	if shard != "matrix" && !t.Run("slow_catalog_timeout_and_manual_refresh", func(t *testing.T) {
+	if (shard == "" || shard == "contracts") && !t.Run("slow_catalog_timeout_and_manual_refresh", func(t *testing.T) {
 		verifyJourneyCatalogRecovery(t, app, fixture, key, userPassword)
 	}) {
 		t.Fatal("product catalog failure recovery did not complete")
@@ -118,34 +118,40 @@ func runUserJourneys(t *testing.T, app *application, fixture *nativeFixture, adm
 			verifyBoundedLongJourney(t, app, fixture, userPassword, profile.PublicModel, keyID)
 			return
 		}
-		verifyProjectToolAdmission(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
-		if os.Getenv("DEVIN_JOURNEY_TOOL_LIMITS_ONLY") == "true" {
-			return
+		if shard != "bounded-long" {
+			verifyProjectToolAdmission(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
+			if os.Getenv("DEVIN_JOURNEY_TOOL_LIMITS_ONLY") == "true" {
+				return
+			}
+			verifyProjectTestReceipts(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
+			verifyProjectFinalFailureClients(t, app, fixture, key, userPassword, keyID)
+			if os.Getenv("DEVIN_JOURNEY_EVIDENCE_ONLY") == "true" {
+				return // Only this explicitly synthetic runner has a focused evidence mode.
+			}
 		}
-		verifyProjectTestReceipts(t, app, fixture, key, userPassword, profile.PublicModel, keyID)
-		verifyProjectFinalFailureClients(t, app, fixture, key, userPassword, keyID)
-		if os.Getenv("DEVIN_JOURNEY_EVIDENCE_ONLY") == "true" {
-			return // Only this explicitly synthetic runner has a focused evidence mode.
-		}
+		// Keep the three preceding mutation scenarios in the long shard too:
+		// bounded-long must still prove it clears their failed fixture state.
 		verifyProjectMutationNegatives(t, app, fixture, key, userPassword, keyID)
 		preMatrixBilling = snapshotMockBilling(t, app, fixture, keyID)
 		preMatrixBilling["scope"] = "original synthetic key before independent bounded-long keys"
 		require.Equal(t, true, preMatrixBilling["available"], "retain unresolved fixture settlement, but a missing audit query cannot pass")
 		// Freeze the original key's denominator BEFORE independent long-fixture
 		// keys run. Their exact per-key call windows/SQL are reported separately.
-		longBilling = verifyBoundedLongJourney(t, app, fixture, userPassword, profile.PublicModel, keyID)
+		if shard != "contracts" {
+			longBilling = verifyBoundedLongJourney(t, app, fixture, userPassword, profile.PublicModel, keyID)
+		}
 	} else {
 		preMatrixBilling = snapshotMockBilling(t, app, fixture, keyID)
 		preMatrixBilling["scope"] = "matrix-shard setup only; excludes sibling contracts shard"
 		require.Equal(t, true, preMatrixBilling["available"])
 	}
-	if shard == "contracts" {
+	if shard == "contracts" || shard == "bounded-long" {
 		billing := aggregateMockBilling(append([]map[string]any{preMatrixBilling}, longBilling...))
-		billing["scope"] = "contracts shard only: original and bounded-long fixture keys; excludes sibling matrix"
-		writeAgentArtifact(t, "journey-contracts-summary.json", map[string]any{
+		billing["scope"] = shard + " shard only: original and any bounded-long fixture keys; excludes sibling shards"
+		writeAgentArtifact(t, "journey-"+shard+"-summary.json", map[string]any{
 			"schema_version": 1, "tier": "client_mock", "real_upstream": false, "eligible_for_real_e2e": false,
 			"source": journeySource(t, app), "mock_shard": shardScope, "status": "passed",
-			"scope":   "pre-matrix regressions only; sibling matrix is separately required",
+			"scope":   "this synthetic shard only; all sibling shards are separately required",
 			"billing": billing,
 		})
 		return

@@ -598,14 +598,15 @@ func (c *CacheKeepaliveController) Tick(ctx context.Context, scope, id string, e
 	cancel()
 	<-fenceDone
 	r.Attempt.Response = result.Outcome.Response
+	r.Attempt.UsageFinal = &result.Outcome.UsageFinal
 	r.Attempt.BillingModel = result.Outcome.BillingModel
 	r.Attempt.PricingSnapshot = result.Outcome.PricingSnapshot
 	r.DiscardedOutput = result.DiscardedOutput
 	r.RequestSucceeded = result.RequestSucceeded
 	r.CacheConfirmed = result.CacheConfirmed
-	if r.Attempt.Response != nil && r.Attempt.Response.Usage != nil && !result.UsageUncertain {
+	if apicompat.HasFinalUsage(r.Attempt.Response, r.Attempt.UsageFinal) && !result.UsageUncertain {
 		r.Attempt.Status = "completed"
-	} else if result.Outcome.KnownFailure {
+	} else if result.Outcome.KnownFailure && !result.Outcome.hasExecutionEvidence() {
 		r.Attempt.Status = "completed"
 		r.Attempt.Settled = true
 	} else {
@@ -774,6 +775,13 @@ func (c *CacheKeepaliveController) resumeAttempt(ctx context.Context, s *Session
 	if r.Attempt.Status == "completed" && !r.Attempt.Settled {
 		if c.Adapter == nil {
 			return E("billing_pending", "cache-refresh adapter is required to reconcile known usage", 503)
+		}
+		if r.Attempt.Response != nil && r.Attempt.Response.Usage != nil && !apicompat.HasFinalUsage(r.Attempt.Response, r.Attempt.UsageFinal) {
+			r.Attempt.Status = "unknown"
+			if err = c.writeRefresh(ctx, s, &r); err != nil {
+				return err
+			}
+			return c.finishRefresh(ctx, s, &r)
 		}
 		cost, err := c.Adapter.Settle(ctx, r.Snapshot, r.Attempt)
 		if err != nil || !validCost(cost) {

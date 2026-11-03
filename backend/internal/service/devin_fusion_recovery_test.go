@@ -441,11 +441,7 @@ func TestFusionGatewayDoesNotReissueAmbiguousGeneration(t *testing.T) {
 			require.EqualValues(t, 1, f.calls.Load())
 			_, _ = request()
 			require.EqualValues(t, 1, f.calls.Load(), "ambiguous or already billed inference cannot be reissued")
-			if failure == "usage-auth" {
-				require.Len(t, f.bills.commands, 1)
-			} else {
-				require.Empty(t, f.bills.commands)
-			}
+			require.Empty(t, f.bills.commands, "cumulative usage before a failed trailer is not final accounting")
 		})
 	}
 }

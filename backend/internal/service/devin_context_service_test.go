@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -217,6 +218,15 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 		return devinReply(200, b), nil
 	}}
 	repo := &fusionAccountRepo{account: a}
+	// Repository reads return a new account snapshot after configuration edits.
+	// Previously billed snapshots can still be read by async quota notifications.
+	setAccount := func(enabled, schedulable bool) {
+		next := *repo.account
+		next.Extra = maps.Clone(next.Extra)
+		next.Extra[DevinContextEnabledExtra] = enabled
+		next.Schedulable = schedulable
+		repo.account = &next
+	}
 	billing := &fusionBillingRepo{fail: true}
 	s := newOpenAIRecordUsageServiceWithBillingRepoForTest(&openAIRecordUsageLogRepoStub{inserted: true}, billing, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
 	s.cfg = cfg
@@ -246,8 +256,7 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 	require.NoError(t, readErr)
 	require.Equal(t, 1, calls)
 	billing.fail = false
-	a.Extra[DevinContextEnabledExtra] = false
-	a.Schedulable = false
+	setAccount(false, false)
 	contextMaintenancePass(context.Background(), s, s.devin, keys)
 	require.Equal(t, 1, calls)
 	require.Len(t, billing.commands, 1, "recovery settles known usage after rollout/account disable")
@@ -281,13 +290,13 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 	require.Error(t, err, "a channel edit still blocks new paid work")
 	require.Equal(t, 1, calls)
 	s.channelService = nil
-	a.Schedulable = true
+	setAccount(false, true)
 	s.concurrencyService = NewConcurrencyService(&stubConcurrencyCacheForTest{acquireResult: true})
 	_, err = request("blocked-second", first.SessionID, nextBody)
 	require.Error(t, err, "disabling the account blocks an existing session")
 	require.Equal(t, 1, calls, "disabled accounts must not dispatch or charge")
 	require.Len(t, billing.commands, 1)
-	a.Extra[DevinContextEnabledExtra] = true
+	setAccount(true, true)
 	next, err := request("second", first.SessionID, nextBody)
 	require.NoError(t, err)
 	require.Equal(t, 2, calls)
@@ -317,7 +326,7 @@ func TestContextGatewayToolContinuationBillingRecoveryAndSSE(t *testing.T) {
 	manual, err := compact()
 	require.NoError(t, err)
 	require.Equal(t, "no_op", manual.Job.State)
-	a.Schedulable = false
+	setAccount(true, false)
 	s.concurrencyService = nil
 	replayedManual, err := compact()
 	require.NoError(t, err, "terminal internal jobs replay without a schedulable account or inference slots")

@@ -141,6 +141,7 @@ type Attempt struct {
 	EstimateUSD     float64                   `json:"estimate_usd"`
 	ResponseRef     string                    `json:"response_ref,omitempty"`
 	Usage           *apicompat.ResponsesUsage `json:"usage,omitempty"`
+	UsageFinal      *bool                     `json:"usage_final,omitempty"`
 	ResponseID      string                    `json:"response_id,omitempty"`
 	ResponseModel   string                    `json:"response_model,omitempty"`
 	ResponseStatus  string                    `json:"response_status,omitempty"`
@@ -243,6 +244,7 @@ type Call struct {
 }
 type Outcome struct {
 	Response                 *apicompat.ResponsesResponse
+	UsageFinal               bool
 	BillingModel             string
 	PricingSnapshot          json.RawMessage
 	KnownFailure, NotStarted bool

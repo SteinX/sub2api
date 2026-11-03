@@ -506,7 +506,7 @@ func TestDevinCatalogPriceExpiredCandidateKeepsFrozenFallback(t *testing.T) {
 	result := &OpenAIForwardResult{RequestID: "expired-candidate-ordinary", Model: "gpt-5.5", BillingModel: futureFreeUID, UpstreamModel: "gpt-5.5", Usage: OpenAIUsage{InputTokens: 100}, devinPricing: p}
 	require.NoError(t, f.service.RecordUsage(context.Background(), &OpenAIRecordUsageInput{Result: result, APIKey: f.key, User: f.key.User, Account: f.account}))
 	require.InDelta(t, 100*2e-6, f.logs.lastLog.TotalCost, 1e-12)
-	a := fusion.Attempt{ID: "expired-candidate-fusion", Model: "gpt-5.5", BillingModel: futureFreeUID, StartedAt: now, PricingSnapshot: p.marshal(), Response: &apicompat.ResponsesResponse{Usage: &apicompat.ResponsesUsage{InputTokens: 100}}}
+	a := fusion.Attempt{ID: "expired-candidate-fusion", Model: "gpt-5.5", BillingModel: futureFreeUID, StartedAt: now, PricingSnapshot: p.marshal(), Response: &apicompat.ResponsesResponse{Status: "completed", Usage: &apicompat.ResponsesUsage{InputTokens: 100}}}
 	recovered := f.executor()
 	paid, err := recovered.Settle(context.Background(), a)
 	require.NoError(t, err)

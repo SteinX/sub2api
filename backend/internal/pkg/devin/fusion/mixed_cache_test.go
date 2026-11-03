@@ -30,7 +30,7 @@ func TestFusionQueuedHandoffsKeepLeadCacheAndSharedBudgetAcrossRestart(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			store := newMemoryStore()
 			clock := newCacheClock()
-			fake := &refreshFake{supported: true, result: RefreshResult{RequestSucceeded: true, CacheConfirmed: true, Outcome: Outcome{Response: &apicompat.ResponsesResponse{Status: "completed", Usage: &apicompat.ResponsesUsage{InputTokens: 40, TotalTokens: 40}}, BillingModel: "lead-real"}}}
+			fake := &refreshFake{supported: true, result: RefreshResult{RequestSucceeded: true, CacheConfirmed: true, Outcome: Outcome{UsageFinal: true, Response: &apicompat.ResponsesResponse{Status: "completed", Usage: &apicompat.ResponsesUsage{InputTokens: 40, TotalTokens: 40}}, BillingModel: "lead-real"}}}
 			engine := func() (*Engine, *CacheKeepaliveController) {
 				cache := NewCacheKeepaliveController(store)
 				cache.Now, cache.Adapter = clock.Now, fake

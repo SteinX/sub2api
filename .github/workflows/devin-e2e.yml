@@ -146,7 +146,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [contracts, matrix]
+        shard: [contracts, bounded-long, matrix]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -199,15 +199,16 @@ jobs:
           REPORT: ${{ runner.temp }}/devin-user-journeys/client-journeys.json
         run: python3 tools/devin-acceptance/acceptance.py verify --mode client_mock --report "$REPORT" --commit "$(git rev-parse HEAD)" --tree "$(git rev-parse HEAD^{tree})"
       - name: Validate source-bound regression summary
-        if: matrix.shard == 'contracts'
+        if: matrix.shard != 'matrix'
         env:
-          REPORT: ${{ runner.temp }}/devin-user-journeys/journey-contracts-summary.json
+          REPORT: ${{ runner.temp }}/devin-user-journeys/journey-${{ matrix.shard }}-summary.json
+          MOCK_SHARD: ${{ matrix.shard }}
         run: |
           python3 - <<'PYTHON'
           import json,os,subprocess
           from pathlib import Path
           report=json.loads(Path(os.environ['REPORT']).read_bytes())
-          assert report['status']=='passed' and report['mock_shard']=='contracts'
+          assert report['status']=='passed' and report['mock_shard']==os.environ['MOCK_SHARD']
           assert report['real_upstream'] is False and report['eligible_for_real_e2e'] is False
           assert report['source']['commit']==subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
           assert report['source']['tree']==subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip()

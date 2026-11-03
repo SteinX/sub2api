@@ -99,6 +99,42 @@ func TestFusionAdmissionForegroundWaitAndCancellation(t *testing.T) {
 	}
 }
 
+type fusionAdmissionCancelDuringReadStore struct {
+	fusion.AtomicStore
+	cancel context.CancelFunc
+	reads  int
+	raw    []byte
+	err    error
+}
+
+func (s *fusionAdmissionCancelDuringReadStore) Get(ctx context.Context, _ string) ([]byte, error) {
+	s.reads++
+	s.cancel()
+	return s.raw, s.err
+}
+
+func TestFusionAdmissionCancellationDuringReadKeepsContextError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+		err  error
+	}{
+		{name: "read_error", err: context.Canceled},
+		{name: "not_found", err: devin.ErrSessionNotFound},
+		{name: "completed_read", raw: []byte(`{"until":"2000-01-01T00:00:00Z"}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store := &fusionAdmissionCancelDuringReadStore{cancel: cancel, raw: tc.raw, err: tc.err}
+			s := &DevinService{store: store}
+			err := s.waitFusionAdmission(ctx, &Account{ID: 7}, "lead", fusion.Inference)
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, 1, store.reads, "cancellation must stop admission without a retry")
+		})
+	}
+}
+
 func TestFusionAdmissionDoesNotPersistAmbiguityOrAuthentication(t *testing.T) {
 	first, second := fusionAdmissionServices(t)
 	account := &Account{ID: 7}

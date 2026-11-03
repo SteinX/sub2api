@@ -275,7 +275,7 @@ func (x *fakeExecutor) Execute(ctx context.Context, c Call) (Outcome, error) {
 	if x.beforeReturn != nil {
 		x.beforeReturn(c)
 	}
-	return Outcome{Response: &apicompat.ResponsesResponse{ID: "physical_" + c.ID, Status: "completed", Model: c.Model, Output: output, Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 20, TotalTokens: 120}}, BillingModel: c.Model}, nil
+	return Outcome{UsageFinal: true, Response: &apicompat.ResponsesResponse{ID: "physical_" + c.ID, Status: "completed", Model: c.Model, Output: output, Usage: &apicompat.ResponsesUsage{InputTokens: 100, OutputTokens: 20, TotalTokens: 120}}, BillingModel: c.Model}, nil
 }
 func (x *fakeExecutor) Settle(_ context.Context, a Attempt) (float64, error) {
 	x.mu.Lock()

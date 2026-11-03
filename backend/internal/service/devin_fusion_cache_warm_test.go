@@ -121,6 +121,7 @@ func TestFusionWarmRechecksHydratedUserGroupGrants(t *testing.T) {
 			require.ErrorContains(t, err, "user group grant changed")
 			require.EqualValues(t, 1, f.calls.Load())
 			a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+			a.UsageFinal = &result.Outcome.UsageFinal
 			repo.err = errors.New("user authorization lookup unavailable")
 			_, err = f.adapter.Estimate(context.Background(), f.snapshot)
 			require.Error(t, err)
@@ -158,6 +159,7 @@ func TestFusionWarmHonorsAccountModelWhitelistAndMapping(t *testing.T) {
 			require.Error(t, err)
 			require.EqualValues(t, 1, f.calls.Load())
 			a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+			a.UsageFinal = &result.Outcome.UsageFinal
 			_, err = f.adapter.Settle(context.Background(), f.snapshot, a)
 			require.NoError(t, err, "model restrictions cannot erase existing fees")
 			require.Len(t, f.bills.commands, 1)
@@ -216,6 +218,7 @@ func TestFusionWarmCompositeQuotaSurvivesDetachedContext(t *testing.T) {
 	result, err := f.adapter.Refresh(context.Background(), f.snapshot, a)
 	require.NoError(t, err)
 	a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+	a.UsageFinal = &result.Outcome.UsageFinal
 	_, err = f.adapter.Settle(context.WithValue(context.Background(), ctxkey.ForcePlatform, PlatformOpenAI), f.snapshot, a)
 	require.NoError(t, err)
 	require.Equal(t, []string{PlatformDevin}, quota.writes)
@@ -248,6 +251,7 @@ func TestFusionWarmRechecksOriginalClientModelAllowlist(t *testing.T) {
 	require.EqualValues(t, 1, f.calls.Load())
 	// Revoking admission cannot erase fees already incurred under that alias.
 	a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+	a.UsageFinal = &result.Outcome.UsageFinal
 	_, err = f.adapter.Settle(context.Background(), f.snapshot, a)
 	require.NoError(t, err)
 	require.Len(t, f.bills.commands, 1)
@@ -569,6 +573,7 @@ func TestFusionWarmAdapterShapeBillingAndImmutableSnapshot(t *testing.T) {
 	require.Equal(t, 1, f.cache.count())
 	require.Empty(t, f.bills.commands)
 	a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+	a.UsageFinal = &result.Outcome.UsageFinal
 	cost, err := f.adapter.Settle(context.Background(), f.snapshot, a)
 	require.NoError(t, err)
 	require.InDelta(t, 4*4e-6+96*.2e-6+20e-6, cost, 1e-10)
@@ -695,6 +700,7 @@ func TestFusionWarmAdapterTerminalShapeAndUsageFailures(t *testing.T) {
 			require.Equal(t, 1, f.cache.count(), "observed/unknown usage must remain reserved")
 			if result.Outcome.Response != nil && result.Outcome.Response.Usage != nil && !result.UsageUncertain {
 				a.Response, a.BillingModel = result.Outcome.Response, result.Outcome.BillingModel
+				a.UsageFinal = &result.Outcome.UsageFinal
 				_, err = f.adapter.Settle(context.Background(), f.snapshot, a)
 				require.NoError(t, err)
 				require.Len(t, f.bills.commands, 1)
