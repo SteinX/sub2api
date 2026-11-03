@@ -1,0 +1,104 @@
+//go:build unit
+
+package service
+
+import (
+	"context"
+	"fmt"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/devin/fusion"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+)
+
+func TestDevinFusionClosingSelectorIsStrictAndSessionScoped(t *testing.T) {
+	f := newWarmFixture(t)
+	for _, values := range [][]string{nil, {fusion.ClosingReserveV1}, {""}, {"off"}, {"reserve-v2"}, {" reserve-v1"}, {fusion.ClosingReserveV1, fusion.ClosingReserveV1}} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+		for _, v := range values {
+			c.Request.Header.Add(fusion.HeaderClosingPolicy, v)
+		}
+		_, err := f.service.BindDevinFusionRequest(c, f.keys.key, f.session.PublicModel, fusionProtocolBody("responses", false, ""), "responses", f.keys)
+		if len(values) == 0 || len(values) == 1 && values[0] == fusion.ClosingReserveV1 {
+			require.NoError(t, err)
+			b, _ := c.Request.Context().Value(devinFusionBindingKey{}).(*devinFusionBinding)
+			require.NotNil(t, b)
+			if len(values) > 0 {
+				require.Equal(t, fusion.ClosingReserveV1, b.ClosingPolicy)
+			}
+		} else {
+			require.ErrorContains(t, err, "closing_policy_invalid")
+		}
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	c.Request.Header.Set(fusion.HeaderSession, f.session.ID)
+	c.Request.Header.Set(fusion.HeaderClosingPolicy, fusion.ClosingReserveV1)
+	_, err := f.service.BindDevinFusionRequest(c, f.keys.key, f.session.PublicModel, fusionProtocolBody("responses", false, ""), "responses", f.keys)
+	require.ErrorContains(t, err, "closing_policy_conflict")
+	require.Empty(t, devinFusionProfile(f.account, f.session.PublicModel).ClosingPolicy)
+	require.Zero(t, f.calls.Load())
+}
+
+func TestFusionWarmClosingOptInPreservesMutableAccountChecks(t *testing.T) {
+	f := newWarmFixture(t)
+	f.session.Profile.ClosingPolicy = fusion.ClosingReserveV1
+	f.session.ProfileRevision = f.session.Profile.Revision()
+	f.save(t)
+	f.snapshot.Profile = f.session.Profile
+	f.snapshot.ProfileRevision = f.session.ProfileRevision
+	f.snapshot.LaneScope = f.session.LaneScope(fusion.Lead)
+	_, err := f.adapter.Estimate(context.Background(), f.snapshot)
+	require.NoError(t, err)
+	require.Empty(t, devinFusionProfile(f.account, f.session.PublicModel).ClosingPolicy)
+	p := *devinFusionProfile(f.account, f.session.PublicModel)
+	p.MaxCostUSD += 1
+	f.account.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+	_, err = f.adapter.Estimate(context.Background(), f.snapshot)
+	require.ErrorContains(t, err, "authorization or route changed")
+	require.Zero(t, f.calls.Load())
+}
+
+func TestDevinFusionClosingCannotBeConfiguredAccountWide(t *testing.T) {
+	f := newWarmFixture(t)
+	p := *devinFusionProfile(f.account, f.session.PublicModel)
+	p.ClosingPolicy = fusion.ClosingReserveV1
+	require.NoError(t, p.Validate(), "internal pinned session profiles still understand the policy")
+	f.account.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+	_, err := devinFusionProfiles(f.account)
+	require.ErrorContains(t, err, "closing_policy is session-scoped")
+	require.ErrorContains(t, ValidateDevinFusionExtra(PlatformDevin, f.account.Extra), "closing_policy is session-scoped")
+	require.Nil(t, devinFusionProfile(f.account, f.session.PublicModel))
+	require.Zero(t, f.calls.Load())
+}
+
+func TestDevinFusionClosingSmallBudgetRejectedBeforeNativeInference(t *testing.T) {
+	for _, limit := range []int{3, 4} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			f := newWarmFixture(t)
+			p := *devinFusionProfile(f.account, f.session.PublicModel)
+			p.MaxRequests = limit
+			f.account.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+			body := fusionProtocolBody("responses", false, "")
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+			c.Request.Header.Set(fusion.HeaderSession, fmt.Sprintf("new-closing-small-%d", limit))
+			c.Request.Header.Set(fusion.HeaderClosingPolicy, fusion.ClosingReserveV1)
+			c.Set("api_key", f.keys.key)
+			_, err := f.service.BindDevinFusionRequest(c, f.keys.key, p.PublicModel, body, "responses", f.keys)
+			require.NoError(t, err)
+			_, err = f.service.forwardDevin(c.Request.Context(), c, f.account, body, "responses", "unused", "")
+			require.ErrorContains(t, err, "closing_policy_invalid")
+			require.Equal(t, 400, w.Code)
+			require.Zero(t, f.calls.Load())
+			require.Empty(t, f.bills.commands)
+			require.Equal(t, limit, devinFusionProfile(f.account, p.PublicModel).MaxRequests)
+		})
+	}
+}

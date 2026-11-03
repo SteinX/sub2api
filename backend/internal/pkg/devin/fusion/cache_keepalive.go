@@ -265,6 +265,9 @@ func (c *CacheKeepaliveController) Stop(ctx context.Context, s *Session, reason 
 	})
 }
 func activeSidekick(s *Session) bool {
+	if s.isClosing() {
+		return false
+	}
 	if len(s.Handoffs) == 0 || s.Handoffs[len(s.Handoffs)-1].Turn != s.Turn || s.Handoffs[len(s.Handoffs)-1].Report != "" {
 		return false
 	}
@@ -353,6 +356,9 @@ func (c *CacheKeepaliveController) Observe(ctx context.Context, s *Session) erro
 	}
 	if err := c.Resume(ctx, s); err != nil {
 		return err
+	}
+	if s.isClosing() {
+		return c.Stop(ctx, s, "budget_closing")
 	}
 	if !activeSidekick(s) {
 		if s.State == WaitingTool && s.Pending != nil && s.Pending.Role == Lead {

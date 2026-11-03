@@ -11,13 +11,14 @@ import (
 )
 
 type Engine struct {
-	Store         AtomicStore
-	Now           func() time.Time
-	Runner        *MaintenanceRunner
-	Cache         *CacheKeepaliveController
-	RouteIdentity string
-	CacheIdentity CacheIdentity
-	Observer      func(MaintenanceEvent)
+	Store            AtomicStore
+	Now              func() time.Time
+	Runner           *MaintenanceRunner
+	Cache            *CacheKeepaliveController
+	RouteIdentity    string
+	CacheIdentity    CacheIdentity
+	Observer         func(MaintenanceEvent)
+	WorkflowObserver func(WorkflowEvent)
 }
 
 func New(store devin.SessionStore) *Engine {
@@ -43,7 +44,7 @@ func (e *Engine) Load(ctx context.Context, scope, id string) (*Session, []byte, 
 		return nil, nil, err
 	}
 	var s Session
-	if json.Unmarshal(b, &s) != nil || s.Scope != scope || s.ID != id || s.ProfileRevision != s.Profile.Revision() {
+	if json.Unmarshal(b, &s) != nil || s.Scope != scope || s.ID != id || s.ProfileRevision != s.Profile.Revision() || ValidateClosingPolicy(s.Profile.ClosingPolicy) != nil {
 		return nil, nil, E("session_corrupt", "stored Fusion state failed validation", 503)
 	}
 	if !e.now().Before(s.ExpiresAt) {
@@ -271,7 +272,7 @@ func (e *Engine) recoverAttempt(ctx context.Context, s *Session, a *Attempt) err
 		return err
 	}
 	var saved Attempt
-	if json.Unmarshal(b, &saved) != nil || saved.ID != a.ID || saved.Role != a.Role || saved.Model != a.Model || saved.Turn != a.Turn || saved.RetryOf != a.RetryOf || saved.RecoveryKind != a.RecoveryKind || string(saved.RequestSnapshot) != string(a.RequestSnapshot) {
+	if json.Unmarshal(b, &saved) != nil || saved.ID != a.ID || saved.Role != a.Role || saved.Model != a.Model || saved.Turn != a.Turn || saved.RetryOf != a.RetryOf || saved.RecoveryKind != a.RecoveryKind || saved.ClosingPhase != a.ClosingPhase || string(saved.RequestSnapshot) != string(a.RequestSnapshot) {
 		return E("session_corrupt", "physical usage journal failed validation", 503)
 	}
 	if saved.Status == "completed" {

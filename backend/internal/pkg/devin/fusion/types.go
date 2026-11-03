@@ -20,6 +20,8 @@ const PolicyVersion = "gateway-fusion-v1"
 const DelegateTool = "sub2api_sidekick"
 const HeaderSession = "X-Sub2API-Fusion-Session"
 const HeaderCancel = "X-Sub2API-Fusion-Cancel"
+const HeaderClosingPolicy = "X-Sub2API-Fusion-Closing-Policy"
+const ClosingReserveV1 = "reserve-v1"
 const ExtraProfiles = "devin_fusion_profiles"
 
 type Profile struct {
@@ -37,9 +39,15 @@ type Profile struct {
 	TTLSeconds      int               `json:"session_ttl_seconds"`
 	Compaction      *CompactionPolicy `json:"compaction,omitempty"`
 	Keepalive       *KeepalivePolicy  `json:"cache_keepalive,omitempty"`
+	// A fresh session may opt in without changing the account profile. Including
+	// this optional field in Revision fences older readers on rollback.
+	ClosingPolicy string `json:"closing_policy,omitempty"`
 }
 
 func (p Profile) Validate() error {
+	if err := ValidateClosingPolicy(p.ClosingPolicy); err != nil {
+		return err
+	}
 	if len(p.PublicModel) > 128 || !strings.HasPrefix(strings.ToLower(p.PublicModel), "fusion-") || strings.TrimSpace(p.PublicModel) != p.PublicModel || strings.ContainsAny(p.PublicModel, " \t\r\n") {
 		return E("profile_invalid", "public_model must be a fusion-* identifier", 400)
 	}
@@ -53,6 +61,15 @@ func (p Profile) Validate() error {
 	}
 	if err := p.CompactPolicy().Validate(); err != nil {
 		return err
+	}
+	if p.ClosingPolicy != "" {
+		minimum := 3 // Initial delegation, actual Sidekick report and Lead review.
+		if p.CompactPolicy().Enabled {
+			minimum += 2 // One possible hard summary for each reporting role.
+		}
+		if p.MaxRequests < minimum {
+			return E("closing_policy_invalid", fmt.Sprintf("reserve-v1 requires at least %d counted requests for delegation, report, review and the configured summary reserve", minimum), 400)
+		}
 	}
 	return p.KeepalivePolicy().Validate()
 }
@@ -107,13 +124,26 @@ const (
 )
 
 type PendingTool struct {
-	PublicID   string `json:"public_id"`
-	InternalID string `json:"internal_id"`
-	Role       Role   `json:"role"`
-	Turn       int    `json:"turn"`
-	HandoffID  string `json:"handoff_id,omitempty"`
-	Name       string `json:"name"`
-	Arguments  string `json:"arguments"`
+	PublicID        string `json:"public_id"`
+	InternalID      string `json:"internal_id"`
+	Role            Role   `json:"role"`
+	Turn            int    `json:"turn"`
+	HandoffID       string `json:"handoff_id,omitempty"`
+	Name            string `json:"name"`
+	Arguments       string `json:"arguments"`
+	SourceAttemptID string `json:"source_attempt_id,omitempty"`
+}
+
+// ToolTrace records correlation, never a second copy of arguments/tool output.
+// The enclosing session CAS commits publication or result acceptance atomically.
+type ToolTrace struct {
+	PublicID        string    `json:"public_id"`
+	InternalID      string    `json:"internal_id"`
+	Role            Role      `json:"role"`
+	HandoffID       string    `json:"handoff_id,omitempty"`
+	SourceAttemptID string    `json:"source_attempt_id,omitempty"`
+	ResultBytes     int       `json:"result_bytes"`
+	At              time.Time `json:"at"`
 }
 type Handoff struct {
 	ID     string `json:"id"`
@@ -146,6 +176,7 @@ type Attempt struct {
 	NotStarted       bool                         `json:"not_started,omitempty"`
 	AdmissionPending bool                         `json:"admission_pending,omitempty"`
 	RequestSnapshot  json.RawMessage              `json:"request_snapshot,omitempty"`
+	ClosingPhase     string                       `json:"closing_phase,omitempty"`
 }
 type RequestRecord struct {
 	Key          string                       `json:"key"`
@@ -153,6 +184,9 @@ type RequestRecord struct {
 	Response     *apicompat.ResponsesResponse `json:"response,omitempty"`
 	Error        *Error                       `json:"error,omitempty"`
 	AttemptStart int                          `json:"attempt_start"`
+	ToolDispatch *ToolTrace                   `json:"tool_dispatch,omitempty"`
+	ToolResult   *ToolTrace                   `json:"tool_result,omitempty"`
+	Outcome      string                       `json:"outcome,omitempty"`
 }
 type Session struct {
 	ID              string                         `json:"id"`
@@ -188,6 +222,7 @@ type Session struct {
 	// Remaining emitted calls, including private delegations; child-role calls
 	// precede the suspended Lead tail. Only Pending is exposed to the client.
 	QueuedTools []PendingTool `json:"queued_tools,omitempty"`
+	Closing     *ClosingState `json:"closing,omitempty"`
 }
 
 func (s *Session) Lane(role Role) *[]apicompat.ResponsesInputItem {
@@ -301,11 +336,13 @@ type Input struct {
 	Profile                          Profile
 	Request                          *apicompat.ResponsesRequest
 	Cancel                           bool
+	ClosingPolicy                    string
 }
 type Result struct {
 	Response         *apicompat.ResponsesResponse
 	SessionID, State string
 	Replayed         bool
+	Outcome          string
 }
 
 // AtomicStore is required: a cache-only or process-local store is insufficient.

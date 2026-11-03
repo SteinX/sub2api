@@ -19,10 +19,11 @@ import (
 
 type devinFusionBindingKey struct{}
 type devinFusionBinding struct {
-	SessionID string
-	AccountID int64
-	Profile   *fusion.Profile
-	Updater   APIKeyQuotaUpdater
+	SessionID     string
+	AccountID     int64
+	Profile       *fusion.Profile
+	ClosingPolicy string
+	Updater       APIKeyQuotaUpdater
 }
 
 func DevinFusionRequest(ctx context.Context) bool {
@@ -51,6 +52,9 @@ func devinFusionProfiles(a *Account) ([]fusion.Profile, error) {
 	}
 	seen := map[string]bool{}
 	for _, p := range profiles {
+		if p.ClosingPolicy != "" {
+			return nil, fusion.E("profile_invalid", "closing_policy is session-scoped; use the request header instead of account profiles", 400)
+		}
 		if err = p.Validate(); err != nil {
 			return nil, err
 		}
@@ -286,10 +290,14 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 	if !configured && !hint {
 		return false, nil
 	}
+	closingPolicy, err := devinFusionClosingPolicy(c)
+	if err != nil {
+		return true, err
+	}
 	// Native client headers correlate ordinary model requests too. Adopt them
 	// only after identifying Fusion intent; they must not opt normal tool turns
 	// into Fusion's separate tool ownership and session validation.
-	explicitSession, err := devinFusionRequestSessionID(c)
+	explicitSession, err = devinFusionRequestSessionID(c)
 	if err != nil {
 		return true, err
 	}
@@ -307,7 +315,7 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 	if !configured && accountID == 0 {
 		return false, nil
 	}
-	binding := &devinFusionBinding{SessionID: id, AccountID: accountID, Updater: updater}
+	binding := &devinFusionBinding{SessionID: id, AccountID: accountID, Updater: updater, ClosingPolicy: closingPolicy}
 	var session *fusion.Session
 	if accountID > 0 {
 		session, _, err = engine.Load(ctx, scope, id)
@@ -315,6 +323,9 @@ func (s *OpenAIGatewayService) BindDevinFusionRequest(c *gin.Context, key *APIKe
 			return true, err
 		}
 		binding.Profile = &session.Profile
+		if closingPolicy != "" && closingPolicy != session.Profile.ClosingPolicy {
+			return true, fusion.E("closing_policy_conflict", "closing policy is pinned at session creation; use a new session", 409)
+		}
 		if session.Role == fusion.Lead && engine.Cache != nil {
 			// A Lead tool result can start a queued handoff without another
 			// Lead inference. Preserve that candidate; the engine fences warming

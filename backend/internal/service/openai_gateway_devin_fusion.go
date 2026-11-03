@@ -465,6 +465,11 @@ func (s *OpenAIGatewayService) forwardDevinFusion(ctx context.Context, c *gin.Co
 	}
 	if binding.Profile != nil {
 		p = *binding.Profile
+	} else if binding.ClosingPolicy != "" {
+		p.ClosingPolicy = binding.ClosingPolicy
+	}
+	if err = p.Validate(); err != nil {
+		return fail(err)
 	}
 	models, err := s.devin.Models(ctx, a)
 	if err != nil {
@@ -540,7 +545,10 @@ func (s *OpenAIGatewayService) forwardDevinFusion(ctx context.Context, c *gin.Co
 	engine.Observer = func(event fusion.MaintenanceEvent) {
 		log.Info("devin.fusion_maintenance", zap.String("component", "audit.devin.fusion"), zap.String("purpose", string(event.Purpose)), zap.String("role", string(event.Role)), zap.String("stage", event.Stage), zap.String("job_id", event.JobID), zap.String("reason", event.Reason), zap.Int("input_before", event.InputBefore), zap.Int("input_after", event.InputAfter))
 	}
-	result, err := engine.Advance(ctx, fusion.Input{Scope: fusion.Scope(key.UserID, key.ID), SessionID: x.sessionID, IdempotencyKey: c.GetHeader("Idempotency-Key"), AccountID: a.ID, Profile: p, Request: req}, x)
+	engine.WorkflowObserver = func(event fusion.WorkflowEvent) {
+		log.Info("devin.fusion_workflow", zap.String("component", "audit.devin.fusion"), zap.String("session_ref", event.SessionRef), zap.Int("turn", event.Turn), zap.String("role", string(event.Role)), zap.String("stage", event.Stage), zap.String("phase", event.Phase), zap.String("attempt_id", event.AttemptID), zap.String("public_call_id", event.PublicCallID), zap.Int("requests_used", event.Requests), zap.Int("request_limit", event.Limit), zap.Int("result_bytes", event.ResultBytes))
+	}
+	result, err := engine.Advance(ctx, fusion.Input{Scope: fusion.Scope(key.UserID, key.ID), SessionID: x.sessionID, IdempotencyKey: c.GetHeader("Idempotency-Key"), AccountID: a.ID, Profile: p, Request: req, ClosingPolicy: binding.ClosingPolicy}, x)
 	if err != nil {
 		if ctx.Err() != nil || x.clientDisconnected {
 			return &OpenAIForwardResult{Model: original, FusionUsageSettled: true, ClientDisconnect: true, Stream: req.Stream}, err

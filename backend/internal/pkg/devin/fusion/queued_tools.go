@@ -46,6 +46,9 @@ func validateToolBatch(s *Session, calls []apicompat.ResponsesOutput) error {
 	if tools > s.Profile.MaxTools-s.TurnTools || handoffs > s.Profile.MaxHandoffs-s.TurnHandoffs {
 		return E("budget_exhausted", "client tool or handoff budget exhausted", 409)
 	}
+	if s.closingEnabled() && handoffs > 0 && s.Profile.MaxRequests-s.TurnRequests < closingReserve(s, handoffs) {
+		return E("budget_exhausted", "delegation batch leaves insufficient request capacity for its reports and Lead review", 409)
+	}
 	return nil
 }
 
