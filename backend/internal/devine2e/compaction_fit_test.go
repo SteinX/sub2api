@@ -77,7 +77,7 @@ func TestDevinFusionCompactionFitPublicResponses(t *testing.T) {
 		case n == 7:
 			assert.Equal(t, lead, req.ChatModelUid)
 			assert.Contains(t, fmt.Sprint(req.ChatMessagePrompts), "Actual Sidekick report")
-			assert.NotContains(t, fmt.Sprint(req.ChatMessagePrompts), outputs[2])
+			assert.NotContains(t, fmt.Sprint(req.ChatMessagePrompts), "complete-source-2")
 			reply.DeltaText = "Lead reviewed the returned report and completed the original task"
 		default:
 			t.Errorf("unexpected extra generation %d", n)
@@ -87,7 +87,9 @@ func TestDevinFusionCompactionFitPublicResponses(t *testing.T) {
 			reply.StopReason = pb.StopReason_STOP_REASON_FUNCTION_CALL
 		}
 	}
-	a := newApplication(t, f, 3)
+	// SQL row IDs restart in each fixture database. Avoid reusing the Redis
+	// scheduler/account records from the preceding closing fixture (DB 3).
+	a := newApplication(t, f, 4)
 	admin := login(t, a, "admin@devin-e2e.invalid", a.password)
 	compliance := api(t, a, "GET", "/admin/compliance", admin, nil)
 	api(t, a, "POST", "/admin/compliance/accept", admin, map[string]string{"language": "en", "phrase": compliance.Get("ack_phrase_en").String()})
@@ -102,7 +104,7 @@ func TestDevinFusionCompactionFitPublicResponses(t *testing.T) {
 	created := api(t, a, "POST", "/keys", user, map[string]any{"name": "compaction-fit", "group_id": groupID})
 	key, keyID := created.Get("key").String(), created.Get("id").Int()
 	a.redactor.addSecret(key)
-	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), DB: 3})
+	rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:" + os.Getenv("DEVIN_E2E_REDIS_PORT"), Password: os.Getenv("DEVIN_E2E_REDIS_PASSWORD"), DB: a.redisDB})
 	t.Cleanup(func() { _ = rdb.Close() })
 	engine := fusion.New(devin.NewRedisSessionStore(rdb))
 	session := "compaction-fit-" + randomID()
@@ -134,7 +136,7 @@ func TestDevinFusionCompactionFitPublicResponses(t *testing.T) {
 		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
-		require.Equal(t, 200, resp.StatusCode, "error=%s", gjson.GetBytes(body, "error.code").String())
+		require.Equal(t, 200, resp.StatusCode, "error=%s fixture_catalog_calls=%d native_calls=%d", gjson.GetBytes(body, "error.code").String(), f.catalogCalls.Load(), native.Load())
 		var completed gjson.Result
 		for _, line := range strings.Split(string(body), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
@@ -172,6 +174,13 @@ func TestDevinFusionCompactionFitPublicResponses(t *testing.T) {
 	require.Equal(t, "applied", s.Contexts[fusion.Sidekick].Job.State)
 	require.True(t, s.Contexts[fusion.Sidekick].Job.Accounted)
 	require.NotEmpty(t, s.Handoffs[0].Report)
+	for _, attempt := range s.Attempts {
+		require.Equal(t, "completed", attempt.Status)
+		require.True(t, attempt.Applied)
+		require.True(t, attempt.Settled)
+		require.NotNil(t, attempt.UsageFinal)
+		require.True(t, *attempt.UsageFinal)
+	}
 	require.EqualValues(t, 7, native.Load())
 	db := agentDatabase(t, a)
 	var rows, unique, leadRows, workerRows, dedup int
