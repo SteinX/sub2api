@@ -371,6 +371,31 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 		}
 		return result, err
 	}
+	interrupted := func(cause error) (*Result, error) {
+		// A cancelled foreground can still have a durable summary receipt (or
+		// an expired unknown attempt). Reconcile it before choosing the session
+		// outcome, without extending the original execution deadline.
+		cleanup, release := context.WithTimeout(persistCtx, 30*time.Second)
+		defer release()
+		if err := e.collectCompactions(cleanup, s, raw, x); err != nil {
+			var typed *Error
+			if errors.As(err, &typed) && typed.Code == "devin_fusion_compaction_uncertain" {
+				return stop(err, Uncertain)
+			}
+			return result, err
+		}
+		if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
+			return stop(E("budget_exhausted", "Fusion turn wall-time budget exhausted", 409), BudgetExhausted)
+		}
+		e.Runner.Cancel(s.Scope, s.ID)
+		if e.Cache != nil {
+			_ = e.Cache.Stop(cleanup, s, "client_disconnected")
+		}
+		if err := e.save(cleanup, s, raw); err != nil {
+			return result, err
+		}
+		return result, cause
+	}
 	for {
 		result.State = s.State
 		pendingAttempt, inferenceErr := e.reconcileInference(persistCtx, s, raw, x)
@@ -499,17 +524,7 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			return stop(E("cancelled", "Fusion session was cancelled", 409), Cancelled)
 		}
 		if err := ctx.Err(); err != nil { // Drain already completed; do not start another role.
-			e.Runner.Cancel(s.Scope, s.ID)
-			if e.Cache != nil {
-				_ = e.Cache.Stop(persistCtx, s, "client_disconnected")
-			}
-			if saveErr := e.save(persistCtx, s, raw); saveErr != nil {
-				return result, saveErr
-			}
-			if !e.now().Before(s.TurnStarted.Add(time.Duration(s.Profile.MaxWallSeconds) * time.Second)) {
-				return stop(E("budget_exhausted", "Fusion turn wall-time budget exhausted", 409), BudgetExhausted)
-			}
-			return result, err
+			return interrupted(err)
 		}
 		if s.TurnRequests >= s.Profile.MaxRequests || s.TurnCostUSD >= s.Profile.MaxCostUSD || e.now().Sub(s.TurnStarted) >= time.Duration(s.Profile.MaxWallSeconds)*time.Second {
 			return stop(E("budget_exhausted", "Fusion turn request, cost or wall-time budget exhausted", 409), BudgetExhausted)
@@ -526,6 +541,9 @@ func (e *Engine) run(ctx context.Context, s *Session, raw *[]byte, base *apicomp
 			req, err = e.prepareRoleContext(ctx, s, raw, base, x)
 		}
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return interrupted(err)
+			}
 			var typed *Error
 			if errors.As(err, &typed) {
 				if typed.Code == "devin_fusion_billing_pending" || typed.Code == "devin_fusion_compaction_pending" {
