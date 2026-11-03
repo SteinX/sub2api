@@ -357,6 +357,9 @@ func (c *CacheKeepaliveController) Observe(ctx context.Context, s *Session) erro
 	if err := c.Resume(ctx, s); err != nil {
 		return err
 	}
+	if s.isClosing() {
+		return c.Stop(ctx, s, "budget_closing")
+	}
 	if !activeSidekick(s) {
 		if s.State == WaitingTool && s.Pending != nil && s.Pending.Role == Lead {
 			for _, call := range s.QueuedTools {

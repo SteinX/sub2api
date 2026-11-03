@@ -52,6 +52,9 @@ func devinFusionProfiles(a *Account) ([]fusion.Profile, error) {
 	}
 	seen := map[string]bool{}
 	for _, p := range profiles {
+		if p.ClosingPolicy != "" {
+			return nil, fusion.E("profile_invalid", "closing_policy is session-scoped; use the request header instead of account profiles", 400)
+		}
 		if err = p.Validate(); err != nil {
 			return nil, err
 		}

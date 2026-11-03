@@ -62,3 +62,16 @@ func TestFusionWarmClosingOptInPreservesMutableAccountChecks(t *testing.T) {
 	require.ErrorContains(t, err, "authorization or route changed")
 	require.Zero(t, f.calls.Load())
 }
+
+func TestDevinFusionClosingCannotBeConfiguredAccountWide(t *testing.T) {
+	f := newWarmFixture(t)
+	p := *devinFusionProfile(f.account, f.session.PublicModel)
+	p.ClosingPolicy = fusion.ClosingReserveV1
+	require.NoError(t, p.Validate(), "internal pinned session profiles still understand the policy")
+	f.account.Extra[fusion.ExtraProfiles] = []fusion.Profile{p}
+	_, err := devinFusionProfiles(f.account)
+	require.ErrorContains(t, err, "closing_policy is session-scoped")
+	require.ErrorContains(t, ValidateDevinFusionExtra(PlatformDevin, f.account.Extra), "closing_policy is session-scoped")
+	require.Nil(t, devinFusionProfile(f.account, f.session.PublicModel))
+	require.Zero(t, f.calls.Load())
+}

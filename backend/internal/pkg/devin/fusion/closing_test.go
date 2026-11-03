@@ -333,6 +333,88 @@ func TestFusionClosingUnknownStoredPolicyCannotSilentlyResume(t *testing.T) {
 	requireCode(t, err, "session_corrupt")
 }
 
+func TestFusionClosingAccountsPreparedSummaryOnceAndSkipsOptionalWork(t *testing.T) {
+	e, s, raw, base := summarySession(t, Sidekick)
+	s.Profile.MaxRequests = 20
+	s.Profile.ClosingPolicy = ClosingReserveV1
+	s.ProfileRevision = s.Profile.Revision()
+	s.TurnRequests = 15
+	require.NoError(t, e.save(context.Background(), s, &raw))
+	x := &summaryExecutor{response: summaryResponse(), started: make(chan struct{}), finish: make(chan struct{})}
+	ok, err := e.prepareCompaction(context.Background(), s, &raw, base, x, true)
+	require.NoError(t, err)
+	require.True(t, ok)
+	select {
+	case <-x.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("summary did not start")
+	}
+	started, err := e.updateClosing(context.Background(), s, &raw)
+	require.NoError(t, err)
+	require.True(t, started)
+	require.Equal(t, 16, s.TurnRequests)
+	close(x.finish)
+	require.Eventually(t, func() bool {
+		r, _, err := e.readCompaction(context.Background(), s, s.roleContext(Sidekick).Job)
+		return err == nil && r.Attempt.Settled && r.Job.State == "ready"
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, e.collectCompactions(context.Background(), s, &raw, x))
+	for range 2 {
+		ok, err = e.prepareCompaction(context.Background(), s, &raw, base, x, true)
+		require.NoError(t, err)
+		require.False(t, ok)
+		require.NoError(t, e.collectCompactions(context.Background(), s, &raw, x))
+	}
+	require.Equal(t, 16, s.TurnRequests)
+	require.Zero(t, s.AuxReservedUSD)
+	x.mu.Lock()
+	require.Len(t, x.calls, 1)
+	require.Len(t, x.billed, 1)
+	require.InDelta(t, .1, x.charged, 1e-9)
+	x.mu.Unlock()
+	require.InDelta(t, .1, s.TurnCostUSD, 1e-9)
+}
+
+func TestFusionClosingStopsCacheAcrossAcceptedQueuedHandoff(t *testing.T) {
+	for _, queued := range []bool{false, true} {
+		t.Run(fmt.Sprintf("queued_%t", queued), func(t *testing.T) {
+			e, s, c, clock, x := cacheFixture(t)
+			_, raw, err := e.Load(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			s.Profile.ClosingPolicy = ClosingReserveV1
+			s.Profile.MaxRequests = 20
+			s.ProfileRevision = s.Profile.Revision()
+			s.TurnRequests = 16
+			require.NoError(t, e.save(context.Background(), s, &raw))
+			req := testRequest("immutable private prefix")
+			req.Model = s.Profile.LeadModel
+			require.NoError(t, c.Capture(context.Background(), s, req, "lead", "route"))
+			state, _, err := c.Load(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.Equal(t, "ARMED", state.State)
+			if queued {
+				s.Handoffs[len(s.Handoffs)-1].Report = "actual prior report"
+				s.Role = Lead
+				s.State = WaitingTool
+				s.Pending = &PendingTool{Role: Lead, Turn: s.Turn, PublicID: "pending", InternalID: "native", Name: "read_file", Arguments: `{}`}
+				s.QueuedTools = []PendingTool{{Role: Lead, Turn: s.Turn, PublicID: "queued", InternalID: "delegate", Name: DelegateTool, Arguments: `{"task":"task","acceptance_criteria":"report evidence"}`}}
+			}
+			_, err = e.updateClosing(context.Background(), s, &raw)
+			require.NoError(t, err)
+			require.NoError(t, c.Observe(context.Background(), s))
+			clock.Advance(10 * time.Second)
+			require.NoError(t, c.Tick(context.Background(), s.Scope, s.ID, state.Epoch, state.WindowID))
+			state, _, err = c.Load(context.Background(), s.Scope, s.ID)
+			require.NoError(t, err)
+			require.Equal(t, "STOPPED", state.State)
+			require.Equal(t, "budget_closing", state.StopReason)
+			require.Zero(t, x.calls)
+			require.Zero(t, state.ReservedUSD)
+			require.Empty(t, state.Pending)
+		})
+	}
+}
+
 func TestFusionClosingPreservesAcceptedMixedQueueAcrossRestarts(t *testing.T) {
 	store := newMemoryStore()
 	in := input(testRequest("task"))
